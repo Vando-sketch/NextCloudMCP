@@ -1,0 +1,33 @@
+"""User-facing exceptions raised by this server.
+
+These are deliberately separate from caldav/requests exceptions so that
+tool code never leaks raw stack traces or library internals to the MCP
+client - see :mod:`nextcloud_task_mcp.caldav_client` for the translation
+layer that converts library exceptions into these.
+"""
+
+from __future__ import annotations
+
+
+class TaskMcpError(Exception):
+    """Base class for all user-facing errors raised by this server."""
+
+
+class ConnectionFailedError(TaskMcpError):
+    """Raised when the CalDAV server can't be reached or times out."""
+
+
+class AuthenticationFailedError(TaskMcpError):
+    """Raised when Nextcloud rejects the configured CalDAV credentials."""
+
+
+class TaskListNotFoundError(TaskMcpError):
+    """Raised when the requested task list does not exist."""
+
+
+class TaskNotFoundError(TaskMcpError):
+    """Raised when the requested task UID does not exist in the given list."""
+
+
+class InvalidTaskDataError(TaskMcpError):
+    """Raised when task field values can't be mapped to valid iCalendar data."""

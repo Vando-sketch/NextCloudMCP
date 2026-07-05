@@ -1,0 +1,39 @@
+[project]
+name = "nextcloud-task-mcp"
+version = "0.1.0"
+description = "MCP server for managing Nextcloud Tasks (CalDAV VTODOs) via natural language"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Vando" }]
+dependencies = [
+    "fastmcp>=2.9,<3",
+    "caldav>=3.0,<4",
+    "icalendar>=6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+nextcloud-task-mcp = "nextcloud_task_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nextcloud_task_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
