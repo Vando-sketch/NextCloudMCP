@@ -112,7 +112,7 @@ def test_update_task_applies_fields_and_saves(service, principal):
     todo.add("summary", "Alt")
     todo_obj = MagicMock()
     todo_obj.icalendar_component = todo
-    calendar.object_by_uid.return_value = todo_obj
+    calendar.get_todo_by_uid.return_value = todo_obj
 
     service.update_task("Personal", "abc", titel="Neu")
 
@@ -123,7 +123,7 @@ def test_update_task_applies_fields_and_saves(service, principal):
 def test_update_task_not_found_raises(service, principal):
     calendar = MagicMock()
     principal.calendar.return_value = calendar
-    calendar.object_by_uid.side_effect = caldav_error.NotFoundError("no such task")
+    calendar.get_todo_by_uid.side_effect = caldav_error.NotFoundError("no such task")
 
     with pytest.raises(TaskNotFoundError):
         service.update_task("Personal", "missing-uid", titel="x")
@@ -137,7 +137,7 @@ def test_complete_task_marks_completed(service, principal):
     todo.add("uid", "abc")
     todo_obj = MagicMock()
     todo_obj.icalendar_component = todo
-    calendar.object_by_uid.return_value = todo_obj
+    calendar.get_todo_by_uid.return_value = todo_obj
 
     service.complete_task("Personal", "abc")
 
@@ -150,7 +150,7 @@ def test_delete_task_calls_delete(service, principal):
     calendar = MagicMock()
     principal.calendar.return_value = calendar
     todo_obj = MagicMock()
-    calendar.object_by_uid.return_value = todo_obj
+    calendar.get_todo_by_uid.return_value = todo_obj
 
     service.delete_task("Personal", "abc")
 
