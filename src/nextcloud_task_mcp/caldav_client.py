@@ -76,7 +76,7 @@ class CalDavService:
 
     def _get_todo(self, calendar: caldav.Calendar, task_uid: str):
         try:
-            return calendar.object_by_uid(task_uid, comp_class=Todo)
+            return calendar.get_todo_by_uid(task_uid)
         except caldav_error.NotFoundError as exc:
             raise TaskNotFoundError(f"Task '{task_uid}' was not found.") from exc
         except Exception as exc:
