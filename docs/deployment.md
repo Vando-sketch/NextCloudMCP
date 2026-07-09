@@ -1,22 +1,26 @@
 # Deployment guide
 
 This guide covers the intended production setup: the server running on an Ubuntu LXC
-container, reachable only over a private [Tailscale](https://tailscale.com) network, with
-`tailscale serve` terminating TLS in front of it.
+container, reachable from the **public internet** over a [Tailscale](https://tailscale.com)
+Funnel, with `tailscale funnel` terminating TLS in front of it.
 
 ```
-Claude (custom connector)
-        │  HTTPS (Tailscale cert)
+Claude (custom connector, cloud-side)
+        │  HTTPS (Tailscale Funnel cert)
         ▼
-tailscale serve  ──►  nextcloud-task-mcp (127.0.0.1:8000, plain HTTP)
+tailscale funnel  ──►  nextcloud-task-mcp (127.0.0.1:8000, plain HTTP)
                               │  HTTPS + app password
                               ▼
                       Nextcloud (CalDAV)
 ```
 
-The server itself never handles TLS and never listens on a public interface. Its only
-own protection is the static bearer token — appropriate here because the transport
-security and network access control are provided by Tailscale.
+The server itself never handles TLS. Unlike a plain `tailscale serve` setup, **Funnel
+exposes the server to the entire internet**, not just your tailnet - this is required
+because Claude's connector performs the OAuth flow (and later, tool calls) from
+Anthropic's servers, which cannot reach into a private tailnet. The server's own
+authentication (OAuth 2.1 via `PersonalAuthProvider`, see the
+[README](../README.md#authentication)) is what protects it now that network-level
+isolation from Tailscale is gone for this service.
 
 ## 1. Install on the container
 
@@ -38,15 +42,29 @@ Create `/etc/nextcloud-task-mcp.env` (root-owned, mode `600` — it contains sec
 NEXTCLOUD_CALDAV_URL=https://cloud.example.com/remote.php/dav/
 NEXTCLOUD_USERNAME=<nextcloud user>
 NEXTCLOUD_APP_PASSWORD=<app password from Settings -> Security>
-MCP_AUTH_TOKEN=<long random token>
+
+# Must match the public Funnel URL exactly (scheme + host), set up in step 4.
+PUBLIC_BASE_URL=https://<hostname>.<tailnet>.ts.net
+
+# Required for any non-localhost PUBLIC_BASE_URL - the server refuses to
+# start without it. This is the actual security gate on the OAuth /authorize
+# step now that the server is reachable from the public internet; the
+# redirect-domain allow-list alone does not stop a scripted client from
+# self-issuing a token. See README > Authentication.
+MCP_OAUTH_PASSWORD=<long random value>
+
+# OAuth client/token state persists here across restarts - must be writable
+# by the "mcp" user. Matches the systemd StateDirectory set up below.
+MCP_OAUTH_STATE_DIR=/var/lib/nextcloud-task-mcp/oauth-state
+
 MCP_HOST=127.0.0.1
 MCP_PORT=8000
 ```
 
-Generate the token with:
+Generate the OAuth password with:
 
 ```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
 ## 3. systemd service
@@ -73,6 +91,9 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/mcp/NextCloudTaskMCP/.venv
+# Owned by "mcp", auto-created at /var/lib/nextcloud-task-mcp, writable even
+# under ProtectSystem=strict. Holds the persisted OAuth client/token state.
+StateDirectory=nextcloud-task-mcp
 
 [Install]
 WantedBy=multi-user.target
@@ -84,29 +105,70 @@ sudo systemctl enable --now nextcloud-task-mcp
 sudo systemctl status nextcloud-task-mcp
 ```
 
-## 4. Expose via Tailscale
+## 4. Expose via Tailscale Funnel
 
 ```bash
-sudo tailscale serve --bg 8000
+sudo tailscale funnel --bg 8000
 ```
 
 This publishes `https://<hostname>.<tailnet>.ts.net/` (TLS certificate managed by
-Tailscale) and proxies it to `127.0.0.1:8000`. Only devices in your tailnet can reach it.
-Check with:
+Tailscale) to the **public internet** and proxies it to `127.0.0.1:8000`. Check with:
 
 ```bash
-tailscale serve status
+tailscale funnel status
+```
+
+Funnel must be enabled for this node in your tailnet's admin console first
+(**Settings → Funnel** at [login.tailscale.com](https://login.tailscale.com)) - unlike
+`tailscale serve`, it's not on by default. If `tailscale funnel` refuses to start, this is
+almost always why.
+
+Make sure `PUBLIC_BASE_URL` in step 2 matches this URL exactly, then (re)start the
+service so it picks up the value:
+
+```bash
+sudo systemctl restart nextcloud-task-mcp
 ```
 
 ## 5. Connect Claude
 
-Add a custom connector with:
+### Claude.ai (web) — syncs to mobile automatically
 
-- **URL:** `https://<hostname>.<tailnet>.ts.net/mcp` (note the `/mcp` path)
-- **Authentication:** Bearer token, the value of `MCP_AUTH_TOKEN`
+**Settings → Connectors → Add custom connector**, URL:
+`https://<hostname>.<tailnet>.ts.net/mcp`. Leave any Client ID/Secret fields blank -
+Dynamic Client Registration handles that. Approve the OAuth prompt that opens in your
+browser. See the [README](../README.md#registering-the-connector-in-claude) for details.
 
-The device running the Claude client must be part of the same tailnet (or the request
-must be routed through one that is).
+### Claude Desktop
+
+Claude Desktop's remote-connector support goes through the
+[`mcp-remote`](https://github.com/geelen/mcp-remote) bridge, which handles the OAuth flow
+locally (opens a browser for one-time auth). Add to `claude_desktop_config.json`
+(`~/Library/Application Support/Claude/` on macOS):
+
+```json
+{
+  "mcpServers": {
+    "nextcloud-task-mcp": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://<hostname>.<tailnet>.ts.net/mcp"]
+    }
+  }
+}
+```
+
+Requires Node.js.
+
+### Claude Code
+
+```bash
+claude mcp add nextcloud-task-mcp --transport http "https://<hostname>.<tailnet>.ts.net/mcp"
+```
+
+### Claude mobile (iOS/Android)
+
+Add the connector on claude.ai web (above) - it syncs to mobile automatically. Connectors
+can't be added directly from the mobile app.
 
 ## Updating
 
@@ -121,10 +183,14 @@ sudo systemctl restart nextcloud-task-mcp
 
 | Symptom | Likely cause |
 |---|---|
-| Claude gets "Missing or invalid bearer token" | Connector token doesn't match `MCP_AUTH_TOKEN` on the server |
+| Claude.ai says "error connecting" while adding the connector | `PUBLIC_BASE_URL` doesn't exactly match the Funnel URL (scheme/host mismatch breaks OAuth discovery); or the server isn't reachable from the internet yet (check `tailscale funnel status`) |
+| OAuth prompt appears but authorization fails | `MCP_OAUTH_PASSWORD` wasn't satisfied - it's checked against the `state` OAuth parameter, which Claude's client generates and this project cannot verify it can supply. The server deliberately does **not** log request query strings (that would log the password itself - see README > Authentication), so debug this by inspecting the actual `/authorize` request Claude's browser flow makes (e.g. browser dev tools network tab) rather than server logs. Or: the redirect domain isn't in `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (only relevant if you changed the default) |
+| Service fails to start: `MCP_OAUTH_PASSWORD is required...` | `PUBLIC_BASE_URL` isn't localhost and `MCP_OAUTH_PASSWORD` is unset - this is enforced deliberately, set the password (step 2) |
+| `401` calling `/mcp` after Claude was previously connected | Access token expired or was revoked; disconnect and reconnect the connector in Claude to re-run the OAuth flow |
+| OAuth state lost after a restart | `MCP_OAUTH_STATE_DIR` isn't pointing at a persistent, writable path - confirm the systemd `StateDirectory` is set and matches |
 | "Nextcloud rejected the CalDAV credentials" | Wrong username or expired/revoked app password |
 | "Could not reach the Nextcloud server" | Nextcloud down, or the container can't resolve/route to it |
-| Connector can't connect at all | `tailscale serve` not running, wrong `/mcp` path, or client device not in the tailnet |
+| `tailscale funnel` refuses to start | Funnel not enabled for this node in the tailnet admin console (Settings → Funnel) |
 
 Server logs: `journalctl -u nextcloud-task-mcp -f`. Unexpected internal errors are logged
 there with full tracebacks, while the MCP client only ever sees a short generic message.

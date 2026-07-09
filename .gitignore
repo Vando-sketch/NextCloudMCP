@@ -16,4 +16,7 @@ build/
 .env
 .env.local
 
+# Persisted OAuth clients/tokens (PersonalAuthProvider), contains secrets.
+.oauth-state/
+
 .DS_Store

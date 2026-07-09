@@ -8,10 +8,10 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
-from .auth import BearerTokenMiddleware
 from .caldav_client import CalDavService
 from .config import Settings
 from .errors import TaskMcpError
+from .personal_auth import PersonalAuthProvider
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,19 @@ def _call(fn, *args: Any, **kwargs: Any) -> Any:
 
 
 def build_server(settings: Settings, service: CalDavService | None = None) -> FastMCP:
-    """Construct the FastMCP server with auth middleware and all task tools registered.
+    """Construct the FastMCP server with OAuth 2.1 auth and all task tools registered.
 
     `service` can be injected for testing; defaults to a real CalDavService
     built from `settings`.
     """
-    mcp = FastMCP(name="nextcloud-task-mcp")
-    mcp.add_middleware(BearerTokenMiddleware(settings.auth_token))
+    auth = PersonalAuthProvider(
+        base_url=settings.public_base_url,
+        password=settings.oauth_password,
+        allowed_redirect_domains=settings.oauth_allowed_redirect_domains,
+        access_token_expiry_seconds=settings.oauth_access_token_expiry_seconds,
+        state_dir=settings.oauth_state_dir,
+    )
+    mcp = FastMCP(name="nextcloud-task-mcp", auth=auth)
 
     caldav_service = service or CalDavService(
         url=settings.caldav_url,
@@ -210,7 +216,17 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = Settings.from_env()
     mcp = build_server(settings)
-    mcp.run(transport="http", host=settings.host, port=settings.port)
+    # PersonalAuthProvider's /authorize gate reads MCP_OAUTH_PASSWORD out of the
+    # `state`/`scope` query string (see personal_auth.py). Uvicorn's default access
+    # log records the full request path including the query string, which would
+    # otherwise write that password in plaintext into server logs on every
+    # authorization - the exact secret this deployment relies on once public.
+    mcp.run(
+        transport="http",
+        host=settings.host,
+        port=settings.port,
+        uvicorn_config={"access_log": False},
+    )
 
 
 if __name__ == "__main__":
