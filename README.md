@@ -17,12 +17,14 @@ Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, an
 
 - One CalDAV connection is opened at startup and reused for every request (no
   reconnect-per-call).
-- Every incoming MCP request must carry a static bearer token
-  (`Authorization: Bearer <token>`), checked by a middleware before any tool or CalDAV
-  logic runs.
+- The server authenticates MCP clients with OAuth 2.1 (Dynamic Client Registration +
+  PKCE), via [`PersonalAuthProvider`](https://github.com/crumrine/fastmcp-personal-auth).
+  No tool or CalDAV logic runs until a request carries a valid access token. See
+  [Authentication](#authentication) below.
 - The server binds to a local HTTP port only (e.g. `127.0.0.1:8000`). It does not handle
-  TLS itself - in the intended deployment, `tailscale serve` terminates TLS in front of it
-  and only devices on your tailnet can reach it.
+  TLS itself - in the intended deployment, `tailscale funnel` terminates TLS in front of
+  it and exposes it to the public internet (required so Claude's backend can reach it and
+  complete the OAuth flow).
 - CalDAV/network failures (auth errors, timeouts, missing task lists/UIDs, ...) are caught
   and turned into short, clean error messages - no raw stack traces are ever returned to
   the MCP client.
@@ -34,7 +36,7 @@ Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync
 cp .env.example .env
-# edit .env with your Nextcloud CalDAV URL, an app password, and a bearer token
+# edit .env with your Nextcloud CalDAV URL, an app password, and PUBLIC_BASE_URL
 ```
 
 Generate a Nextcloud app password under **Settings → Security → Devices & sessions**
@@ -44,11 +46,8 @@ Generate a Nextcloud app password under **Settings → Security → Devices & se
 https://<your-nextcloud-domain>/remote.php/dav/
 ```
 
-Generate a random bearer token, e.g.:
-
-```bash
-python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-```
+`PUBLIC_BASE_URL` is the exact URL clients will use to reach this server - see
+[Authentication](#authentication) below for why this has to match precisely.
 
 Run the server:
 
@@ -58,8 +57,80 @@ uv run nextcloud-task-mcp
 ```
 
 It listens on `MCP_HOST:MCP_PORT` (default `127.0.0.1:8000`) at the `/mcp` path, using the
-Streamable HTTP transport. Point your Claude custom connector at
-`http://<host>:<port>/mcp` with the configured bearer token.
+Streamable HTTP transport.
+
+## Authentication
+
+The server authenticates MCP clients with **OAuth 2.1** (Dynamic Client Registration +
+PKCE), via [`PersonalAuthProvider`](https://github.com/crumrine/fastmcp-personal-auth) -
+vendored into [`src/nextcloud_task_mcp/personal_auth.py`](src/nextcloud_task_mcp/personal_auth.py)
+since it ships as a single file to copy in, not an installable package. There is no
+static bearer token to configure.
+
+This exists because Claude's connector UI (web, mobile, Desktop, Cowork) only exposes
+OAuth fields for custom connectors - it has no field for a raw static token. OAuth is
+also what makes the server usable from Claude mobile at all, since mobile has no config
+file to hand-edit.
+
+How it's secured, since anyone on the internet can reach the OAuth discovery and
+registration endpoints once the server is public:
+
+- **Dynamic Client Registration is intentionally open** (`/register` accepts any client) -
+  this is required for Claude.ai's connector flow and is not itself a security boundary.
+- **The redirect-domain allow-list is *not*, by itself, a security boundary.** A script
+  never has to actually control a listed domain (e.g. `claude.ai`) to pass this check -
+  it only has to *claim* a matching `redirect_uri` when calling `/authorize`, and the
+  authorization code comes back directly in that same HTTP response. Configurable via
+  `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`, but don't rely on it alone.
+- **`MCP_OAUTH_PASSWORD` is the actual security gate**, and is required (the server
+  refuses to start without it) whenever `PUBLIC_BASE_URL` isn't `localhost`/`127.0.0.1`.
+  Without it, anyone who can reach the server can self-issue a valid access token - see
+  [deployment guide](docs/deployment.md) for how it's checked.
+- **Access tokens are opaque random strings** (not JWTs with inspectable claims) and are
+  persisted to `MCP_OAUTH_STATE_DIR` (default `.oauth-state/oauth_tokens.json`, gitignored)
+  so they survive server restarts.
+- The `/mcp` endpoint itself rejects any request without a valid `Authorization: Bearer
+  <access-token>` header before any tool or CalDAV logic runs.
+- The server disables Uvicorn's default HTTP access log (`uvicorn_config={"access_log":
+  False}` in `server.py`), since the default format logs the full request path
+  *including the query string* - and `MCP_OAUTH_PASSWORD` is delivered to `/authorize`
+  via a query parameter (see below). Without this, the password would be written in
+  plaintext to server logs (e.g. `journalctl`) on every authorization.
+
+**Local security patches.** The vendored `PersonalAuthProvider` carries two fixes for
+upstream issues found while building this integration, both confirmed by live
+reproduction against a running instance, not just by reading the code - see the "LOCAL
+PATCHES" note at the top of [`personal_auth.py`](src/nextcloud_task_mcp/personal_auth.py):
+1. The password check had a dead-code fallback that could never evaluate false, so *any*
+   password (or none) was accepted as long as the redirect domain matched the allow-list.
+2. The password could be supplied via the OAuth `scope` parameter, which - unlike
+   `state` - gets persisted verbatim onto every issued access/refresh token and echoed
+   back in the `/token` response, multiplying at-rest plaintext copies of the password.
+   Only `state` is accepted now.
+
+**Open question - password delivery through Claude.ai's own UI.** `PersonalAuthProvider`
+checks the password against the OAuth `state` parameter of the `/authorize`
+request. That's generated by the OAuth *client* (Claude's own backend/browser flow
+during "Add custom connector"), not typed in by you, so it's unverified whether Claude's
+official connector setup can supply your password at all - this repo has no way to drive
+a real claude.ai session to test it. If registering the connector fails after setting
+`MCP_OAUTH_PASSWORD`, check the server logs for what `/authorize` actually received.
+
+### Registering the connector in Claude
+
+Once the server is running and reachable at `PUBLIC_BASE_URL` (see the
+[deployment guide](docs/deployment.md) for exposing it via Tailscale Funnel):
+
+1. In Claude.ai (or Cowork/Desktop): **Settings → Connectors → Add custom connector**.
+2. **URL:** `<PUBLIC_BASE_URL>/mcp`, e.g. `https://your-host.your-tailnet.ts.net/mcp`.
+3. Leave any Client ID / Client Secret fields blank - Dynamic Client Registration handles
+   this automatically; there's nothing to copy from the server.
+4. Save. Claude opens the OAuth authorization flow in a browser; approve it once and the
+   connector is authenticated (synced automatically to Claude mobile).
+
+Claude Desktop (no native remote-connector UI yet) instead uses the
+[`mcp-remote`](https://github.com/geelen/mcp-remote) bridge in `claude_desktop_config.json`
+- see the [deployment guide](docs/deployment.md#5-connect-claude) for the exact config.
 
 ## Tools
 

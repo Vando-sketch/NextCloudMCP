@@ -170,5 +170,5 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `Unknown priorität 'dringend'. Expected one of: hoch, mittel, niedrig.`
 - `Could not parse Erinnerung '1 Tag vorher': expected an ISO 8601 duration like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime.`
 
-Requests without a valid bearer token are rejected earlier, at the protocol level, with
-JSON-RPC error code `-32001` ("Missing or invalid bearer token.").
+Requests without a valid OAuth access token are rejected earlier, at the HTTP level
+(`401`), before reaching tool logic — see [Authentication](../README.md#authentication).
