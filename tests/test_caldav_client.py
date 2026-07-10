@@ -10,15 +10,25 @@ from caldav.lib import error as caldav_error
 from icalendar import Todo
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
+from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService, _translate
 from nextcloud_task_mcp.errors import (
     AuthenticationFailedError,
     ConnectionFailedError,
+    InvalidTaskDataError,
     TaskConflictError,
     TaskListNotFoundError,
     TaskMcpError,
     TaskNotFoundError,
 )
+
+
+def _make_calendar(name: str, url: str = "https://cloud.example.com/dav/personal/") -> MagicMock:
+    """A MagicMock standing in for a caldav.Calendar with the given display name."""
+    calendar = MagicMock()
+    calendar.get_display_name.return_value = name
+    calendar.url = url
+    return calendar
 
 
 @pytest.fixture
@@ -53,12 +63,8 @@ def principal(mock_dav_client):
 
 
 def test_list_task_lists_returns_names_and_urls(service, principal):
-    cal1 = MagicMock()
-    cal1.get_display_name.return_value = "Personal"
-    cal1.url = "https://cloud.example.com/dav/personal/"
-    cal2 = MagicMock()
-    cal2.get_display_name.return_value = "Arbeit"
-    cal2.url = "https://cloud.example.com/dav/arbeit/"
+    cal1 = _make_calendar("Personal", "https://cloud.example.com/dav/personal/")
+    cal2 = _make_calendar("Arbeit", "https://cloud.example.com/dav/arbeit/")
     principal.calendars.return_value = [cal1, cal2]
 
     result = service.list_task_lists()
@@ -70,8 +76,8 @@ def test_list_task_lists_returns_names_and_urls(service, principal):
 
 
 def test_list_tasks_parses_todos(service, principal):
-    calendar = MagicMock()
-    principal.calendar.return_value = calendar
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
 
     todo = Todo()
     todo.add("uid", "abc")
@@ -102,17 +108,17 @@ def test_list_tasks_parses_todos(service, principal):
 
 
 def test_list_tasks_list_not_found_raises(service, principal):
-    principal.calendar.side_effect = caldav_error.NotFoundError("no such calendar")
+    principal.calendars.return_value = []
 
     with pytest.raises(TaskListNotFoundError):
         service.list_tasks("Nonexistent")
 
 
 def test_create_task_saves_ical_and_returns_uid(service, principal):
-    calendar = MagicMock()
-    principal.calendar.return_value = calendar
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
 
-    uid = service.create_task("Personal", titel="Neue Aufgabe")
+    uid = service.create_task("Personal", mapping.TaskFields(titel="Neue Aufgabe"))
 
     calendar.save_todo.assert_called_once()
     _, kwargs = calendar.save_todo.call_args
@@ -121,9 +127,14 @@ def test_create_task_saves_ical_and_returns_uid(service, principal):
     assert "Neue Aufgabe" in kwargs["ical"]
 
 
+def test_create_task_without_titel_raises(service):
+    with pytest.raises(InvalidTaskDataError):
+        service.create_task("Personal", mapping.TaskFields())
+
+
 def test_update_task_applies_fields_and_saves(service, principal):
-    calendar = MagicMock()
-    principal.calendar.return_value = calendar
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
 
     todo = Todo()
     todo.add("uid", "abc")
@@ -132,24 +143,58 @@ def test_update_task_applies_fields_and_saves(service, principal):
     todo_obj.icalendar_component = todo
     calendar.get_todo_by_uid.return_value = todo_obj
 
-    service.update_task("Personal", "abc", titel="Neu")
+    service.update_task("Personal", "abc", mapping.TaskFields(titel="Neu"))
 
     todo_obj.save.assert_called_once()
     assert str(todo.get("summary")) == "Neu"
 
 
 def test_update_task_not_found_raises(service, principal):
-    calendar = MagicMock()
-    principal.calendar.return_value = calendar
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
     calendar.get_todo_by_uid.side_effect = caldav_error.NotFoundError("no such task")
 
     with pytest.raises(TaskNotFoundError):
-        service.update_task("Personal", "missing-uid", titel="x")
+        service.update_task("Personal", "missing-uid", mapping.TaskFields(titel="x"))
+
+
+def test_get_task_returns_parsed_task(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("summary", "Milch kaufen")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    result = service.get_task("Personal", "abc")
+
+    calendar.get_todo_by_uid.assert_called_once_with("abc")
+    assert result["uid"] == "abc"
+    assert result["titel"] == "Milch kaufen"
+
+
+def test_get_task_not_found_raises(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = caldav_error.NotFoundError("no such task")
+
+    with pytest.raises(TaskNotFoundError):
+        service.get_task("Personal", "missing-uid")
+
+
+def test_get_task_list_not_found_raises(service, principal):
+    principal.calendars.return_value = []
+
+    with pytest.raises(TaskListNotFoundError):
+        service.get_task("Nonexistent", "abc")
 
 
 def test_complete_task_marks_completed(service, principal):
-    calendar = MagicMock()
-    principal.calendar.return_value = calendar
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
 
     todo = Todo()
     todo.add("uid", "abc")
@@ -165,8 +210,8 @@ def test_complete_task_marks_completed(service, principal):
 
 
 def test_delete_task_calls_delete(service, principal):
-    calendar = MagicMock()
-    principal.calendar.return_value = calendar
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
     todo_obj = MagicMock()
     calendar.get_todo_by_uid.return_value = todo_obj
 
@@ -191,6 +236,94 @@ def test_connection_error_translated(service, mock_dav_client):
 
     with pytest.raises(ConnectionFailedError):
         service.list_task_lists()
+
+
+# --- Calendar cache and duplicate-name detection (A3) ---
+
+
+def test_get_calendar_is_cached_across_calls(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.todos.return_value = []
+
+    service.list_tasks("Personal")
+    service.list_tasks("Personal")
+
+    # Only the first call should have needed a fresh principal.calendars()
+    # PROPFIND; the second is served from the cache (A3).
+    assert principal.calendars.call_count == 1
+
+
+def test_list_task_lists_populates_cache_opportunistically(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.todos.return_value = []
+
+    service.list_task_lists()
+    service.list_tasks("Personal")
+
+    assert principal.calendars.call_count == 1
+
+
+def test_duplicate_display_names_across_calls_are_not_cached(service, principal):
+    """A name that's ambiguous when populated must not silently cache one of the matches."""
+    cal1 = _make_calendar("Personal", "https://cloud.example.com/dav/p1/")
+    cal2 = _make_calendar("Personal", "https://cloud.example.com/dav/p2/")
+    principal.calendars.return_value = [cal1, cal2]
+
+    service.list_task_lists()
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.list_tasks("Personal")
+
+
+def test_duplicate_display_name_raises_ambiguous_error(service, principal):
+    cal1 = _make_calendar("Personal", "https://cloud.example.com/dav/p1/")
+    cal2 = _make_calendar("Personal", "https://cloud.example.com/dav/p2/")
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous") as exc_info:
+        service.list_tasks("Personal")
+    assert not isinstance(exc_info.value, TaskListNotFoundError)
+
+
+def test_stale_cache_entry_is_invalidated_and_retried(service, principal):
+    """A cached calendar that 404s on use (deleted/renamed server-side) is retried once."""
+    stale_calendar = _make_calendar("Personal", "https://cloud.example.com/dav/old/")
+    fresh_calendar = _make_calendar("Personal", "https://cloud.example.com/dav/new/")
+
+    # First resolution returns the (soon to be stale) calendar and populates the cache.
+    principal.calendars.return_value = [stale_calendar]
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+
+    # Using the cached calendar now 404s (as if it were deleted/recreated
+    # server-side); a fresh principal.calendars() call finds it again under a
+    # new URL.
+    stale_calendar.todos.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [fresh_calendar]
+    fresh_calendar.todos.return_value = []
+
+    result = service.list_tasks("Personal")
+
+    assert result == []
+    assert principal.calendars.call_count == 2
+    fresh_calendar.todos.assert_called_once()
+
+
+def test_stale_cache_entry_gives_up_after_one_retry(service, principal):
+    stale_calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [stale_calendar]
+    service.list_task_lists()
+
+    # Every call to .todos() (both the initial attempt and the retry) 404s -
+    # the list is genuinely gone, not just cached-stale.
+    stale_calendar.todos.side_effect = caldav_error.NotFoundError("gone")
+
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tasks("Personal")
+    # Resolved once initially (list_task_lists) + once more on retry.
+    assert principal.calendars.call_count == 2
 
 
 # --- _translate: every branch (A4, D7, E4) ---

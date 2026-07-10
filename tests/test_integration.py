@@ -9,6 +9,7 @@ import os
 
 import pytest
 
+from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
 
 pytestmark = pytest.mark.skipif(
@@ -39,16 +40,25 @@ def test_list_task_lists_returns_at_least_the_test_list(live_service, test_list_
 def test_full_task_lifecycle(live_service, test_list_name):
     uid = live_service.create_task(
         test_list_name,
-        titel="nextcloud-task-mcp integration test task",
-        notizen="Created by the automated integration test suite; safe to delete.",
+        mapping.TaskFields(
+            titel="nextcloud-task-mcp integration test task",
+            notizen="Created by the automated integration test suite; safe to delete.",
+        ),
     )
     try:
         tasks = live_service.list_tasks(test_list_name, only_open=True)
         assert any(task["uid"] == uid for task in tasks)
 
-        live_service.update_task(test_list_name, uid, notizen="updated notes")
+        fetched = live_service.get_task(test_list_name, uid)
+        assert fetched["uid"] == uid
+
+        live_service.update_task(test_list_name, uid, mapping.TaskFields(notizen="updated notes"))
         updated = next(t for t in live_service.list_tasks(test_list_name) if t["uid"] == uid)
         assert updated["notizen"] == "updated notes"
+
+        live_service.update_task(test_list_name, uid, mapping.TaskFields(clear=("notizen",)))
+        cleared = live_service.get_task(test_list_name, uid)
+        assert cleared["notizen"] is None
 
         live_service.complete_task(test_list_name, uid)
         all_tasks = live_service.list_tasks(test_list_name, only_open=False)
