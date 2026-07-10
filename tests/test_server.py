@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from unittest.mock import MagicMock
 
@@ -13,6 +14,11 @@ from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import TaskListNotFoundError
 from nextcloud_task_mcp.server import build_server
+
+
+def _run(coro):
+    """Run an async tool call from a sync test function (mirrors tests/test_auth.py)."""
+    return asyncio.run(coro)
 
 
 @pytest.fixture
@@ -47,24 +53,26 @@ def test_create_task_uses_umlaut_parameter_names(tools):
 
 def test_list_task_lists_delegates_to_service(tools, fake_service):
     fake_service.list_task_lists.return_value = [{"name": "Personal", "url": "https://x/"}]
-    result = tools["list_task_lists"].fn()
+    result = _run(tools["list_task_lists"].fn())
     assert result == [{"name": "Personal", "url": "https://x/"}]
 
 
 def test_list_tasks_passes_nur_offene_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
-    tools["list_tasks"].fn("Personal", nur_offene=False)
+    _run(tools["list_tasks"].fn("Personal", nur_offene=False))
     fake_service.list_tasks.assert_called_once_with("Personal", only_open=False)
 
 
 def test_create_task_maps_german_params_to_service_call(tools, fake_service):
     fake_service.create_task.return_value = "new-uid"
-    result = tools["create_task"].fn(
-        liste="Personal",
-        titel="Neue Aufgabe",
-        fällig_datum="2026-07-20",
-        priorität="hoch",
-        übergeordnete_aufgabe="parent-uid",
+    result = _run(
+        tools["create_task"].fn(
+            liste="Personal",
+            titel="Neue Aufgabe",
+            fällig_datum="2026-07-20",
+            priorität="hoch",
+            übergeordnete_aufgabe="parent-uid",
+        )
     )
     assert result == {"uid": "new-uid"}
     _, kwargs = fake_service.create_task.call_args
@@ -75,19 +83,19 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
 
 
 def test_update_task_returns_uid(tools, fake_service):
-    result = tools["update_task"].fn("Personal", "task-uid", titel="Neu")
+    result = _run(tools["update_task"].fn("Personal", "task-uid", titel="Neu"))
     assert result == {"uid": "task-uid"}
     fake_service.update_task.assert_called_once()
 
 
 def test_complete_task_delegates(tools, fake_service):
-    result = tools["complete_task"].fn("Personal", "task-uid")
+    result = _run(tools["complete_task"].fn("Personal", "task-uid"))
     assert result == {"uid": "task-uid"}
     fake_service.complete_task.assert_called_once_with("Personal", "task-uid")
 
 
 def test_delete_task_delegates(tools, fake_service):
-    result = tools["delete_task"].fn("Personal", "task-uid")
+    result = _run(tools["delete_task"].fn("Personal", "task-uid"))
     assert result == {"uid": "task-uid"}
     fake_service.delete_task.assert_called_once_with("Personal", "task-uid")
 
@@ -95,14 +103,54 @@ def test_delete_task_delegates(tools, fake_service):
 def test_task_mcp_error_becomes_clean_tool_error(tools, fake_service):
     fake_service.list_tasks.side_effect = TaskListNotFoundError("Task list 'Foo' was not found.")
     with pytest.raises(ToolError, match="Foo"):
-        tools["list_tasks"].fn("Foo")
+        _run(tools["list_tasks"].fn("Foo"))
 
 
 def test_unexpected_error_does_not_leak_internals(tools, fake_service):
     fake_service.list_tasks.side_effect = RuntimeError("some internal detail")
     with pytest.raises(ToolError) as exc_info:
-        tools["list_tasks"].fn("Personal")
+        _run(tools["list_tasks"].fn("Personal"))
     assert "some internal detail" not in str(exc_info.value)
+
+
+# --- Non-blocking tools (A1): a blocked call must not stall a concurrent one ---
+
+
+def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
+    """A slow/blocked CalDavService call must not stall other tool calls.
+
+    Simulates the A1 scenario directly: `list_tasks` blocks on a
+    `threading.Event` (standing in for a hung Nextcloud request) while a
+    second, independent `list_task_lists` call is issued concurrently. Since
+    tool bodies now offload the blocking service call to a worker thread via
+    anyio.to_thread.run_sync, the event loop stays free and the second call
+    completes well before the first one is unblocked.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_list_tasks(list_name, only_open=True):
+        started.set()
+        release.wait(timeout=5)
+        return []
+
+    fake_service.list_tasks.side_effect = blocking_list_tasks
+    fake_service.list_task_lists.return_value = [{"name": "Personal", "url": "https://x/"}]
+
+    async def scenario():
+        blocked_task = asyncio.create_task(tools["list_tasks"].fn("Personal"))
+        # Wait until the blocking call has actually started running in its
+        # worker thread, then race a second, independent tool call against it.
+        await asyncio.to_thread(started.wait, 5)
+
+        second_result = await asyncio.wait_for(tools["list_task_lists"].fn(), timeout=2)
+        assert second_result == [{"name": "Personal", "url": "https://x/"}]
+        assert not blocked_task.done()
+
+        release.set()
+        await asyncio.wait_for(blocked_task, timeout=5)
+
+    asyncio.run(scenario())
 
 
 # --- Redirect-domain allow-list defaults (D9) ---

@@ -31,3 +31,11 @@ class TaskNotFoundError(TaskMcpError):
 
 class InvalidTaskDataError(TaskMcpError):
     """Raised when task field values can't be mapped to valid iCalendar data."""
+
+
+class TaskConflictError(TaskMcpError):
+    """Raised when a task was modified by another client since it was last read.
+
+    The underlying CalDAV etag no longer matches (HTTP 412), so the write was
+    rejected. Callers should re-fetch the current task and retry the change.
+    """

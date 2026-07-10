@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any
 from urllib.parse import urlparse
 
+import anyio.to_thread
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -17,14 +19,19 @@ from .personal_auth import PersonalAuthProvider
 logger = logging.getLogger(__name__)
 
 
-def _call(fn, *args: Any, **kwargs: Any) -> Any:
-    """Run a CalDavService call, turning our errors into clean ToolErrors.
+async def _call(fn, *args: Any, **kwargs: Any) -> Any:
+    """Run a (blocking) CalDavService call in a worker thread and translate errors.
 
-    Anything unexpected is logged server-side but never shown to the
-    client as a raw stack trace.
+    `caldav.DAVClient` does blocking HTTP, so calling `fn` inline here would
+    stall the asyncio event loop for every other client (A1). We offload the
+    actual call to a worker thread via `anyio.to_thread.run_sync` - which only
+    accepts a no-arg callable, hence the `functools.partial` wrapping - and
+    keep the error-translation semantics identical to the previous sync
+    version: our own errors become clean ToolErrors, anything unexpected is
+    logged server-side but never shown to the client as a raw stack trace.
     """
     try:
-        return fn(*args, **kwargs)
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
     except TaskMcpError as exc:
         raise ToolError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - safety net for unforeseen failures
@@ -65,19 +72,20 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         url=settings.caldav_url,
         username=settings.caldav_username,
         password=settings.caldav_password,
+        timeout=settings.caldav_timeout_seconds,
     )
 
     @mcp.tool
-    def list_task_lists() -> list[dict[str, str]]:
+    async def list_task_lists() -> list[dict[str, str]]:
         """List all available Nextcloud task lists.
 
         Returns:
             A list of {"name": display name, "url": internal CalDAV URL/ID} dicts.
         """
-        return _call(caldav_service.list_task_lists)
+        return await _call(caldav_service.list_task_lists)
 
     @mcp.tool
-    def list_tasks(list_name: str, nur_offene: bool = True) -> list[dict[str, Any]]:
+    async def list_tasks(list_name: str, nur_offene: bool = True) -> list[dict[str, Any]]:
         """List tasks in a Nextcloud task list.
 
         Args:
@@ -89,10 +97,10 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             priorität, fortschritt_prozent, status, ort, url, tags, notizen,
             übergeordnete_uid (None unless the task is a subtask).
         """
-        return _call(caldav_service.list_tasks, list_name, only_open=nur_offene)
+        return await _call(caldav_service.list_tasks, list_name, only_open=nur_offene)
 
     @mcp.tool
-    def create_task(
+    async def create_task(
         liste: str,
         titel: str,
         start_datum: str | None = None,
@@ -130,7 +138,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             {"uid": the new task's UID}.
         """
-        new_uid = _call(
+        new_uid = await _call(
             caldav_service.create_task,
             liste,
             titel=titel,
@@ -149,7 +157,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return {"uid": new_uid}
 
     @mcp.tool
-    def update_task(
+    async def update_task(
         list_name: str,
         task_uid: str,
         titel: str | None = None,
@@ -176,7 +184,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             {"uid": task_uid} on success.
         """
-        _call(
+        await _call(
             caldav_service.update_task,
             list_name,
             task_uid,
@@ -196,7 +204,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return {"uid": task_uid}
 
     @mcp.tool
-    def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
+    async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
 
         Args:
@@ -206,11 +214,11 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             {"uid": task_uid} on success.
         """
-        _call(caldav_service.complete_task, list_name, task_uid)
+        await _call(caldav_service.complete_task, list_name, task_uid)
         return {"uid": task_uid}
 
     @mcp.tool
-    def delete_task(list_name: str, task_uid: str) -> dict[str, str]:
+    async def delete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Permanently delete a task.
 
         Args:
@@ -220,7 +228,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             {"uid": task_uid} on success.
         """
-        _call(caldav_service.delete_task, list_name, task_uid)
+        await _call(caldav_service.delete_task, list_name, task_uid)
         return {"uid": task_uid}
 
     return mcp

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,11 +10,13 @@ from caldav.lib import error as caldav_error
 from icalendar import Todo
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
-from nextcloud_task_mcp.caldav_client import CalDavService
+from nextcloud_task_mcp.caldav_client import CalDavService, _translate
 from nextcloud_task_mcp.errors import (
     AuthenticationFailedError,
     ConnectionFailedError,
+    TaskConflictError,
     TaskListNotFoundError,
+    TaskMcpError,
     TaskNotFoundError,
 )
 
@@ -27,6 +30,21 @@ def mock_dav_client():
 @pytest.fixture
 def service(mock_dav_client) -> CalDavService:
     return CalDavService(url="https://cloud.example.com/dav/", username="u", password="p")
+
+
+# --- HTTP timeout (A2) ---
+
+
+def test_default_timeout_passed_to_dav_client(mock_dav_client):
+    CalDavService(url="https://cloud.example.com/dav/", username="u", password="p")
+    _, kwargs = mock_dav_client.call_args
+    assert kwargs["timeout"] == 30
+
+
+def test_custom_timeout_passed_to_dav_client(mock_dav_client):
+    CalDavService(url="https://cloud.example.com/dav/", username="u", password="p", timeout=5)
+    _, kwargs = mock_dav_client.call_args
+    assert kwargs["timeout"] == 5
 
 
 @pytest.fixture
@@ -173,3 +191,103 @@ def test_connection_error_translated(service, mock_dav_client):
 
     with pytest.raises(ConnectionFailedError):
         service.list_task_lists()
+
+
+# --- _translate: every branch (A4, D7, E4) ---
+#
+# _translate is a pure function, so we exercise it directly rather than
+# through CalDavService. For the branches D7 identifies as previously
+# embedding raw exception text (generic DAVError, generic RequestException,
+# and the final catch-all), we assert both the resulting error type AND that
+# the sensitive marker text from the original exception does NOT appear in
+# the translated message - only a categorized generic message should.
+
+_SECRET_MARKER = "super-secret-internal-detail-xyz"
+
+_http_errors = caldav_client_module._http_errors
+
+_TRANSLATE_CASES = [
+    pytest.param(
+        caldav_error.AuthorizationError(_SECRET_MARKER),
+        AuthenticationFailedError,
+        False,
+        id="authorization_error",
+    ),
+    pytest.param(
+        caldav_error.NotFoundError(_SECRET_MARKER),
+        TaskMcpError,
+        False,
+        id="not_found_error",
+    ),
+    pytest.param(
+        caldav_error.ETagMismatchError(_SECRET_MARKER),
+        TaskConflictError,
+        False,
+        id="etag_mismatch_conflict",
+    ),
+    pytest.param(
+        caldav_error.DAVError(_SECRET_MARKER),
+        TaskMcpError,
+        True,
+        id="generic_dav_error",
+    ),
+    pytest.param(
+        _http_errors.ConnectionError(_SECRET_MARKER),
+        ConnectionFailedError,
+        False,
+        id="connection_error",
+    ),
+    pytest.param(
+        _http_errors.Timeout(_SECRET_MARKER),
+        ConnectionFailedError,
+        False,
+        id="timeout",
+    ),
+    pytest.param(
+        _http_errors.RequestException(_SECRET_MARKER),
+        ConnectionFailedError,
+        True,
+        id="generic_request_exception",
+    ),
+    pytest.param(
+        RuntimeError(_SECRET_MARKER),
+        TaskMcpError,
+        True,
+        id="arbitrary_exception_catch_all",
+    ),
+]
+
+
+@pytest.mark.parametrize(("exc", "expected_type", "must_be_scrubbed"), _TRANSLATE_CASES)
+def test_translate_every_branch(exc, expected_type, must_be_scrubbed):
+    result = _translate(exc)
+
+    assert isinstance(result, expected_type)
+    if must_be_scrubbed:
+        assert _SECRET_MARKER not in str(result)
+
+
+def test_translate_etag_mismatch_message_mentions_retry():
+    result = _translate(caldav_error.ETagMismatchError("412 precondition failed"))
+    assert isinstance(result, TaskConflictError)
+    message = str(result).lower()
+    assert "modified" in message or "conflict" in message
+    assert "retry" in message or "re-fetch" in message
+
+
+def test_translate_scrubbed_branches_log_the_real_exception(caplog):
+    with caplog.at_level(logging.WARNING, logger="nextcloud_task_mcp.caldav_client"):
+        _translate(caldav_error.DAVError(_SECRET_MARKER))
+        _translate(_http_errors.RequestException(_SECRET_MARKER))
+        _translate(RuntimeError(_SECRET_MARKER))
+
+    # The raw detail must still be visible server-side (in the logs), even
+    # though it's scrubbed from the user-facing message.
+    logged_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert len(caplog.records) == 3
+    for record in caplog.records:
+        assert record.levelno == logging.WARNING
+    # exc_info was attached so the traceback (and the secret marker within
+    # it) ends up in the formatted log output, not just the bare message.
+    formatted = "\n".join(caplog.text.splitlines())
+    assert _SECRET_MARKER in formatted or _SECRET_MARKER in logged_text
