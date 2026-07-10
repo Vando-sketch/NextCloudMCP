@@ -35,7 +35,7 @@ def _seed_one_token(tmp_path: Path) -> tuple[Path, str, str]:
             password=TEST_OAUTH_PASSWORD,
             state_dir=str(_state_dir(tmp_path)),
         )
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
         return token
 
     token = run_async(scenario())
@@ -142,8 +142,8 @@ def test_revoke_does_not_disturb_other_clients_tokens(tmp_path, capsys):
             password=TEST_OAUTH_PASSWORD,
             state_dir=str(_state_dir(tmp_path)),
         )
-        _, token_a = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
-        _, token_b = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token_a = await issue_token(provider)
+        _, token_b = await issue_token(provider)
         return token_a, token_b
 
     token_a, token_b = run_async(scenario())

@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import secrets
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pytest
 from mcp.server.auth.provider import AuthorizationCode, AuthorizationParams
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from starlette.requests import Request
+from starlette.responses import Response
 
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
@@ -43,36 +45,86 @@ async def register_oauth_client(
     return client
 
 
-async def authorize_and_get_code(
-    provider: PersonalAuthProvider,
-    client: OAuthClientInformationFull,
-    *,
-    state: str | None,
-) -> AuthorizationCode:
-    """Drive `authorize()` (the password check lives here) and return the
-    `AuthorizationCode` object the provider stored for the code in the
-    resulting redirect, exactly as the framework would fetch it before calling
-    `exchange_authorization_code`."""
+def make_auth_params(
+    client: OAuthClientInformationFull, *, state: str | None = "client-csrf-state"
+) -> AuthorizationParams:
+    """The AuthorizationParams the framework's AuthorizationHandler would build
+    from a valid /authorize request. `state` defaults to an opaque client CSRF
+    token, which is all real claude.ai ever sends there."""
     assert client.redirect_uris
-    params = AuthorizationParams(
+    return AuthorizationParams(
         state=state,
         scopes=[],
         code_challenge="x" * 43,
         redirect_uri=client.redirect_uris[0],
         redirect_uri_provided_explicitly=True,
     )
-    redirect_url = await provider.authorize(client, params)
+
+
+async def submit_consent(
+    provider: PersonalAuthProvider,
+    pending_key: str,
+    password: str,
+    *,
+    client_host: str = "127.0.0.1",
+) -> Response:
+    """POST the consent form the way a browser would, driving the provider's
+    real route endpoint with a hand-built Starlette request (no ASGI app
+    needed for provider-level tests)."""
+    body = urlencode({"pending": pending_key, "password": password}).encode()
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/consent",
+        "raw_path": b"/consent",
+        "query_string": b"",
+        "headers": [
+            (b"content-type", b"application/x-www-form-urlencoded"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": (client_host, 52000),
+        "server": ("test.example.com", 443),
+    }
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return await provider.handle_consent_submission(Request(scope, receive))
+
+
+async def authorize_and_get_code(
+    provider: PersonalAuthProvider,
+    client: OAuthClientInformationFull,
+) -> AuthorizationCode:
+    """Drive `authorize()` plus - when a password is configured - the consent
+    form it now redirects to, and return the `AuthorizationCode` object the
+    provider stored for the code in the final client redirect, exactly as the
+    framework would fetch it before calling `exchange_authorization_code`."""
+    redirect_url = await provider.authorize(client, make_auth_params(client))
+    if provider.password:
+        pending_key = parse_qs(urlparse(redirect_url).query)["pending"][0]
+        response = await submit_consent(provider, pending_key, provider.password)
+        assert response.status_code == 302
+        redirect_url = response.headers["location"]
     code = parse_qs(urlparse(redirect_url).query)["code"][0]
     return provider.auth_codes[code]
 
 
 async def issue_token(
-    provider: PersonalAuthProvider, *, state: str | None
+    provider: PersonalAuthProvider,
 ) -> tuple[OAuthClientInformationFull, OAuthToken]:
-    """Full happy path: register a client, authorize it, and exchange the
-    resulting code for an access/refresh token pair."""
+    """Full happy path: register a client, authorize it (completing the
+    consent form when a password is set), and exchange the resulting code for
+    an access/refresh token pair."""
     client = await register_oauth_client(provider)
-    auth_code = await authorize_and_get_code(provider, client, state=state)
+    auth_code = await authorize_and_get_code(provider, client)
     token = await provider.exchange_authorization_code(client, auth_code)
     return client, token
 

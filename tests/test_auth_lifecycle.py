@@ -16,16 +16,19 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from conftest import (
     TEST_OAUTH_PASSWORD,
     authorize_and_get_code,
     issue_token,
+    make_auth_params,
     register_oauth_client,
     run_async,
+    submit_consent,
 )
-from mcp.server.auth.provider import AuthorizeError, TokenError
+from mcp.server.auth.provider import TokenError
 
 from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
 
@@ -46,7 +49,7 @@ def _provider(tmp_path: Path, **overrides) -> PersonalAuthProvider:
 def test_exchange_authorization_code_returns_access_and_refresh_token(tmp_path):
     async def scenario():
         provider = _provider(tmp_path, access_token_expiry_seconds=3600)
-        client, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        client, token = await issue_token(provider)
 
         assert token.access_token
         assert token.refresh_token
@@ -68,7 +71,7 @@ def test_replayed_authorization_code_is_rejected(tmp_path):
     async def scenario():
         provider = _provider(tmp_path)
         client = await register_oauth_client(provider)
-        auth_code = await authorize_and_get_code(provider, client, state=TEST_OAUTH_PASSWORD)
+        auth_code = await authorize_and_get_code(provider, client)
 
         await provider.exchange_authorization_code(client, auth_code)
 
@@ -87,7 +90,7 @@ def test_expired_access_token_is_rejected_by_load_access_token(tmp_path):
         # A negative expiry means `expires_at` is already in the past the
         # instant the token is minted - no time-travel/monkeypatching needed.
         provider = _provider(tmp_path, access_token_expiry_seconds=-1)
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
 
         assert await provider.load_access_token(token.access_token) is None
         # InMemoryOAuthProvider.load_access_token also cleans up expired
@@ -100,7 +103,7 @@ def test_expired_access_token_is_rejected_by_load_access_token(tmp_path):
 def test_non_expired_access_token_is_accepted(tmp_path):
     async def scenario():
         provider = _provider(tmp_path, access_token_expiry_seconds=3600)
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
 
         assert await provider.load_access_token(token.access_token) is not None
 
@@ -113,7 +116,7 @@ def test_non_expired_access_token_is_accepted(tmp_path):
 def test_refresh_token_exchange_returns_fresh_access_token(tmp_path):
     async def scenario():
         provider = _provider(tmp_path)
-        client, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        client, token = await issue_token(provider)
         assert token.refresh_token is not None
         refresh_token: str = token.refresh_token
 
@@ -137,7 +140,7 @@ def test_refresh_token_exchange_returns_fresh_access_token(tmp_path):
 def test_revoke_token_invalidates_access_token(tmp_path):
     async def scenario():
         provider = _provider(tmp_path)
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
 
         access_token_obj = provider.access_tokens[token.access_token]
         await provider.revoke_token(access_token_obj)
@@ -150,7 +153,7 @@ def test_revoke_token_invalidates_access_token(tmp_path):
 def test_revoke_token_invalidates_paired_refresh_token(tmp_path):
     async def scenario():
         provider = _provider(tmp_path)
-        client, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        client, token = await issue_token(provider)
         assert token.refresh_token is not None
         refresh_token: str = token.refresh_token
 
@@ -169,7 +172,7 @@ def test_state_survives_a_second_provider_on_the_same_state_dir(tmp_path):
     async def scenario():
         state_dir = tmp_path / "oauth-state"
         provider1 = _provider(tmp_path, state_dir=str(state_dir))
-        client, token = await issue_token(provider1, state=TEST_OAUTH_PASSWORD)
+        client, token = await issue_token(provider1)
         assert token.refresh_token is not None
         refresh_token: str = token.refresh_token
 
@@ -218,7 +221,7 @@ def test_refresh_token_gets_bounded_expiry_by_default(tmp_path):
     async def scenario():
         before = int(time.time())
         provider = _provider(tmp_path, refresh_token_expiry_seconds=1000)
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
         assert token.refresh_token is not None
 
         refresh_obj = provider.refresh_tokens[token.refresh_token]
@@ -231,7 +234,7 @@ def test_refresh_token_gets_bounded_expiry_by_default(tmp_path):
 def test_refresh_token_expiry_seconds_none_keeps_unbounded_refresh_token(tmp_path):
     async def scenario():
         provider = _provider(tmp_path, refresh_token_expiry_seconds=None)
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
         assert token.refresh_token is not None
 
         refresh_obj = provider.refresh_tokens[token.refresh_token]
@@ -248,7 +251,7 @@ def test_expired_refresh_token_is_rejected_by_load_refresh_token(tmp_path):
     # exchange_refresh_token (covered separately below).
     async def scenario():
         provider = _provider(tmp_path, refresh_token_expiry_seconds=-1)
-        client, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        client, token = await issue_token(provider)
         assert token.refresh_token is not None
         refresh_token: str = token.refresh_token
 
@@ -269,7 +272,7 @@ def test_refresh_token_rotation_preserves_bounded_expiry(tmp_path):
     # an unbounded one.
     async def scenario():
         provider = _provider(tmp_path, refresh_token_expiry_seconds=1000)
-        client, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        client, token = await issue_token(provider)
         assert token.refresh_token is not None
 
         loaded_refresh = await provider.load_refresh_token(client, token.refresh_token)
@@ -292,7 +295,7 @@ def test_default_refresh_token_expiry_is_180_days(tmp_path):
     async def scenario():
         before = int(time.time())
         provider = _provider(tmp_path)  # uses the constructor default
-        _, token = await issue_token(provider, state=TEST_OAUTH_PASSWORD)
+        _, token = await issue_token(provider)
         assert token.refresh_token is not None
 
         refresh_obj = provider.refresh_tokens[token.refresh_token]
@@ -302,71 +305,63 @@ def test_default_refresh_token_expiry_is_180_days(tmp_path):
     run_async(scenario())
 
 
-# --- Password check: substring semantics pinned intentionally (D6) ---
+# --- Consent gate at the provider level (D2, personal_auth.py LOCAL PATCH 5) ---
+#
+# The old `state`-carries-the-password check is gone: live testing against
+# production claude.ai confirmed `state` only ever holds Claude's own CSRF
+# token, so that gate denied every legitimate flow. authorize() now parks the
+# request and redirects to an interactive consent form. The full form behavior
+# (rate limits, TTL, wrong-password paths) is covered at the HTTP level in
+# tests/test_auth.py; here we pin the provider-level contract.
 
 
-def test_password_check_accepts_exact_state_match(tmp_path):
+def test_authorize_with_password_redirects_to_consent_and_mints_no_code(tmp_path):
     async def scenario():
         provider = _provider(tmp_path)
         client = await register_oauth_client(provider)
-        code = await authorize_and_get_code(provider, client, state=TEST_OAUTH_PASSWORD)
-        assert code is not None
+
+        redirect_url = await provider.authorize(client, make_auth_params(client))
+
+        assert redirect_url.startswith("https://test.example.com/consent?pending=")
+        # No authorization code may exist before the consent form is completed
+        # - the redirect alone must grant nothing.
+        assert provider.auth_codes == {}
 
     run_async(scenario())
 
 
-def test_password_check_accepts_password_as_substring_of_larger_state(tmp_path):
-    # PersonalAuthProvider checks `self.password in params.state` (a substring
-    # test), not equality. This is *intentional*, not a bug: claude.ai - not
-    # this project - controls what value ends up in the OAuth `state`
-    # parameter (it may prefix/suffix it with its own opaque data), so an
-    # equality check would risk rejecting a legitimate connector flow. See
-    # D2/D6 in docs/improvement-plan.md. This test pins that behavior so any
-    # future change to the check (e.g. tightening to equality, or to a
-    # constant-time comparison that still allows extra state) is a deliberate
-    # decision, not an accidental regression.
+def test_authorize_without_password_mints_code_directly(tmp_path):
+    # No password configured (localhost-style deployment): the consent step is
+    # skipped entirely and authorize() behaves like upstream.
     async def scenario():
-        provider = _provider(tmp_path)
+        provider = _provider(tmp_path, password=None)
         client = await register_oauth_client(provider)
-        state = f"claude-opaque-prefix-{TEST_OAUTH_PASSWORD}-claude-opaque-suffix"
-        code = await authorize_and_get_code(provider, client, state=state)
-        assert code is not None
+
+        redirect_url = await provider.authorize(client, make_auth_params(client))
+
+        assert client.redirect_uris
+        assert redirect_url.startswith(str(client.redirect_uris[0]))
+        assert "code=" in redirect_url
 
     run_async(scenario())
 
 
-def test_password_check_rejects_missing_state(tmp_path):
+def test_consent_completion_echoes_the_clients_own_state(tmp_path):
+    # `state` is the client's CSRF token and must round-trip unchanged through
+    # the parked authorization - claude.ai rejects the callback otherwise.
     async def scenario():
         provider = _provider(tmp_path)
         client = await register_oauth_client(provider)
-        with pytest.raises(AuthorizeError):
-            await authorize_and_get_code(provider, client, state=None)
+        claude_state = "AfGKaeD8ijS45GgSdUH0KLgD0AAitxmZJozNMHVOTLo"
+        params = make_auth_params(client, state=claude_state)
 
-    run_async(scenario())
+        consent_url = await provider.authorize(client, params)
+        pending_key = parse_qs(urlparse(consent_url).query)["pending"][0]
+        response = await submit_consent(provider, pending_key, TEST_OAUTH_PASSWORD)
 
-
-def test_password_check_rejects_state_not_containing_password(tmp_path):
-    async def scenario():
-        provider = _provider(tmp_path)
-        client = await register_oauth_client(provider)
-        with pytest.raises(AuthorizeError):
-            await authorize_and_get_code(provider, client, state="totally-unrelated-value")
-
-    run_async(scenario())
-
-
-def test_password_check_rejects_state_that_is_a_substring_of_the_password(tmp_path):
-    # The converse of the pinned substring behavior above: a `state` that is
-    # only a *prefix/substring* of the real password (rather than containing
-    # it in full) must still be rejected - `password in state`, not
-    # `state in password` or a fuzzy/partial match.
-    async def scenario():
-        provider = _provider(tmp_path)
-        client = await register_oauth_client(provider)
-
-        with pytest.raises(AuthorizeError):
-            await authorize_and_get_code(
-                provider, client, state=TEST_OAUTH_PASSWORD[: len(TEST_OAUTH_PASSWORD) // 2]
-            )
+        assert response.status_code == 302
+        query = parse_qs(urlparse(response.headers["location"]).query)
+        assert query["state"] == [claude_state]
+        assert query["code"][0] in provider.auth_codes
 
     run_async(scenario())
