@@ -121,3 +121,47 @@ def test_http_caldav_url_allowed_with_escape_hatch():
 
 def test_https_caldav_url_always_allowed():
     _settings(caldav_url="https://cloud.example.com/remote.php/dav/", allow_insecure_http=False)
+
+
+# --- NEXTCLOUD_HTTP_TIMEOUT_SECONDS (A2) ---
+
+
+def test_caldav_timeout_seconds_defaults_to_30():
+    settings = _settings()
+    assert settings.caldav_timeout_seconds == 30
+
+
+def test_caldav_timeout_seconds_accepts_custom_value():
+    settings = _settings(caldav_timeout_seconds=5)
+    assert settings.caldav_timeout_seconds == 5
+
+
+def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", "https://cloud.example.com/remote.php/dav/")
+    monkeypatch.setenv("NEXTCLOUD_USERNAME", "testuser")
+    monkeypatch.setenv("NEXTCLOUD_APP_PASSWORD", "testpass")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
+
+
+def test_from_env_default_caldav_timeout_seconds(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", raising=False)
+
+    settings = Settings.from_env()
+    assert settings.caldav_timeout_seconds == 30
+
+
+def test_from_env_reads_caldav_timeout_seconds(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", "45")
+
+    settings = Settings.from_env()
+    assert settings.caldav_timeout_seconds == 45
+
+
+def test_from_env_rejects_non_integer_caldav_timeout_seconds(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", "not-a-number")
+
+    with pytest.raises(ConfigError, match="NEXTCLOUD_HTTP_TIMEOUT_SECONDS"):
+        Settings.from_env()

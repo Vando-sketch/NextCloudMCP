@@ -45,6 +45,7 @@ class Settings:
     host: str
     port: int
     allow_insecure_http: bool = False
+    caldav_timeout_seconds: int = 30
 
     def __post_init__(self) -> None:
         if self.oauth_password == _PLACEHOLDER_OAUTH_PASSWORD:
@@ -130,6 +131,14 @@ class Settings:
 
         allow_insecure_http = os.environ.get("NEXTCLOUD_ALLOW_INSECURE_HTTP", "").strip() == "1"
 
+        timeout_raw = os.environ.get("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", "30")
+        try:
+            caldav_timeout_seconds = int(timeout_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"NEXTCLOUD_HTTP_TIMEOUT_SECONDS must be an integer, got: {timeout_raw!r}"
+            ) from exc
+
         return cls(
             caldav_url=require("NEXTCLOUD_CALDAV_URL"),
             caldav_username=require("NEXTCLOUD_USERNAME"),
@@ -142,4 +151,5 @@ class Settings:
             host=os.environ.get("MCP_HOST", "127.0.0.1"),
             port=port,
             allow_insecure_http=allow_insecure_http,
+            caldav_timeout_seconds=caldav_timeout_seconds,
         )

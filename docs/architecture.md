@@ -20,13 +20,18 @@ src/nextcloud_task_mcp/
    issued through the provider's `/register` → `/authorize` → `/token` flow. On a
    missing/invalid/expired token it returns `401` before tool logic or CalDAV is ever
    reached. See the [README](../README.md#authentication) for the full auth model.
-3. The tool function in `server.py` forwards to `CalDavService` through `_call()`, which
-   translates any `TaskMcpError` into a clean `ToolError` message. Unexpected exceptions
-   are logged server-side with a full traceback but surface to the client only as
-   "An unexpected internal error occurred."
+3. The (async) tool function in `server.py` forwards to `CalDavService` through `_call()`,
+   which runs the blocking CalDAV call in a worker thread (`anyio.to_thread.run_sync`) so
+   it never stalls the asyncio event loop for other clients, and translates any
+   `TaskMcpError` into a clean `ToolError` message. Unexpected exceptions are logged
+   server-side with a full traceback but surface to the client only as "An unexpected
+   internal error occurred."
 4. `CalDavService` performs the CalDAV operation, reusing one `DAVClient` and one cached
-   `Principal` for all requests (the principal lookup is the expensive discovery step;
-   it happens once, guarded by a lock).
+   `Principal` for all requests (the principal lookup is the expensive discovery step; it
+   happens once). Since tool calls now run concurrently on worker threads, a single
+   `threading.RLock` inside `CalDavService` serializes all actual CalDAV operations against
+   the shared `DAVClient`/HTTP session - correctness over parallel Nextcloud access, while
+   the event loop itself stays free.
 5. `mapping.py` converts between the tool-level German field names and raw iCalendar
    properties in both directions.
 
@@ -94,8 +99,19 @@ across servers.
 **Error hierarchy.** `caldav`/HTTP exceptions never cross module boundaries:
 `caldav_client._translate()` maps them onto the small `errors.py` hierarchy
 (`AuthenticationFailedError`, `ConnectionFailedError`, `TaskListNotFoundError`,
-`TaskNotFoundError`, ...), and `server._call()` maps those onto `ToolError`. The MCP
-client only ever sees one-line messages.
+`TaskNotFoundError`, `TaskConflictError`, ...), and `server._call()` maps those onto
+`ToolError`. The MCP client only ever sees one-line messages. `ETagMismatchError` (caldav
+raises this on HTTP 412 when a task changed since it was last read - it does send
+`If-Match`) is special-cased into `TaskConflictError` *before* the generic `DAVError`
+branch, so callers get an actionable "re-fetch and retry" signal instead of a generic
+failure. The generic `DAVError`/`RequestException`/catch-all branches never embed the raw
+exception text in the message returned to the client - only a categorized, safe message;
+the real exception is logged server-side (`logger.warning(..., exc_info=...)`) for
+debugging.
+
+**HTTP timeout.** `CalDavService` passes `timeout=` (from `NEXTCLOUD_HTTP_TIMEOUT_SECONDS`,
+default 30s) into `DAVClient`, so a hung Nextcloud server can no longer hang this server
+forever.
 
 **German tool schema on purpose.** The tool parameters (`fällig_datum`, `priorität`,
 `übergeordnete_aufgabe`, ...) are the literal MCP schema field names. Since the server is
@@ -107,9 +123,12 @@ English.
 
 - **Unit tests** (`tests/test_*.py` except integration): `caldav.DAVClient` is patched
   out entirely; mapping tests work on real `icalendar` components so the actual
-  serialization is exercised. Tool tests call the registered FastMCP tool functions with
-  a mocked `CalDavService` and assert both delegation and error translation - this path
-  never goes through HTTP, so it's unaffected by and independent of the auth layer.
+  serialization is exercised. Tool tests call the registered (async) FastMCP tool
+  functions directly with a mocked `CalDavService` and assert both delegation and error
+  translation - this path never goes through HTTP, so it's unaffected by and independent
+  of the auth layer. A dedicated concurrency test blocks a fake `CalDavService` call on a
+  `threading.Event` and asserts a second, independent tool call still completes while the
+  first is blocked, guarding the worker-thread offload in `_call()`.
 - **Auth tests** (`tests/test_auth.py`): drive the real ASGI app FastMCP builds from
   `auth=PersonalAuthProvider(...)` with an in-process `httpx.ASGITransport` client (no
   real server, no real network). They assert `/mcp` rejects missing/invalid tokens, the

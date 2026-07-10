@@ -167,6 +167,10 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `Task 'abc-123' was not found.` — stale or wrong UID.
 - `Nextcloud rejected the CalDAV credentials (check username/app password).`
 - `Could not reach the Nextcloud server (connection refused or timed out).`
+- `The task was modified by another client since it was last read (conflicting edit).
+  Re-fetch the task and retry.` — another client (e.g. the Nextcloud Tasks app) changed
+  this task between your last read and this write; re-fetch it with `list_tasks` and
+  retry the change.
 - `Unknown priorität 'dringend'. Expected one of: hoch, mittel, niedrig.`
 - `Could not parse Erinnerung '1 Tag vorher': expected an ISO 8601 duration like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime.`
 
