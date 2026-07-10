@@ -1,5 +1,5 @@
 # Vendored from https://github.com/crumrine/fastmcp-personal-auth
-# (commit as of 2026-07-08, file personal_auth.py), with four local security
+# (commit as of 2026-07-08, file personal_auth.py), with five local security
 # patches (see "LOCAL PATCHES" below) - otherwise unmodified.
 #
 # fastmcp-personal-auth is not published as an installable package - its own
@@ -7,7 +7,7 @@
 # It is included here verbatim (plus the documented patches) rather than
 # reformatted so that future updates can be diffed against upstream.
 #
-# LOCAL PATCHES (patches 1-2 applied 2026-07-09, patches 3-4 applied
+# LOCAL PATCHES (patches 1-2 applied 2026-07-09, patches 3-5 applied
 # 2026-07-10), all confirmed by live reproduction against a running instance,
 # not just code review:
 #
@@ -71,6 +71,47 @@
 #    `expires_at` from `self.refresh_token_expiry_seconds` before persisting
 #    state.
 #
+# 5. The MCP_OAUTH_PASSWORD gate expected the OAuth *client* to embed the
+#    password in the `state` parameter of /authorize. Live test against
+#    production claude.ai (2026-07-10, real "Add custom connector" flow, the
+#    /authorize request captured in the browser's DevTools network tab):
+#    Claude sends its own randomly generated CSRF token as `state`
+#    (e.g. "AfGKaeD8ijS45GgSdUH0KLgD0AAitxmZJozNMHVOTLo") and its connector
+#    UI has no input that could influence it - so the gate denied every
+#    legitimate authorization and the connector could never be set up. (It
+#    did fail closed: an availability bug, not a bypass.) The `state` check
+#    was unfixable rather than tunable, so it has been *replaced* by an
+#    interactive consent page:
+#
+#      - authorize() no longer inspects `state`. When a password is
+#        configured, it stashes the validated request (client + params) in
+#        memory under a cryptographically random single-use pending key
+#        (secrets.token_urlsafe(32), 10-minute TTL) and returns the URL of
+#        GET /consent?pending=<key>. The MCP SDK's AuthorizationHandler
+#        302-redirects the user's browser there (its contract is "provider
+#        returns the next URL to redirect to" - it cannot serve HTML from
+#        /authorize itself, which is why the form lives on its own route).
+#      - GET /consent renders a password form (pending key as hidden field);
+#        POST /consent verifies the password with secrets.compare_digest
+#        (constant-time - the old `in` substring test was never a suitable
+#        password comparison), then completes the original authorization via
+#        the upstream super().authorize() path and 302s back to the client's
+#        redirect_uri with the code and the client's own `state` intact.
+#      - The form is a publicly reachable password oracle (the old design,
+#        whatever else was wrong with it, never exposed one), so submissions
+#        are rate-limited: max 5 wrong attempts per pending key (then the key
+#        is invalidated and the flow must be restarted) and max 10 failures
+#        per client IP per 15 minutes (then hard 429, even with the correct
+#        password). Failed attempts do NOT consume the pending key below the
+#        limit. Form data is never logged and never echoed into responses
+#        (this deployment already disables Uvicorn's access log - see
+#        README > Authentication - and the consent handlers keep that
+#        guarantee: nothing the user types leaves the comparison).
+#      - The routes are contributed by overriding FastMCP's
+#        OAuthProvider.get_routes() hook, which the framework calls to
+#        collect the auth router - OAuth discovery (/.well-known/*),
+#        /register (DCR) and /token are untouched.
+#
 # MIT License
 #
 # Copyright (c) 2026 Brian Crumrine
@@ -124,9 +165,14 @@ import os
 import secrets
 import time
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
+
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, RedirectResponse, Response
+from starlette.routing import Route
 
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
 from mcp.server.auth.provider import (
@@ -145,6 +191,25 @@ logger = logging.getLogger("personal-auth")
 DEFAULT_ACCESS_TOKEN_EXPIRY = 30 * 24 * 60 * 60  # 30 days
 DEFAULT_REFRESH_TOKEN_EXPIRY = 180 * 24 * 60 * 60  # 180 days (LOCAL PATCH 4)
 DEFAULT_STATE_DIR = ".oauth-state"
+
+# Consent-page limits (LOCAL PATCH 5). The pending TTL only needs to cover
+# "browser opens, human types a password once"; the rate limits bound how fast
+# the publicly reachable form can be used to guess MCP_OAUTH_PASSWORD.
+CONSENT_PENDING_TTL_SECONDS = 10 * 60
+CONSENT_MAX_ATTEMPTS_PER_KEY = 5
+CONSENT_MAX_FAILURES_PER_IP = 10
+CONSENT_FAILURE_WINDOW_SECONDS = 15 * 60
+
+
+@dataclass
+class _PendingAuthorization:
+    """A validated /authorize request parked while the user completes the
+    consent form (LOCAL PATCH 5)."""
+
+    client: OAuthClientInformationFull
+    params: AuthorizationParams
+    expires_at: float
+    attempts: int = 0
 
 
 class PersonalAuthProvider(InMemoryOAuthProvider):
@@ -198,6 +263,13 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
         ]
         self.access_token_expiry_seconds = access_token_expiry_seconds
         self.refresh_token_expiry_seconds = refresh_token_expiry_seconds
+        # Parked /authorize requests awaiting the consent form, and recent
+        # failed form submissions per client IP (LOCAL PATCH 5). Both are
+        # deliberately in-memory only: a restart just means re-running the
+        # connector flow.
+        self._pending_authorizations: dict[str, _PendingAuthorization] = {}
+        self._consent_failures: dict[str, list[float]] = {}
+
         self._state_dir = Path(state_dir or DEFAULT_STATE_DIR)
         self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         # mkdir's mode= is masked by the umask and won't fix an already-existing
@@ -284,21 +356,217 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
                 error_description="Redirect URI domain not allowed.",
             )
 
-        # Check password if configured. Only `state` is checked (not `scope`) -
-        # state is never persisted, whereas scope would be written to disk on
-        # every issued token for that token's entire lifetime. See LOCAL PATCH
-        # note 2 above.
-        if self.password:
-            password_ok = bool(params.state) and self.password in params.state
-            if not password_ok:
-                raise AuthorizeError(
-                    error="access_denied",
-                    error_description="Authorization denied.",
-                )
+        if not self.password:
+            return await self._complete_authorization(client, params)
 
+        # Password configured: park the request and send the user's browser to
+        # the consent form instead of minting a code here. The framework's
+        # AuthorizationHandler turns whatever URL we return into a 302, so
+        # this is the supported way to insert an interactive step (LOCAL
+        # PATCH 5 - replaces the old `state`-carries-the-password check, which
+        # real claude.ai can never satisfy: it sends its own CSRF token as
+        # `state`).
+        self._prune_pending()
+        pending_key = secrets.token_urlsafe(32)
+        self._pending_authorizations[pending_key] = _PendingAuthorization(
+            client=client,
+            params=params,
+            expires_at=time.time() + CONSENT_PENDING_TTL_SECONDS,
+        )
+        return f"{str(self.base_url).rstrip('/')}/consent?pending={pending_key}"
+
+    async def _complete_authorization(
+        self, client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        """Mint the authorization code via the upstream flow and return the
+        client redirect URL (code + the client's own `state` echoed back)."""
         result = await super().authorize(client, params)
         self._save_state()
         return result
+
+    # --- Consent page (LOCAL PATCH 5) ---
+
+    def _prune_pending(self) -> None:
+        now = time.time()
+        expired = [k for k, v in self._pending_authorizations.items() if v.expires_at < now]
+        for key in expired:
+            del self._pending_authorizations[key]
+
+    def _recent_ip_failures(self, ip: str) -> list[float]:
+        """Failed consent submissions from `ip` within the rate-limit window
+        (pruning older entries as a side effect)."""
+        cutoff = time.time() - CONSENT_FAILURE_WINDOW_SECONDS
+        recent = [stamp for stamp in self._consent_failures.get(ip, []) if stamp > cutoff]
+        if recent:
+            self._consent_failures[ip] = recent
+        else:
+            self._consent_failures.pop(ip, None)
+        return recent
+
+    @staticmethod
+    def _client_ip(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    _CONSENT_HEADERS = {
+        # The pending key rides in a query string / hidden form field - keep
+        # it out of caches and referrer headers.
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+    }
+
+    def _consent_form_html(self, pending_key: str, error: Optional[str] = None) -> str:
+        # No escaping needed: `pending_key` comes from secrets.token_urlsafe
+        # (URL-safe base64 alphabet only) and `error` is one of our own static
+        # strings. Nothing the user submitted is ever reflected back.
+        error_html = f'<p class="error">{error}</p>' if error else ""
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Authorize access</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; display: flex; justify-content: center;
+         align-items: center; min-height: 100vh; margin: 0; background: #f4f4f5; }}
+  main {{ background: #fff; padding: 2rem; border-radius: 8px; max-width: 24rem;
+          width: 100%; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15); }}
+  h1 {{ font-size: 1.25rem; margin-top: 0; }}
+  input[type=password] {{ width: 100%; padding: 0.5rem; margin: 0.25rem 0 1rem;
+                          box-sizing: border-box; }}
+  button {{ padding: 0.5rem 1.5rem; }}
+  .error {{ color: #b00020; }}
+</style>
+</head>
+<body>
+<main>
+<h1>Authorize access</h1>
+<p>A client is requesting access to this MCP server. Enter the server
+password (<code>MCP_OAUTH_PASSWORD</code>) to approve it.</p>
+{error_html}
+<form method="POST" action="/consent">
+<input type="hidden" name="pending" value="{pending_key}">
+<label for="password">Password</label>
+<input type="password" id="password" name="password"
+       autocomplete="current-password" autofocus required>
+<button type="submit">Authorize</button>
+</form>
+</main>
+</body>
+</html>"""
+
+    def _consent_error_page(self, message: str, status_code: int) -> Response:
+        return HTMLResponse(
+            f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="robots" content="noindex">
+<title>Authorization failed</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto;">
+<h1 style="font-size: 1.25rem;">Authorization failed</h1>
+<p>{message}</p>
+</body>
+</html>""",
+            status_code=status_code,
+            headers=self._CONSENT_HEADERS,
+        )
+
+    _EXPIRED_MESSAGE = (
+        "This authorization link is invalid or has expired. "
+        "Start the connection again from your MCP client."
+    )
+
+    async def render_consent_form(self, request: Request) -> Response:
+        """GET /consent - show the password form for a parked authorization."""
+        self._prune_pending()
+        pending_key = request.query_params.get("pending", "")
+        if pending_key not in self._pending_authorizations:
+            return self._consent_error_page(self._EXPIRED_MESSAGE, status_code=400)
+        return HTMLResponse(
+            self._consent_form_html(pending_key), headers=self._CONSENT_HEADERS
+        )
+
+    async def handle_consent_submission(self, request: Request) -> Response:
+        """POST /consent - verify the password, then finish the parked
+        authorization and redirect back to the OAuth client.
+
+        Never log or echo the submitted form data anywhere in here: the whole
+        point of this deployment's logging setup (access log disabled, see
+        README > Authentication) is that MCP_OAUTH_PASSWORD ends up in no log
+        file.
+        """
+        self._prune_pending()
+        form = await request.form()
+        pending_key = form.get("pending")
+        submitted = form.get("password")
+        pending_key = pending_key if isinstance(pending_key, str) else ""
+        submitted = submitted if isinstance(submitted, str) else ""
+
+        # Per-IP limit first: once an IP is over budget it gets a hard reject
+        # regardless of key validity - or password correctness, since an
+        # attacker at the limit must not learn whether attempt N+1 would have
+        # been the right guess.
+        ip = self._client_ip(request)
+        if len(self._recent_ip_failures(ip)) >= CONSENT_MAX_FAILURES_PER_IP:
+            logger.warning("Consent form rate limit hit for IP %s", ip)
+            return self._consent_error_page(
+                "Too many failed attempts. Try again later.", status_code=429
+            )
+
+        entry = self._pending_authorizations.get(pending_key)
+        if entry is None:
+            return self._consent_error_page(self._EXPIRED_MESSAGE, status_code=400)
+
+        password_ok = bool(self.password) and secrets.compare_digest(
+            submitted.encode("utf-8"), self.password.encode("utf-8")
+        )
+        if not password_ok:
+            entry.attempts += 1
+            self._consent_failures.setdefault(ip, []).append(time.time())
+            logger.info(
+                "Consent form: wrong password (attempt %d/%d for this key)",
+                entry.attempts,
+                CONSENT_MAX_ATTEMPTS_PER_KEY,
+            )
+            if entry.attempts >= CONSENT_MAX_ATTEMPTS_PER_KEY:
+                del self._pending_authorizations[pending_key]
+                return self._consent_error_page(
+                    "Too many failed attempts for this authorization. "
+                    "Start the connection again from your MCP client.",
+                    status_code=403,
+                )
+            return HTMLResponse(
+                self._consent_form_html(pending_key, error="Wrong password. Try again."),
+                status_code=401,
+                headers=self._CONSENT_HEADERS,
+            )
+
+        # Success: the key is single-use.
+        del self._pending_authorizations[pending_key]
+        try:
+            redirect_url = await self._complete_authorization(entry.client, entry.params)
+        except AuthorizeError:
+            # e.g. the client was dropped between /authorize and the form
+            # submission. Static message only - no exception detail.
+            return self._consent_error_page(
+                "The authorization request could not be completed. "
+                "Start the connection again from your MCP client.",
+                status_code=400,
+            )
+        return RedirectResponse(
+            redirect_url, status_code=302, headers={"Cache-Control": "no-store"}
+        )
+
+    def get_routes(self, mcp_path: Optional[str] = None) -> list[Route]:
+        # FastMCP calls this hook to collect the auth router; appending here
+        # adds the consent routes without touching the SDK-provided
+        # /authorize, /token, /register or /.well-known/* routes (LOCAL
+        # PATCH 5).
+        routes = super().get_routes(mcp_path)
+        routes.append(Route("/consent", endpoint=self.render_consent_form, methods=["GET"]))
+        routes.append(
+            Route("/consent", endpoint=self.handle_consent_submission, methods=["POST"])
+        )
+        return routes
 
     # --- Token exchange with configurable expiry ---
 

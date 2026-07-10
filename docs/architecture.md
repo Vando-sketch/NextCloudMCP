@@ -62,17 +62,21 @@ code is returned directly in the HTTP response to whoever calls `/authorize`.
 `MCP_OAUTH_PASSWORD` is the real gate and `Settings.__post_init__` (`config.py`) enforces
 it's set whenever `public_base_url` isn't localhost or `host` isn't a local bind address,
 and rejects the literal placeholder value shipped (commented out) in `.env.example`
-outright. The vendored file also carries three local patches: removing an upstream
-dead-code bug that made the password check unconditionally pass regardless of the
-password supplied; dropping the `scope`-based password channel (only `state` is checked
-now) since `scope` gets persisted onto every issued token; and creating the OAuth state
-dir / `oauth_tokens.json` with `0o700`/`0o600` permissions instead of default-umask ones
-- see the "LOCAL PATCHES" note at the top of `personal_auth.py`, and
-[README > Authentication](../README.md#authentication) for the full writeup (both bugs
-and both fixes were confirmed by live reproduction, not just code review). `server.py`
-also disables Uvicorn's default HTTP access log, since its default format would otherwise
-write the password (delivered via `/authorize`'s query string) to server logs in
-plaintext on every authorization.
+outright. The password is enforced by an interactive consent page (LOCAL PATCH 5 in
+`personal_auth.py`): `/authorize` parks the validated request under a random single-use
+pending key and redirects the browser to `GET`/`POST /consent` - routes the provider
+contributes by overriding FastMCP's `OAuthProvider.get_routes()` hook - where the
+password is checked in constant time and rate-limited (per pending key and per client
+IP) before any authorization code is minted. The vendored file carries five local
+patches in total (dead-code password bypass, `scope` password channel, state-file
+permissions, bounded refresh-token expiry, the consent page replacing the
+never-satisfiable `state`-carries-the-password check) - see the "LOCAL PATCHES" note at
+the top of `personal_auth.py`, and
+[README > Authentication](../README.md#authentication) for the full writeup (all
+confirmed by live reproduction, not just code review). `server.py` also disables
+Uvicorn's default HTTP access log: the password itself only travels in the `/consent`
+POST body, but the default log format would still record the single-use pending keys
+from `/consent` query strings.
 
 **caldav 3.x with the classic API.** The project pins `caldav>=3.0,<4` but uses the
 long-standing v2-style API (`DAVClient(...)`, `principal.calendars()`,

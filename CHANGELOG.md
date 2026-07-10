@@ -7,6 +7,24 @@ This project does not yet follow Semantic Versioning releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **OAuth password gate replaced by an interactive consent page** (D2, LOCAL
+  PATCH 5 in `personal_auth.py`). A live test against production claude.ai
+  confirmed the vendored provider's design - expecting the OAuth client to
+  embed `MCP_OAUTH_PASSWORD` in the `state` parameter - can never be
+  satisfied: Claude sends its own CSRF token as `state`, so the gate denied
+  every legitimate authorization and the connector could not be registered at
+  all (it failed closed; no exposure). `/authorize` now parks the request
+  under a random single-use pending key (10-minute TTL) and redirects the
+  browser to a `/consent` password form; the password is compared in constant
+  time (`secrets.compare_digest`, closing D6's non-constant-time substring
+  check as well), and the form is rate-limited (5 wrong attempts per pending
+  key, 10 failures per client IP per 15 minutes) since it is now a publicly
+  reachable password prompt. Form data is never logged; Uvicorn's access log
+  stays disabled. During connector setup you now enter the password on that
+  page instead of it (never) arriving via `state`.
+
 High-level summary of the improvement-plan work packages (see
 `docs/improvement-plan.md`) landed so far:
 
