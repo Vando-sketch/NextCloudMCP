@@ -36,6 +36,7 @@ def test_all_tools_registered(tools):
     assert set(tools) == {
         "list_task_lists",
         "list_tasks",
+        "get_task",
         "create_task",
         "update_task",
         "complete_task",
@@ -48,7 +49,19 @@ def test_create_task_uses_umlaut_parameter_names(tools):
     assert "fällig_datum" in schema["properties"]
     assert "priorität" in schema["properties"]
     assert "übergeordnete_aufgabe" in schema["properties"]
-    assert schema["required"] == ["liste", "titel"]
+    assert schema["required"] == ["list_name", "titel"]
+
+
+def test_update_task_has_felder_leeren_parameter(tools):
+    schema = tools["update_task"].parameters
+    assert "felder_leeren" in schema["properties"]
+
+
+def test_get_task_delegates_to_service(tools, fake_service):
+    fake_service.get_task.return_value = {"uid": "abc", "titel": "Milch kaufen"}
+    result = _run(tools["get_task"].fn("Personal", "abc"))
+    assert result == {"uid": "abc", "titel": "Milch kaufen"}
+    fake_service.get_task.assert_called_once_with("Personal", "abc")
 
 
 def test_list_task_lists_delegates_to_service(tools, fake_service):
@@ -67,7 +80,7 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
     fake_service.create_task.return_value = "new-uid"
     result = _run(
         tools["create_task"].fn(
-            liste="Personal",
+            list_name="Personal",
             titel="Neue Aufgabe",
             fällig_datum="2026-07-20",
             priorität="hoch",
@@ -75,17 +88,38 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
         )
     )
     assert result == {"uid": "new-uid"}
-    _, kwargs = fake_service.create_task.call_args
-    assert kwargs["titel"] == "Neue Aufgabe"
-    assert kwargs["faellig_datum"] == "2026-07-20"
-    assert kwargs["prioritaet"] == "hoch"
-    assert kwargs["uebergeordnete_aufgabe"] == "parent-uid"
+    args, _ = fake_service.create_task.call_args
+    list_name, fields = args
+    assert list_name == "Personal"
+    assert fields.titel == "Neue Aufgabe"
+    assert fields.faellig_datum == "2026-07-20"
+    assert fields.prioritaet == "hoch"
+    assert fields.uebergeordnete_aufgabe == "parent-uid"
 
 
 def test_update_task_returns_uid(tools, fake_service):
     result = _run(tools["update_task"].fn("Personal", "task-uid", titel="Neu"))
     assert result == {"uid": "task-uid"}
     fake_service.update_task.assert_called_once()
+    args, _ = fake_service.update_task.call_args
+    list_name, task_uid, fields = args
+    assert list_name == "Personal"
+    assert task_uid == "task-uid"
+    assert fields.titel == "Neu"
+
+
+def test_update_task_passes_felder_leeren_as_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["fällig_datum", "ort"]))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.clear == ("fällig_datum", "ort")
+
+
+def test_update_task_without_felder_leeren_has_empty_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", titel="Neu"))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.clear == ()
 
 
 def test_complete_task_delegates(tools, fake_service):

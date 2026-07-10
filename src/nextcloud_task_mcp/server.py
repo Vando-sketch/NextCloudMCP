@@ -11,6 +11,7 @@ import anyio.to_thread
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from . import mapping
 from .caldav_client import CalDavService
 from .config import Settings, is_local_hostname
 from .errors import TaskMcpError
@@ -100,8 +101,23 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return await _call(caldav_service.list_tasks, list_name, only_open=nur_offene)
 
     @mcp.tool
+    async def get_task(list_name: str, task_uid: str) -> dict[str, Any]:
+        """Fetch a single task by UID, without listing the whole task list.
+
+        Args:
+            list_name: Display name of the task list containing the task.
+            task_uid: UID of the task to fetch.
+
+        Returns:
+            A task dict with the same shape as one entry from list_tasks: uid,
+            titel, start_datum, fällig_datum, priorität, fortschritt_prozent,
+            status, ort, url, tags, notizen, übergeordnete_uid.
+        """
+        return await _call(caldav_service.get_task, list_name, task_uid)
+
+    @mcp.tool
     async def create_task(
-        liste: str,
+        list_name: str,
         titel: str,
         start_datum: str | None = None,
         fällig_datum: str | None = None,
@@ -118,7 +134,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         """Create a new task in a Nextcloud task list.
 
         Args:
-            liste: Display name of the target task list.
+            list_name: Display name of the target task list.
             titel: Task title (VTODO SUMMARY).
             start_datum: Optional ISO 8601 date/datetime -> DTSTART.
             fällig_datum: Optional ISO 8601 date/datetime -> DUE.
@@ -135,12 +151,16 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             übergeordnete_aufgabe: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
 
+        Date/time semantics for start_datum and fällig_datum: a value that is
+        exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
+        (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
+        datetime; a *naive* datetime (no UTC offset, e.g.
+        "2026-07-20T14:00:00") is interpreted as UTC.
+
         Returns:
             {"uid": the new task's UID}.
         """
-        new_uid = await _call(
-            caldav_service.create_task,
-            liste,
+        fields = mapping.TaskFields(
             titel=titel,
             start_datum=start_datum,
             faellig_datum=fällig_datum,
@@ -154,6 +174,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=übergeordnete_aufgabe,
         )
+        new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
 
     @mcp.tool
@@ -172,6 +193,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         übergeordnete_aufgabe: str | None = None,
+        felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
 
@@ -179,15 +201,22 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             list_name: Display name of the task list containing the task.
             task_uid: UID of the task to update.
             (all other args): Same meaning and mapping as in create_task; a field
-                left as None is left unchanged on the existing task.
+                left as None is left unchanged on the existing task. Date/time
+                semantics also match create_task: a "YYYY-MM-DD" value creates an
+                all-day entry, and naive datetimes are interpreted as UTC.
+            felder_leeren: Optional list of field names to clear (remove the
+                property from the task entirely) instead of changing them.
+                Accepted values: "start_datum", "fällig_datum", "priorität",
+                "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
+                "notizen", "sichtbarkeit", "übergeordnete_aufgabe". "titel"
+                cannot be cleared. Naming an unknown field, or naming a field
+                here that is *also* given a new value in the same call, is an
+                error.
 
         Returns:
             {"uid": task_uid} on success.
         """
-        await _call(
-            caldav_service.update_task,
-            list_name,
-            task_uid,
+        fields = mapping.TaskFields(
             titel=titel,
             start_datum=start_datum,
             faellig_datum=fällig_datum,
@@ -200,7 +229,9 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=übergeordnete_aufgabe,
+            clear=tuple(felder_leeren) if felder_leeren else (),
         )
+        await _call(caldav_service.update_task, list_name, task_uid, fields)
         return {"uid": task_uid}
 
     @mcp.tool

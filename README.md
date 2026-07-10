@@ -160,9 +160,17 @@ is a dict with: `uid`, `titel`, `start_datum`, `fällig_datum`, `priorität`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `notizen`, `übergeordnete_uid` (parent task UID, or `null` if not a subtask).
 
-### `create_task(liste, titel, ...)`
+A date-only `start_datum`/`fällig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
+anything else is a datetime.
 
-Creates a task. Required: `liste`, `titel`. Optional fields and their CalDAV mapping:
+### `get_task(list_name, task_uid)`
+
+Fetches a single task by UID, without listing the whole task list. Returns the same
+dict shape as one entry from `list_tasks`.
+
+### `create_task(list_name, titel, ...)`
+
+Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV mapping:
 
 | Parameter | CalDAV property | Notes |
 |---|---|---|
@@ -184,11 +192,23 @@ Creates a task. Required: `liste`, `titel`. Optional fields and their CalDAV map
 date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
 RFC 5545, VALARM triggers must be in UTC).
 
+**Date/time semantics** (applies to `start_datum`, `fällig_datum`, and absolute
+`erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
+(`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
+offset) is interpreted as UTC.
+
 ### `update_task(list_name, task_uid, ...)`
 
 Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
 changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
 *all* existing reminders on the task.
+
+To remove a property entirely (e.g. delete a due date), list its field name in the
+optional `felder_leeren` parameter instead of just omitting it — omitting a field
+leaves it unchanged. Accepted names: `start_datum`, `fällig_datum`, `priorität`,
+`fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
+`übergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
+cleared in the same call. See [`docs/tools.md`](docs/tools.md) for details and examples.
 
 ### `complete_task(list_name, task_uid)`
 

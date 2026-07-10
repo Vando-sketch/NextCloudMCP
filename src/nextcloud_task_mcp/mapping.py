@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -15,6 +17,66 @@ VISIBILITY_LABELS: dict[str, str] = {
     "privat": "PRIVATE",
     "vertraulich": "CONFIDENTIAL",
 }
+
+# Matches exactly "YYYY-MM-DD" (length 10). `date.fromisoformat` on Python
+# 3.11+ also accepts other forms (basic format, week dates, ...) that we do
+# NOT want to treat as all-day dates here, so the date-only branch of
+# `parse_datetime_input` is gated on this pattern rather than a bare
+# try/except around `date.fromisoformat` (B1).
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Maps the German, LLM-facing `felder_leeren` entry name to the
+# (TaskFields attribute name, iCalendar property name) it clears. "titel" is
+# deliberately absent - clearing the title is not a supported operation.
+# "erinnerungen" has no single iCalendar property (it clears all VALARM
+# subcomponents instead), hence the `None` ical name, handled specially in
+# `apply_task_fields`.
+_CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
+    "start_datum": ("start_datum", "dtstart"),
+    "fällig_datum": ("faellig_datum", "due"),
+    "priorität": ("prioritaet", "priority"),
+    "fortschritt_prozent": ("fortschritt_prozent", "percent-complete"),
+    "ort": ("ort", "location"),
+    "url": ("url", "url"),
+    "tags": ("tags", "categories"),
+    "erinnerungen": ("erinnerungen", None),
+    "notizen": ("notizen", "description"),
+    "sichtbarkeit": ("sichtbarkeit", "class"),
+    "übergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
+}
+
+
+@dataclass(frozen=True)
+class TaskFields:
+    """The optional task fields shared by create_task/update_task, in one place.
+
+    This is the single definition of the (previously hand-copied five times,
+    C3) 13-field task parameter list. The MCP tool functions in `server.py`
+    keep their own flat, German, umlaut-bearing parameter lists - that's the
+    LLM-facing tool contract - and build a `TaskFields` internally; everything
+    below that layer (`CalDavService`, `apply_task_fields`) works with this
+    dataclass instead of a long kwarg list.
+
+    A field left as `None` means "leave unchanged" (update_task) or "not set"
+    (create_task). `clear` names fields to remove entirely on update_task
+    instead (B3) - see `apply_task_fields` for the accepted names and the
+    validation rules (unknown names, and setting+clearing the same field in
+    one call, both raise `InvalidTaskDataError`).
+    """
+
+    titel: str | None = None
+    start_datum: str | None = None
+    faellig_datum: str | None = None
+    prioritaet: str | None = None
+    fortschritt_prozent: int | None = None
+    ort: str | None = None
+    url: str | None = None
+    tags: list[str] | None = None
+    erinnerungen: list[str] | None = None
+    notizen: str | None = None
+    sichtbarkeit: str | None = None
+    uebergeordnete_aufgabe: str | None = None
+    clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
 def priority_label_to_ical(label: str) -> int:
@@ -55,19 +117,39 @@ def visibility_label_to_ical(label: str) -> str:
 
 
 def parse_datetime_input(value: str) -> date | datetime:
-    """Parse an ISO 8601 date or datetime string, accepting a trailing 'Z'."""
+    """Parse an ISO 8601 date or datetime string, accepting a trailing 'Z'.
+
+    Two rules, applied consistently wherever this is used (DTSTART, DUE, and
+    - via `_parse_absolute_trigger` - absolute VALARM triggers):
+
+    - A date-only string of exactly the form "YYYY-MM-DD" (length 10) is
+      parsed as a `date`, producing an all-day (`VALUE=DATE`) iCalendar
+      property (B1). `date.fromisoformat` is tried first for this case;
+      other date-like strings that `date.fromisoformat` would also accept on
+      Python 3.11+ (basic format, week dates, ...) are deliberately NOT
+      treated as all-day here - only the canonical extended form is.
+    - Anything else is parsed as a `datetime`. A *naive* datetime (no UTC
+      offset) is interpreted as UTC (B2) - the same rule already used for
+      absolute VALARM triggers, so the same-looking input is no longer
+      interpreted two different ways depending on which property it ends up
+      in.
+    """
     text = value.strip()
+    if _DATE_ONLY_RE.match(text):
+        try:
+            return date.fromisoformat(text)
+        except ValueError:
+            pass  # fall through to the datetime/error path below
+
     normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
-        return datetime.fromisoformat(normalized)
+        dt = datetime.fromisoformat(normalized)
     except ValueError:
         pass
-    try:
-        return date.fromisoformat(text)
-    except ValueError:
-        raise InvalidTaskDataError(
-            f"Could not parse '{value}' as an ISO 8601 date or datetime."
-        ) from None
+    else:
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+    raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
 
 
 def _set(component, name: str, value: Any, parameters: dict[str, str] | None = None) -> None:
@@ -90,7 +172,8 @@ def _parse_absolute_trigger(spec: str) -> datetime | None:
     except ValueError:
         return None
     # RFC 5545 requires absolute VALARM triggers to be expressed in UTC;
-    # a naive input is assumed to already be UTC.
+    # a naive input is assumed to already be UTC (same rule as
+    # `parse_datetime_input`, B2).
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
@@ -128,7 +211,9 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
 
     `spec` is either a relative RFC 5545 duration (e.g. "-P1D", "-PT1H"),
     resolved against DUE if present, otherwise DTSTART, or an absolute
-    ISO 8601 datetime.
+    ISO 8601 datetime. This works the same whether DUE/DTSTART is an all-day
+    `date` or a full `datetime` - RFC 5545 permits a relative VALARM trigger
+    to be RELATED to a DATE-valued DUE/DTSTART.
     """
     trigger_value, trigger_params = _parse_trigger(spec, has_due=has_due, has_start=has_start)
     alarm = Alarm()
@@ -138,60 +223,82 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
     return alarm
 
 
-def apply_task_fields(
-    todo,
-    *,
-    titel: str | None = None,
-    start_datum: str | None = None,
-    faellig_datum: str | None = None,
-    prioritaet: str | None = None,
-    fortschritt_prozent: int | None = None,
-    ort: str | None = None,
-    url: str | None = None,
-    tags: list[str] | None = None,
-    erinnerungen: list[str] | None = None,
-    notizen: str | None = None,
-    sichtbarkeit: str | None = None,
-    uebergeordnete_aufgabe: str | None = None,
-) -> None:
-    """Apply the given (non-None) fields onto an icalendar VTODO component in place.
+def _validate_clear(fields: TaskFields, clear: tuple[str, ...]) -> None:
+    unknown = sorted({name for name in clear if name not in _CLEAR_SPECS})
+    if unknown:
+        raise InvalidTaskDataError(
+            f"Unknown felder_leeren entry/entries: {', '.join(unknown)}. "
+            f"Expected one of: {', '.join(_CLEAR_SPECS)}."
+        )
+    conflicts = sorted(
+        {name for name in clear if getattr(fields, _CLEAR_SPECS[name][0]) is not None}
+    )
+    if conflicts:
+        raise InvalidTaskDataError(
+            f"Cannot both set and clear the same field in one call: {', '.join(conflicts)}."
+        )
+
+
+def apply_task_fields(todo, fields: TaskFields) -> None:
+    """Apply the given `TaskFields` onto an icalendar VTODO component in place.
 
     Fields left as None are left untouched, which is what gives create_task
-    and update_task their "only set what's provided" semantics.
+    and update_task their "only set what's provided" semantics. Field names
+    listed in `fields.clear` are removed from the component entirely (B3);
+    clearing and setting the same field in one call, or naming an unknown
+    field (including "titel", which cannot be cleared), raises
+    `InvalidTaskDataError`.
     """
-    if titel is not None:
-        _set(todo, "summary", titel)
-    if start_datum is not None:
-        _set(todo, "dtstart", parse_datetime_input(start_datum))
-    if faellig_datum is not None:
-        _set(todo, "due", parse_datetime_input(faellig_datum))
-    if prioritaet is not None:
-        _set(todo, "priority", priority_label_to_ical(prioritaet))
-    if fortschritt_prozent is not None:
-        if not 0 <= fortschritt_prozent <= 100:
-            raise InvalidTaskDataError(
-                f"fortschritt_prozent must be between 0 and 100, got {fortschritt_prozent}."
-            )
-        _set(todo, "percent-complete", fortschritt_prozent)
-    if ort is not None:
-        _set(todo, "location", ort)
-    if url is not None:
-        _set(todo, "url", url)
-    if tags is not None:
-        _set(todo, "categories", list(tags))
-    if notizen is not None:
-        _set(todo, "description", notizen)
-    if sichtbarkeit is not None:
-        _set(todo, "class", visibility_label_to_ical(sichtbarkeit))
-    if uebergeordnete_aufgabe is not None:
-        _set(todo, "related-to", uebergeordnete_aufgabe, parameters={"RELTYPE": "PARENT"})
+    clear = tuple(fields.clear or ())
+    _validate_clear(fields, clear)
 
-    if erinnerungen is not None:
+    # Clears run first, so a later set of a *different* field (and the
+    # erinnerungen rebuild below) observe the final DTSTART/DUE presence.
+    for name in clear:
+        _, ical_name = _CLEAR_SPECS[name]
+        if name == "erinnerungen":
+            todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
+        elif ical_name is not None and ical_name in todo:
+            del todo[ical_name]
+
+    if fields.titel is not None:
+        _set(todo, "summary", fields.titel)
+    if fields.start_datum is not None:
+        _set(todo, "dtstart", parse_datetime_input(fields.start_datum))
+    if fields.faellig_datum is not None:
+        _set(todo, "due", parse_datetime_input(fields.faellig_datum))
+    if fields.prioritaet is not None:
+        _set(todo, "priority", priority_label_to_ical(fields.prioritaet))
+    if fields.fortschritt_prozent is not None:
+        if not 0 <= fields.fortschritt_prozent <= 100:
+            raise InvalidTaskDataError(
+                f"fortschritt_prozent must be between 0 and 100, got {fields.fortschritt_prozent}."
+            )
+        _set(todo, "percent-complete", fields.fortschritt_prozent)
+    if fields.ort is not None:
+        _set(todo, "location", fields.ort)
+    if fields.url is not None:
+        _set(todo, "url", fields.url)
+    if fields.tags is not None:
+        _set(todo, "categories", list(fields.tags))
+    if fields.notizen is not None:
+        _set(todo, "description", fields.notizen)
+    if fields.sichtbarkeit is not None:
+        _set(todo, "class", visibility_label_to_ical(fields.sichtbarkeit))
+    if fields.uebergeordnete_aufgabe is not None:
+        _set(
+            todo,
+            "related-to",
+            fields.uebergeordnete_aufgabe,
+            parameters={"RELTYPE": "PARENT"},
+        )
+
+    if fields.erinnerungen is not None:
         todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
         has_due = "due" in todo
         has_start = "dtstart" in todo
         title_for_alarm = str(todo.get("summary", "Reminder"))
-        for spec in erinnerungen:
+        for spec in fields.erinnerungen:
             todo.add_component(
                 build_alarm(spec, title_for_alarm, has_due=has_due, has_start=has_start)
             )
