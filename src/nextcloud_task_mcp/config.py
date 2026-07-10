@@ -46,6 +46,10 @@ class Settings:
     port: int
     allow_insecure_http: bool = False
     caldav_timeout_seconds: int = 30
+    # Bounds how long a leaked oauth_tokens.json grants indefinite access for
+    # (D5) - PersonalAuthProvider previously minted refresh tokens with
+    # expires_at=None (never expire); see personal_auth.py LOCAL PATCH 4.
+    oauth_refresh_token_expiry_seconds: int = 180 * 24 * 60 * 60
 
     def __post_init__(self) -> None:
         if self.oauth_password == _PLACEHOLDER_OAUTH_PASSWORD:
@@ -122,6 +126,17 @@ class Settings:
                 f"MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS must be an integer, got: {expiry_raw!r}"
             ) from exc
 
+        refresh_expiry_raw = os.environ.get(
+            "MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", str(180 * 24 * 60 * 60)
+        )
+        try:
+            oauth_refresh_token_expiry_seconds = int(refresh_expiry_raw)
+        except ValueError as exc:
+            raise ConfigError(
+                f"MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS must be an integer, got: "
+                f"{refresh_expiry_raw!r}"
+            ) from exc
+
         allowed_domains_raw = os.environ.get("MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS")
         oauth_allowed_redirect_domains = (
             [domain.strip() for domain in allowed_domains_raw.split(",") if domain.strip()]
@@ -148,6 +163,7 @@ class Settings:
             oauth_state_dir=os.environ.get("MCP_OAUTH_STATE_DIR", ".oauth-state"),
             oauth_allowed_redirect_domains=oauth_allowed_redirect_domains,
             oauth_access_token_expiry_seconds=oauth_access_token_expiry_seconds,
+            oauth_refresh_token_expiry_seconds=oauth_refresh_token_expiry_seconds,
             host=os.environ.get("MCP_HOST", "127.0.0.1"),
             port=port,
             allow_insecure_http=allow_insecure_http,

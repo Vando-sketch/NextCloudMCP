@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 nextcloud-task-mcp = "nextcloud_task_mcp.server:main"
+nextcloud-task-mcp-admin = "nextcloud_task_mcp.admin:main"
 
 [build-system]
 requires = ["hatchling"]
