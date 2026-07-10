@@ -258,6 +258,42 @@ def test_from_env_rejects_non_integer_oauth_access_token_expiry_seconds(
         Settings.from_env()
 
 
+# --- Settings.from_env(): MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS (D5) ---
+
+
+def test_from_env_default_oauth_refresh_token_expiry_seconds(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", raising=False)
+
+    settings = Settings.from_env()
+    assert settings.oauth_refresh_token_expiry_seconds == 180 * 24 * 60 * 60
+
+
+def test_from_env_reads_custom_oauth_refresh_token_expiry_seconds(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", "3600")
+
+    settings = Settings.from_env()
+    assert settings.oauth_refresh_token_expiry_seconds == 3600
+
+
+def test_from_env_rejects_non_integer_oauth_refresh_token_expiry_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", "forever")
+
+    with pytest.raises(ConfigError, match="MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS"):
+        Settings.from_env()
+
+
+def test_default_oauth_refresh_token_expiry_seconds_on_settings_dataclass():
+    # The dataclass default (used when Settings is constructed directly, not
+    # via from_env - e.g. in tests) must match from_env's default too.
+    settings = _settings()
+    assert settings.oauth_refresh_token_expiry_seconds == 180 * 24 * 60 * 60
+
+
 # --- Settings.from_env(): MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS CSV parsing (E1) ---
 
 

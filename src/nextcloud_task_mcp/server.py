@@ -65,6 +65,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         password=settings.oauth_password,
         allowed_redirect_domains=allowed_redirect_domains,
         access_token_expiry_seconds=settings.oauth_access_token_expiry_seconds,
+        refresh_token_expiry_seconds=settings.oauth_refresh_token_expiry_seconds,
         state_dir=settings.oauth_state_dir,
     )
     mcp = FastMCP(name="nextcloud-task-mcp", auth=auth)

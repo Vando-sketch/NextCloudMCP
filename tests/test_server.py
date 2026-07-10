@@ -243,6 +243,23 @@ def test_build_server_respects_explicitly_configured_redirect_domains(settings, 
     assert _allowed_redirect_domains(mcp) == ["only-this.example.com"]
 
 
+# --- Token expiry settings wired through to PersonalAuthProvider (D5) ---
+
+
+def test_build_server_wires_refresh_token_expiry_seconds_through(settings, fake_service):
+    public_settings = replace(settings, oauth_refresh_token_expiry_seconds=1234)
+    mcp = build_server(public_settings, service=fake_service)
+    assert isinstance(mcp.auth, PersonalAuthProvider)
+    assert mcp.auth.refresh_token_expiry_seconds == 1234
+
+
+def test_build_server_wires_access_token_expiry_seconds_through(settings, fake_service):
+    public_settings = replace(settings, oauth_access_token_expiry_seconds=5678)
+    mcp = build_server(public_settings, service=fake_service)
+    assert isinstance(mcp.auth, PersonalAuthProvider)
+    assert mcp.auth.access_token_expiry_seconds == 5678
+
+
 # --- main(): access-log-disabled security control must not silently regress (E7) ---
 #
 # Uvicorn's default access log records the full request path including the

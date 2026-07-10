@@ -1,15 +1,15 @@
 # Vendored from https://github.com/crumrine/fastmcp-personal-auth
-# (commit as of 2026-07-08, file personal_auth.py), with one local security
-# patch (see "LOCAL PATCH" below) - otherwise unmodified.
+# (commit as of 2026-07-08, file personal_auth.py), with four local security
+# patches (see "LOCAL PATCHES" below) - otherwise unmodified.
 #
 # fastmcp-personal-auth is not published as an installable package - its own
 # README instructs consumers to copy this module directly into their project.
-# It is included here verbatim (plus the one documented patch) rather than
+# It is included here verbatim (plus the documented patches) rather than
 # reformatted so that future updates can be diffed against upstream.
 #
-# LOCAL PATCHES (patches 1-2 applied 2026-07-09, patch 3 applied 2026-07-10),
-# all confirmed by live reproduction against a running instance, not just code
-# review:
+# LOCAL PATCHES (patches 1-2 applied 2026-07-09, patches 3-4 applied
+# 2026-07-10), all confirmed by live reproduction against a running instance,
+# not just code review:
 #
 # 1. PersonalAuthProvider.authorize() had an "auto-approve for allowed
 #    redirect domains" fallback in its password check that unconditionally
@@ -40,6 +40,36 @@
 #    directory's permissions) as 0o700, and oauth_tokens.json is now written
 #    via os.open(..., 0o600) so it's never briefly or permanently
 #    group/world-readable.
+#
+# 4. Refresh tokens were minted with `expires_at=None` - i.e. they never
+#    expire, so a single leak of oauth_tokens.json grants indefinite access
+#    even after the leak is noticed (D5). A new constructor parameter,
+#    `refresh_token_expiry_seconds` (default 180 days;
+#    `PersonalAuthProvider(..., refresh_token_expiry_seconds=None)` restores
+#    the original never-expires behavior for anyone who wants it), is now
+#    applied when a refresh token is first issued in
+#    `exchange_authorization_code`.
+#
+#    Investigation of the base class before patching: `InMemoryOAuthProvider
+#    .load_refresh_token` (inherited unmodified here) already correctly
+#    enforces whatever `expires_at` is set on a `RefreshToken` - it checks
+#    `expires_at is not None and expires_at < time.time()` and revokes the
+#    pair, returning None - so once a refresh token actually carries an
+#    `expires_at`, expiry is enforced with no override needed there.
+#
+#    However, `InMemoryOAuthProvider.exchange_refresh_token` (the token
+#    *rotation* path, used every time a refresh token is redeemed) mints its
+#    *replacement* refresh token using that module's own
+#    `DEFAULT_REFRESH_TOKEN_EXPIRY_SECONDS = None` constant, which is not
+#    parameterized and can't be overridden by a subclass short of
+#    reimplementing the method - so without further changes, the very first
+#    refresh token would expire on schedule but every token it rotates into
+#    would silently revert to "never expires", defeating the bound. This
+#    class now overrides `exchange_refresh_token` to call `super()` (so the
+#    rotation, scope validation, and old-token revocation logic stays
+#    upstream's) and then re-stamp the newly-issued refresh token's
+#    `expires_at` from `self.refresh_token_expiry_seconds` before persisting
+#    state.
 #
 # MIT License
 #
@@ -113,6 +143,7 @@ from mcp.server.auth.settings import ClientRegistrationOptions
 logger = logging.getLogger("personal-auth")
 
 DEFAULT_ACCESS_TOKEN_EXPIRY = 30 * 24 * 60 * 60  # 30 days
+DEFAULT_REFRESH_TOKEN_EXPIRY = 180 * 24 * 60 * 60  # 180 days (LOCAL PATCH 4)
 DEFAULT_STATE_DIR = ".oauth-state"
 
 
@@ -137,6 +168,7 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
         password: Optional[str] = None,
         allowed_redirect_domains: Optional[list[str]] = None,
         access_token_expiry_seconds: int = DEFAULT_ACCESS_TOKEN_EXPIRY,
+        refresh_token_expiry_seconds: Optional[int] = DEFAULT_REFRESH_TOKEN_EXPIRY,
         state_dir: Optional[str] = None,
     ):
         """
@@ -148,6 +180,11 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
                 Defaults to ["claude.ai", "claude.com", "localhost"]. Set to None
                 to allow all domains (not recommended for public servers).
             access_token_expiry_seconds: How long access tokens last. Default 30 days.
+            refresh_token_expiry_seconds: How long issued refresh tokens remain
+                valid, bounding how long a leaked oauth_tokens.json grants access
+                for (D5, LOCAL PATCH 4). Default 180 days. Pass None to restore
+                the original upstream behavior of refresh tokens that never
+                expire.
             state_dir: Directory for persisting OAuth state. Default ".oauth-state".
         """
         super().__init__(
@@ -160,6 +197,7 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
             "claude.ai", "claude.com", "localhost"
         ]
         self.access_token_expiry_seconds = access_token_expiry_seconds
+        self.refresh_token_expiry_seconds = refresh_token_expiry_seconds
         self._state_dir = Path(state_dir or DEFAULT_STATE_DIR)
         self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         # mkdir's mode= is masked by the umask and won't fix an already-existing
@@ -285,11 +323,18 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
             scopes=authorization_code.scopes,
             expires_at=access_token_expires_at,
         )
+        # Bounded by default (D5, LOCAL PATCH 4) - only truly `None` (never
+        # expires) if the operator explicitly configured it that way.
+        refresh_token_expires_at = (
+            int(time.time() + self.refresh_token_expiry_seconds)
+            if self.refresh_token_expiry_seconds is not None
+            else None
+        )
         self.refresh_tokens[refresh_token_value] = RefreshToken(
             token=refresh_token_value,
             client_id=client.client_id,
             scopes=authorization_code.scopes,
-            expires_at=None,
+            expires_at=refresh_token_expires_at,
         )
 
         self._access_to_refresh_map[access_token_value] = refresh_token_value
@@ -305,7 +350,17 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
         )
 
     async def exchange_refresh_token(self, client, refresh_token, scopes):
+        # See LOCAL PATCH 4 above: the base implementation always mints the
+        # *replacement* refresh token (rotation) with expires_at=None,
+        # regardless of what this class's refresh_token_expiry_seconds says -
+        # re-stamp it here so a bounded lifetime actually survives rotation.
         result = await super().exchange_refresh_token(client, refresh_token, scopes)
+        if self.refresh_token_expiry_seconds is not None and result.refresh_token is not None:
+            new_refresh_token = self.refresh_tokens.get(result.refresh_token)
+            if new_refresh_token is not None:
+                new_refresh_token.expires_at = int(
+                    time.time() + self.refresh_token_expiry_seconds
+                )
         self._save_state()
         return result
 
