@@ -65,6 +65,12 @@ def test_get_task_delegates_to_service(tools, fake_service):
     fake_service.get_task.assert_called_once_with("Personal", "abc")
 
 
+def test_get_task_returns_wiederholung_field(tools, fake_service):
+    fake_service.get_task.return_value = {"uid": "abc", "wiederholung": "FREQ=WEEKLY"}
+    result = _run(tools["get_task"].fn("Personal", "abc"))
+    assert result["wiederholung"] == "FREQ=WEEKLY"
+
+
 def test_list_task_lists_delegates_to_service(tools, fake_service):
     fake_service.list_task_lists.return_value = [{"name": "Personal", "url": "https://x/"}]
     result = _run(tools["list_task_lists"].fn())
@@ -74,7 +80,25 @@ def test_list_task_lists_delegates_to_service(tools, fake_service):
 def test_list_tasks_passes_nur_offene_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(tools["list_tasks"].fn("Personal", nur_offene=False))
-    fake_service.list_tasks.assert_called_once_with("Personal", only_open=False)
+    fake_service.list_tasks.assert_called_once_with(
+        "Personal", only_open=False, due_before=None, due_after=None, limit=None
+    )
+
+
+def test_list_tasks_passes_filter_params_through(tools, fake_service):
+    fake_service.list_tasks.return_value = []
+    _run(
+        tools["list_tasks"].fn(
+            "Personal", fällig_vor="2026-08-01", fällig_nach="2026-07-01", limit=5
+        )
+    )
+    fake_service.list_tasks.assert_called_once_with(
+        "Personal",
+        only_open=True,
+        due_before="2026-08-01",
+        due_after="2026-07-01",
+        limit=5,
+    )
 
 
 def test_create_task_maps_german_params_to_service_call(tools, fake_service):
@@ -164,7 +188,7 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
     started = threading.Event()
     release = threading.Event()
 
-    def blocking_list_tasks(list_name, only_open=True):
+    def blocking_list_tasks(list_name, only_open=True, due_before=None, due_after=None, limit=None):
         started.set()
         release.wait(timeout=5)
         return []

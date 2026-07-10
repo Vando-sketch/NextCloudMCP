@@ -57,6 +57,19 @@ def test_custom_timeout_passed_to_dav_client(mock_dav_client):
     assert kwargs["timeout"] == 5
 
 
+# --- Rate-limit backoff on 429/503 (A5) ---
+
+
+def test_rate_limit_handling_enabled_by_default(mock_dav_client):
+    CalDavService(url="https://cloud.example.com/dav/", username="u", password="p")
+    _, kwargs = mock_dav_client.call_args
+    assert kwargs["rate_limit_handle"] is True
+    assert isinstance(kwargs["rate_limit_default_sleep"], int)
+    assert isinstance(kwargs["rate_limit_max_sleep"], int)
+    assert kwargs["rate_limit_default_sleep"] > 0
+    assert kwargs["rate_limit_max_sleep"] >= kwargs["rate_limit_default_sleep"]
+
+
 @pytest.fixture
 def principal(mock_dav_client):
     return mock_dav_client.return_value.principal.return_value
@@ -103,6 +116,7 @@ def test_list_tasks_parses_todos(service, principal):
             "tags": [],
             "notizen": None,
             "übergeordnete_uid": None,
+            "wiederholung": None,
         }
     ]
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from icalendar import Alarm, vDuration
@@ -352,6 +352,21 @@ def _extract_parent_uid(component) -> str | None:
     return None
 
 
+def _extract_rrule(component) -> str | None:
+    """Return the task's RRULE as raw RFC 5545 text (e.g. "FREQ=WEEKLY;BYDAY=MO"), or None.
+
+    Read-only (C5): this server has no way to create/edit recurrence, only
+    surface whether/how a task already recurs. `icalendar` exposes RRULE as a
+    `vRecur` property; `.to_ical()` serializes it back to the same textual form
+    RFC 5545 (and Nextcloud Tasks) uses, rather than exposing icalendar's
+    internal dict representation.
+    """
+    rrule = component.get("rrule")
+    if rrule is None:
+        return None
+    return rrule.to_ical().decode()
+
+
 def parse_vtodo(component) -> dict[str, Any]:
     """Parse an icalendar VTODO component into the server's German task dict."""
     priority = component.get("priority")
@@ -370,4 +385,74 @@ def parse_vtodo(component) -> dict[str, Any]:
         "tags": _extract_categories(component),
         "notizen": _get_text(component, "description"),
         "übergeordnete_uid": _extract_parent_uid(component),
+        "wiederholung": _extract_rrule(component),
     }
+
+
+def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
+    """Parse a `list_tasks` due-filter value/stored due value into a comparable UTC datetime.
+
+    Reuses `parse_datetime_input`, so a naive datetime is already normalized to
+    UTC per the same rule used everywhere else (B2). A bare `date` result (an
+    all-day due date, or an all-day filter bound) has no time component to
+    compare directly, so it's expanded to a single instant within that day:
+    start-of-day (00:00:00 UTC) when `end_of_day` is False, end-of-day
+    (23:59:59 UTC) when True. Callers use `end_of_day=True` only for the
+    `fällig_vor` (due-before) bound, so a date-only bound like "2026-07-20"
+    still includes tasks due at any time on the 20th; `fällig_nach`
+    (due-after) bounds and the tasks' own stored due values use
+    `end_of_day=False` (start-of-day), so a date-only bound includes tasks due
+    from the very start of that day onward, and an all-day task's own due date
+    compares as its earliest instant either way.
+    """
+    parsed = parse_datetime_input(value)
+    if isinstance(parsed, datetime):
+        return parsed
+    time_of_day = time(23, 59, 59) if end_of_day else time.min
+    return datetime.combine(parsed, time_of_day, tzinfo=timezone.utc)
+
+
+def filter_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    due_before: str | None = None,
+    due_after: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """Filter already-`parse_vtodo`-parsed task dicts by due-date range and/or cap the count (C4).
+
+    `due_before`/`due_after` are ISO 8601 date/datetime strings (same format
+    `parse_datetime_input` accepts elsewhere). When either is given, tasks with
+    no `fällig_datum` (due date) are excluded - a task can't be "due before X"
+    or "due after X" if it has no due date at all. See `_to_comparable_datetime`
+    for how date-vs-datetime bounds/values are normalized for comparison.
+
+    `limit`, if given, must be a positive integer; it caps the number of
+    results returned (applied last, after any due-date filtering).
+    """
+    if limit is not None and limit <= 0:
+        raise InvalidTaskDataError(f"limit must be greater than 0, got {limit}.")
+
+    if due_before is not None or due_after is not None:
+        before_bound = (
+            _to_comparable_datetime(due_before, end_of_day=True) if due_before is not None else None
+        )
+        after_bound = (
+            _to_comparable_datetime(due_after, end_of_day=False) if due_after is not None else None
+        )
+        filtered: list[dict[str, Any]] = []
+        for task in tasks:
+            due_text = task.get("fällig_datum")
+            if due_text is None:
+                continue
+            due_dt = _to_comparable_datetime(due_text, end_of_day=False)
+            if before_bound is not None and due_dt > before_bound:
+                continue
+            if after_bound is not None and due_dt < after_bound:
+                continue
+            filtered.append(task)
+        tasks = filtered
+
+    if limit is not None:
+        tasks = tasks[:limit]
+    return tasks

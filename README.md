@@ -12,6 +12,8 @@ Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, an
 - [Deployment guide](docs/deployment.md) — Ubuntu LXC + Tailscale + systemd + Claude connector setup
 - [Tool reference](docs/tools.md) — all tools with parameters, examples and error messages
 - [Architecture](docs/architecture.md) — module layout, request flow, design decisions
+- [Contributing](CONTRIBUTING.md) — dev setup, checks to run, pre-commit, vendored-file rules
+- [Changelog](CHANGELOG.md) — notable changes by work package
 
 ## How it works
 
@@ -153,15 +155,21 @@ schema Claude calls.
 Returns all available Nextcloud task lists as `{"name": ..., "url": ...}` dicts
 (display name and internal CalDAV URL/ID).
 
-### `list_tasks(list_name, nur_offene=True)`
+### `list_tasks(list_name, nur_offene=True, fällig_vor=None, fällig_nach=None, limit=None)`
 
 Returns tasks in a list. `nur_offene=True` (default) excludes completed tasks. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `fällig_datum`, `priorität`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
-`notizen`, `übergeordnete_uid` (parent task UID, or `null` if not a subtask).
+`notizen`, `übergeordnete_uid` (parent task UID, or `null` if not a subtask),
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only).
 
 A date-only `start_datum`/`fällig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
 anything else is a datetime.
+
+`fällig_vor`/`fällig_nach` optionally filter to tasks due before/after a given ISO 8601
+date or datetime (a date-only bound covers the whole day); either one excludes tasks with
+no due date at all. `limit` (must be `> 0`) caps the number of results, applied after any
+due-date filtering. See [`docs/tools.md`](docs/tools.md) for the exact boundary semantics.
 
 ### `get_task(list_name, task_uid)`
 
@@ -238,6 +246,13 @@ export NEXTCLOUD_CALDAV_URL=... NEXTCLOUD_USERNAME=... NEXTCLOUD_APP_PASSWORD=..
 export INTEGRATION_TEST_LIST="Test"   # an existing task list; tasks are created/deleted in it
 uv run pytest -q
 ```
+
+`.github/workflows/integration.yml` runs these on a weekly schedule (and on manual
+dispatch) against a disposable `nextcloud` Docker container, so this path is exercised
+against a real server periodically even though it's excluded from per-PR CI.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full local dev setup (lint/type-check/
+coverage commands, pre-commit hooks, and the vendored-file rules for `personal_auth.py`).
 
 ## License
 

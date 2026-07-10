@@ -87,19 +87,45 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return await _call(caldav_service.list_task_lists)
 
     @mcp.tool
-    async def list_tasks(list_name: str, nur_offene: bool = True) -> list[dict[str, Any]]:
+    async def list_tasks(
+        list_name: str,
+        nur_offene: bool = True,
+        fällig_vor: str | None = None,
+        fällig_nach: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         """List tasks in a Nextcloud task list.
 
         Args:
             list_name: Display name of the task list.
             nur_offene: If True (default), only return tasks that are not completed.
+            fällig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
+                before this point. A date-only bound (e.g. "2026-07-20") includes
+                tasks due at any time on that day.
+            fällig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
+                after this point. A date-only bound includes tasks due from the start
+                of that day onward.
+            limit: Optional maximum number of results to return (must be > 0).
+
+        If `fällig_vor` and/or `fällig_nach` is given, tasks with no fällig_datum
+        (due date) at all are excluded - they can't be judged "before"/"after"
+        anything. `limit` is applied after any due-date filtering.
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, fällig_datum,
             priorität, fortschritt_prozent, status, ort, url, tags, notizen,
-            übergeordnete_uid (None unless the task is a subtask).
+            übergeordnete_uid (None unless the task is a subtask), wiederholung
+            (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO", or None if the task
+            doesn't recur; read-only - this server can't create/edit recurrence).
         """
-        return await _call(caldav_service.list_tasks, list_name, only_open=nur_offene)
+        return await _call(
+            caldav_service.list_tasks,
+            list_name,
+            only_open=nur_offene,
+            due_before=fällig_vor,
+            due_after=fällig_nach,
+            limit=limit,
+        )
 
     @mcp.tool
     async def get_task(list_name: str, task_uid: str) -> dict[str, Any]:
@@ -112,7 +138,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             A task dict with the same shape as one entry from list_tasks: uid,
             titel, start_datum, fällig_datum, priorität, fortschritt_prozent,
-            status, ort, url, tags, notizen, übergeordnete_uid.
+            status, ort, url, tags, notizen, übergeordnete_uid, wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 

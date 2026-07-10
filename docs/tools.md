@@ -40,12 +40,15 @@ cost one extra CalDAV property request per calendar, so it's deliberately not do
 
 ---
 
-## `list_tasks(list_name, nur_offene=True)`
+## `list_tasks(list_name, nur_offene=True, fällig_vor=None, fällig_nach=None, limit=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `list_name` | string | yes | Display name of the task list |
 | `nur_offene` | boolean | no (default `true`) | Exclude completed tasks |
+| `fällig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
+| `fällig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
+| `limit` | integer | no | Max number of results; must be `> 0` |
 
 Result — one dict per task:
 
@@ -63,13 +66,31 @@ Result — one dict per task:
     "url": "https://example.com/steuer",
     "tags": ["Finanzen", "Wichtig"],
     "notizen": "Belege sammeln",
-    "übergeordnete_uid": null
+    "übergeordnete_uid": null,
+    "wiederholung": null
   }
 ]
 ```
 
 `übergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
+`wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
+otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
+only surfaces whether/how an existing task recurs.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
+
+### Filtering (`fällig_vor` / `fällig_nach` / `limit`)
+
+- If either `fällig_vor` or `fällig_nach` is given, tasks with **no** `fällig_datum` at all
+  are excluded from the result — a task without a due date can't be judged "before" or
+  "after" anything.
+- Both accept the same ISO 8601 date/datetime formats as `create_task`'s `fällig_datum`. A
+  date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `fällig_vor` expands
+  to the end of that day (`23:59:59` UTC), `fällig_nach` to the start of it (`00:00:00`
+  UTC) — so an all-day task due exactly on the boundary date is included by either bound.
+  A datetime bound (with a specific time) is used exactly as given.
+- `fällig_vor` and `fällig_nach` can be combined to select a range.
+- `limit` caps the number of results, applied *after* any due-date filtering. `limit <= 0`
+  is an error (`InvalidTaskDataError`).
 
 ---
 
@@ -82,7 +103,8 @@ Fetch a single task by UID, without listing the whole task list.
 | `list_name` | string | yes | Display name of the task list |
 | `task_uid` | string | yes | UID of the task to fetch |
 
-Returns the same dict shape as one entry from `list_tasks` (see above).
+Returns the same dict shape as one entry from `list_tasks` (see above), including
+`wiederholung`.
 
 ---
 
@@ -228,6 +250,7 @@ All failures come back as short, single-line MCP tool errors, for example:
   fällig_datum, priorität, fortschritt_prozent, ort, url, tags, erinnerungen, notizen,
   sichtbarkeit, übergeordnete_aufgabe.`
 - `Cannot both set and clear the same field in one call: fällig_datum.`
+- `limit must be greater than 0, got 0.` — `list_tasks`'s `limit` parameter was `<= 0`.
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).

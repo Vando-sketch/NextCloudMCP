@@ -88,7 +88,25 @@ class CalDavService:
     """Holds one reused CalDAV connection and exposes task CRUD operations on it."""
 
     def __init__(self, url: str, username: str, password: str, timeout: int = 30) -> None:
-        self._client = DAVClient(url=url, username=username, password=password, timeout=timeout)
+        self._client = DAVClient(
+            url=url,
+            username=username,
+            password=password,
+            timeout=timeout,
+            # A5: without this, caldav 3.2.1 raises RateLimitError immediately
+            # on a 429/503 response instead of backing off - a transient,
+            # server-side "slow down" turns into a hard failure for every
+            # caller. `rate_limit_handle=True` makes it sleep (honoring the
+            # server's Retry-After header when present, falling back to
+            # `rate_limit_default_sleep` otherwise) and retry instead;
+            # `rate_limit_max_sleep` caps how long any single wait can be, so
+            # a server asking for an extreme Retry-After can't stall a tool
+            # call indefinitely. These are caldav's own built-in retry
+            # mechanism - deliberately not reimplemented here.
+            rate_limit_handle=True,
+            rate_limit_default_sleep=5,
+            rate_limit_max_sleep=60,
+        )
         self._principal: DAVPrincipal | None = None
         # A1 moves CalDavService calls onto worker threads (via
         # anyio.to_thread.run_sync in server.py) so they no longer block the
@@ -201,8 +219,21 @@ class CalDavService:
                 for calendar, name in zip(calendars, names, strict=True)
             ]
 
-    def list_tasks(self, list_name: str, only_open: bool = True) -> list[dict[str, Any]]:
-        """Return all tasks in the given list, parsed into German task dicts."""
+    def list_tasks(
+        self,
+        list_name: str,
+        only_open: bool = True,
+        due_before: str | None = None,
+        due_after: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return tasks in the given list, parsed into German task dicts.
+
+        `due_before`/`due_after`/`limit` filter the already-parsed results via
+        `mapping.filter_tasks` (C4) - see its docstring for the exact
+        semantics (date-vs-datetime bound normalization, no-due-date
+        exclusion, and `limit` validation).
+        """
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -216,7 +247,10 @@ class CalDavService:
                 raise TaskListNotFoundError(f"Task list '{list_name}' was not found.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
-            return [mapping.parse_vtodo(todo.icalendar_component) for todo in todos]
+            tasks = [mapping.parse_vtodo(todo.icalendar_component) for todo in todos]
+            return mapping.filter_tasks(
+                tasks, due_before=due_before, due_after=due_after, limit=limit
+            )
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
         """Create a new task in the given list and return its UID."""

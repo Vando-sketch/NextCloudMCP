@@ -442,3 +442,136 @@ def test_extract_parent_uid_ignores_non_parent_reltype():
     todo.add("related-to", "sibling-uid", parameters={"RELTYPE": "CHILD"})
     parsed = mapping.parse_vtodo(todo)
     assert parsed["übergeordnete_uid"] is None
+
+
+# --- Recurrence surfaced read-only (C5) ---
+
+
+def test_parse_vtodo_surfaces_rrule_as_raw_text():
+    todo = _new_todo()
+    todo.add("rrule", {"FREQ": "WEEKLY", "BYDAY": ["MO"]})
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_parse_vtodo_wiederholung_is_none_when_not_recurring():
+    todo = _new_todo()
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["wiederholung"] is None
+
+
+# --- list_tasks filtering (C4) ---
+
+
+def _task(uid: str, fällig_datum: str | None) -> dict:
+    return {
+        "uid": uid,
+        "titel": uid,
+        "start_datum": None,
+        "fällig_datum": fällig_datum,
+        "priorität": None,
+        "fortschritt_prozent": 0,
+        "status": "offen",
+        "ort": None,
+        "url": None,
+        "tags": [],
+        "notizen": None,
+        "übergeordnete_uid": None,
+        "wiederholung": None,
+    }
+
+
+def test_filter_tasks_no_filters_returns_all_tasks_unchanged():
+    tasks = [_task("a", "2026-07-01"), _task("b", None)]
+    assert mapping.filter_tasks(tasks) == tasks
+
+
+def test_filter_tasks_due_after_excludes_earlier_and_no_due_date():
+    tasks = [
+        _task("early", "2026-07-01"),
+        _task("late", "2026-07-20"),
+        _task("no-due", None),
+    ]
+    result = mapping.filter_tasks(tasks, due_after="2026-07-10")
+    assert [t["uid"] for t in result] == ["late"]
+
+
+def test_filter_tasks_due_before_excludes_later_and_no_due_date():
+    tasks = [
+        _task("early", "2026-07-01"),
+        _task("late", "2026-07-20"),
+        _task("no-due", None),
+    ]
+    result = mapping.filter_tasks(tasks, due_before="2026-07-10")
+    assert [t["uid"] for t in result] == ["early"]
+
+
+def test_filter_tasks_due_before_and_after_combined_is_a_range():
+    tasks = [
+        _task("too-early", "2026-07-01"),
+        _task("in-range", "2026-07-10"),
+        _task("too-late", "2026-07-20"),
+    ]
+    result = mapping.filter_tasks(tasks, due_after="2026-07-05", due_before="2026-07-15")
+    assert [t["uid"] for t in result] == ["in-range"]
+
+
+def test_filter_tasks_date_only_due_before_bound_includes_all_day_task_on_boundary():
+    # An all-day task due exactly on the fällig_vor date must still be
+    # included: the bound expands to the end of that day (23:59:59 UTC), and
+    # the task's own all-day due date compares as its start-of-day instant.
+    tasks = [_task("boundary", "2026-07-20")]
+    result = mapping.filter_tasks(tasks, due_before="2026-07-20")
+    assert [t["uid"] for t in result] == ["boundary"]
+
+
+def test_filter_tasks_date_only_due_after_bound_includes_all_day_task_on_boundary():
+    tasks = [_task("boundary", "2026-07-20")]
+    result = mapping.filter_tasks(tasks, due_after="2026-07-20")
+    assert [t["uid"] for t in result] == ["boundary"]
+
+
+def test_filter_tasks_datetime_due_before_bound_excludes_all_day_task_next_day():
+    # An all-day task due the day *after* a datetime fällig_vor bound must be
+    # excluded, even though the bound's date matches - the bound is a precise
+    # instant here, not expanded to end-of-day (only date-only bounds are).
+    tasks = [_task("next-day", "2026-07-21")]
+    result = mapping.filter_tasks(tasks, due_before="2026-07-20T12:00:00")
+    assert result == []
+
+
+def test_filter_tasks_mixed_date_and_datetime_due_values():
+    tasks = [
+        _task("all-day", "2026-07-10"),
+        _task("timed", "2026-07-10T08:00:00+00:00"),
+    ]
+    result = mapping.filter_tasks(tasks, due_after="2026-07-01", due_before="2026-07-31")
+    assert {t["uid"] for t in result} == {"all-day", "timed"}
+
+
+def test_filter_tasks_limit_caps_result_count():
+    tasks = [_task("a", None), _task("b", None), _task("c", None)]
+    result = mapping.filter_tasks(tasks, limit=2)
+    assert [t["uid"] for t in result] == ["a", "b"]
+
+
+def test_filter_tasks_limit_applied_after_due_date_filter():
+    tasks = [
+        _task("a", "2026-07-01"),
+        _task("b", "2026-07-05"),
+        _task("c", "2026-07-10"),
+        _task("excluded", None),
+    ]
+    result = mapping.filter_tasks(tasks, due_after="2026-07-01", limit=2)
+    assert [t["uid"] for t in result] == ["a", "b"]
+
+
+@pytest.mark.parametrize("limit", [0, -1, -5])
+def test_filter_tasks_non_positive_limit_raises(limit):
+    with pytest.raises(InvalidTaskDataError):
+        mapping.filter_tasks([], limit=limit)
+
+
+def test_filter_tasks_invalid_due_bound_raises():
+    with pytest.raises(InvalidTaskDataError):
+        mapping.filter_tasks([], due_before="not-a-date")

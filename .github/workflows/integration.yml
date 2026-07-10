@@ -1,0 +1,104 @@
+# Scheduled integration test run against a real (containerized) Nextcloud
+# instance (E11). This complements ci.yml's unit tests, which mock the
+# `caldav` library entirely and never touch a real CalDAV server.
+#
+# NOTE: this workflow could not be executed/verified end-to-end while writing
+# it (no way to run GitHub Actions service containers in this environment).
+# The env vars it sets are wired to exactly what tests/test_integration.py
+# reads (NEXTCLOUD_CALDAV_URL / NEXTCLOUD_USERNAME / NEXTCLOUD_APP_PASSWORD /
+# INTEGRATION_TEST_LIST / RUN_INTEGRATION_TESTS), and the Nextcloud
+# auto-setup env vars below follow the documented `nextcloud` Docker image
+# contract - but the full flow (image boot, auto-install, calendar creation,
+# first real test run) has only been reviewed, not observed. If it fails on
+# its first scheduled/dispatched run, start by checking the "Wait for
+# Nextcloud to be ready" and "Provision the test task list" steps' output.
+name: Integration tests
+
+on:
+  schedule:
+    # Mondays at 04:00 UTC.
+    - cron: "0 4 * * 1"
+  workflow_dispatch: {}
+
+# Deliberately no `push`/`pull_request` trigger: this hits a real (if
+# ephemeral, containerized) Nextcloud instance and is too slow/flaky to gate
+# every PR on.
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    # Fail the workflow (and surface it) on any test failure - no silent
+    # green runs.
+    continue-on-error: false
+
+    services:
+      nextcloud:
+        image: nextcloud:latest
+        ports:
+          - 8080:80
+        env:
+          # Auto-setup env vars documented by the official `nextcloud` image's
+          # entrypoint: presence of NEXTCLOUD_ADMIN_USER/PASSWORD plus a
+          # database config (SQLITE_DATABASE here, to avoid needing a
+          # separate DB service container for a throwaway test instance)
+          # triggers `occ maintenance:install` automatically on first boot.
+          SQLITE_DATABASE: nextcloud
+          NEXTCLOUD_ADMIN_USER: admin
+          NEXTCLOUD_ADMIN_PASSWORD: ${{ secrets.INTEGRATION_NEXTCLOUD_ADMIN_PASSWORD || 'nextcloud-ci-admin-pw' }}
+
+    env:
+      NEXTCLOUD_USERNAME: admin
+      # Real deployments use a per-app password generated under Settings ->
+      # Security; for this disposable, network-isolated CI instance the admin
+      # account password is used directly to keep provisioning simple - it
+      # only exists for the lifetime of the job's service container.
+      NEXTCLOUD_APP_PASSWORD: ${{ secrets.INTEGRATION_NEXTCLOUD_ADMIN_PASSWORD || 'nextcloud-ci-admin-pw' }}
+      NEXTCLOUD_CALDAV_URL: "http://localhost:8080/remote.php/dav/"
+      INTEGRATION_TEST_LIST: "Test"
+      RUN_INTEGRATION_TESTS: "1"
+      # The container is plain http:// (no TLS) - Settings.from_env() would
+      # normally refuse that (D8), but tests/test_integration.py builds
+      # CalDavService directly and never goes through Settings, so this
+      # isn't actually read today. Set anyway in case that changes.
+      NEXTCLOUD_ALLOW_INSECURE_HTTP: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Wait for Nextcloud to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/status.php | grep -q '"installed":true'; then
+              echo "Nextcloud is up and installed."
+              exit 0
+            fi
+            echo "Waiting for Nextcloud... ($i/60)"
+            sleep 5
+          done
+          echo "Nextcloud did not become ready in time." >&2
+          exit 1
+
+      - name: Provision the test task list
+        run: |
+          container_id="$(docker ps -q --filter ancestor=nextcloud:latest)"
+          # The calendar app (bundled with Nextcloud, provides the CalDAV
+          # VTODO backend Tasks/this server both use) may ship disabled by
+          # default - make sure it's on before creating a calendar in it.
+          docker exec "$container_id" php occ app:enable calendar
+          # `dav:create-calendar` (part of the bundled DAV app) creates a
+          # calendar (= task list, from this server's point of view) for a
+          # user by uid.
+          docker exec "$container_id" php occ dav:create-calendar "$NEXTCLOUD_USERNAME" "$INTEGRATION_TEST_LIST"
+
+      - name: Run integration tests
+        run: uv run pytest tests/test_integration.py -q
