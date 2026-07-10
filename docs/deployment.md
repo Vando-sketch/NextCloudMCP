@@ -46,9 +46,10 @@ NEXTCLOUD_APP_PASSWORD=<app password from Settings -> Security>
 # Must match the public Funnel URL exactly (scheme + host), set up in step 4.
 PUBLIC_BASE_URL=https://<hostname>.<tailnet>.ts.net
 
-# Required for any non-localhost PUBLIC_BASE_URL - the server refuses to
-# start without it. This is the actual security gate on the OAuth /authorize
-# step now that the server is reachable from the public internet; the
+# Required for any non-localhost PUBLIC_BASE_URL, or if MCP_HOST below is
+# bound to a non-local address - the server refuses to start without it in
+# either case. This is the actual security gate on the OAuth /authorize step
+# now that the server is reachable from the public internet; the
 # redirect-domain allow-list alone does not stop a scripted client from
 # self-issuing a token. See README > Authentication.
 MCP_OAUTH_PASSWORD=<long random value>

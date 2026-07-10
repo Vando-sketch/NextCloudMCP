@@ -55,11 +55,14 @@ boundary against a scripted (non-browser) client - it only checks that a claimed
 `redirect_uri` matches, not that the caller controls that domain, and the authorization
 code is returned directly in the HTTP response to whoever calls `/authorize`.
 `MCP_OAUTH_PASSWORD` is the real gate and `Settings.__post_init__` (`config.py`) enforces
-it's set whenever `public_base_url` isn't localhost. The vendored file also carries two
-local patches: removing an upstream dead-code bug that made the password check
-unconditionally pass regardless of the password supplied, and dropping the `scope`-based
-password channel (only `state` is checked now) since `scope` gets persisted onto every
-issued token - see the "LOCAL PATCHES" note at the top of `personal_auth.py`, and
+it's set whenever `public_base_url` isn't localhost or `host` isn't a local bind address,
+and rejects the literal placeholder value shipped (commented out) in `.env.example`
+outright. The vendored file also carries three local patches: removing an upstream
+dead-code bug that made the password check unconditionally pass regardless of the
+password supplied; dropping the `scope`-based password channel (only `state` is checked
+now) since `scope` gets persisted onto every issued token; and creating the OAuth state
+dir / `oauth_tokens.json` with `0o700`/`0o600` permissions instead of default-umask ones
+- see the "LOCAL PATCHES" note at the top of `personal_auth.py`, and
 [README > Authentication](../README.md#authentication) for the full writeup (both bugs
 and both fixes were confirmed by live reproduction, not just code review). `server.py`
 also disables Uvicorn's default HTTP access log, since its default format would otherwise

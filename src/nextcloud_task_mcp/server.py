@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from .caldav_client import CalDavService
-from .config import Settings
+from .config import Settings, is_local_hostname
 from .errors import TaskMcpError
 from .personal_auth import PersonalAuthProvider
 
@@ -37,10 +38,24 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
     `service` can be injected for testing; defaults to a real CalDavService
     built from `settings`.
     """
+    allowed_redirect_domains = settings.oauth_allowed_redirect_domains
+    if allowed_redirect_domains is None and not is_local_hostname(
+        urlparse(settings.public_base_url).hostname
+    ):
+        # PersonalAuthProvider's own built-in default allow-list includes
+        # "localhost" (see its docstring), which is reasonable for its own
+        # local-dev use case but meaningless - and needlessly widens a
+        # security-relevant list - once PUBLIC_BASE_URL is public: a
+        # redirect_uri claiming host "localhost" can never actually reach the
+        # browser completing a real claude.ai OAuth flow against a public
+        # deployment. Only override when the operator hasn't explicitly set
+        # MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS themselves. (D9)
+        allowed_redirect_domains = ["claude.ai", "claude.com"]
+
     auth = PersonalAuthProvider(
         base_url=settings.public_base_url,
         password=settings.oauth_password,
-        allowed_redirect_domains=settings.oauth_allowed_redirect_domains,
+        allowed_redirect_domains=allowed_redirect_domains,
         access_token_expiry_seconds=settings.oauth_access_token_expiry_seconds,
         state_dir=settings.oauth_state_dir,
     )

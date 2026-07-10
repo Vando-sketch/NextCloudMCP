@@ -9,7 +9,7 @@ authors = [{ name = "Vando" }]
 dependencies = [
     "fastmcp>=2.9,<3",
     "caldav>=3.0,<4",
-    "icalendar>=6.0",
+    "icalendar>=6.0,<8",
 ]
 
 [dependency-groups]

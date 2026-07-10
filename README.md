@@ -46,6 +46,10 @@ Generate a Nextcloud app password under **Settings → Security → Devices & se
 https://<your-nextcloud-domain>/remote.php/dav/
 ```
 
+Must be `https://` - the server refuses to start with a `http://` CalDAV URL unless it
+points at a local address (`localhost`/`127.0.0.1`/`::1`) or `NEXTCLOUD_ALLOW_INSECURE_HTTP=1`
+is set, since `http://` sends the app password above in cleartext Basic Auth.
+
 `PUBLIC_BASE_URL` is the exact URL clients will use to reach this server - see
 [Authentication](#authentication) below for why this has to match precisely.
 
@@ -81,11 +85,17 @@ registration endpoints once the server is public:
   never has to actually control a listed domain (e.g. `claude.ai`) to pass this check -
   it only has to *claim* a matching `redirect_uri` when calling `/authorize`, and the
   authorization code comes back directly in that same HTTP response. Configurable via
-  `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`, but don't rely on it alone.
+  `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`; when unset and `PUBLIC_BASE_URL` isn't local, the
+  server also drops `localhost` from the vendored default allow-list (a `localhost`
+  entry can never be reached by a real OAuth redirect on a public deployment anyway) -
+  but don't rely on this list alone either way.
 - **`MCP_OAUTH_PASSWORD` is the actual security gate**, and is required (the server
-  refuses to start without it) whenever `PUBLIC_BASE_URL` isn't `localhost`/`127.0.0.1`.
+  refuses to start without it) whenever `PUBLIC_BASE_URL` isn't `localhost`/`127.0.0.1`,
+  or `MCP_HOST` is bound to a non-local address (e.g. `0.0.0.0` - a stale localhost
+  `PUBLIC_BASE_URL` with a `0.0.0.0` bind is a common Docker misconfiguration).
   Without it, anyone who can reach the server can self-issue a valid access token - see
-  [deployment guide](docs/deployment.md) for how it's checked.
+  [deployment guide](docs/deployment.md) for how it's checked. The placeholder value
+  shipped (commented out) in `.env.example` is rejected outright if left in place.
 - **Access tokens are opaque random strings** (not JWTs with inspectable claims) and are
   persisted to `MCP_OAUTH_STATE_DIR` (default `.oauth-state/oauth_tokens.json`, gitignored)
   so they survive server restarts.

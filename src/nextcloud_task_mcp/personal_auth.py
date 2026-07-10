@@ -7,8 +7,9 @@
 # It is included here verbatim (plus the one documented patch) rather than
 # reformatted so that future updates can be diffed against upstream.
 #
-# LOCAL PATCHES (applied 2026-07-09), all confirmed by live reproduction
-# against a running instance, not just code review:
+# LOCAL PATCHES (patches 1-2 applied 2026-07-09, patch 3 applied 2026-07-10),
+# all confirmed by live reproduction against a running instance, not just code
+# review:
 #
 # 1. PersonalAuthProvider.authorize() had an "auto-approve for allowed
 #    redirect domains" fallback in its password check that unconditionally
@@ -30,6 +31,15 @@
 #    multiplying at-rest plaintext copies of the one secret this deployment
 #    relies on. The `scope` channel has been removed; only `state` (never
 #    persisted) is checked now.
+#
+# 3. oauth_tokens.json holds plaintext bearer and refresh tokens, but was
+#    written with whatever the process umask left it at - commonly
+#    world-readable - and the state dir was created without an explicit mode.
+#    The state dir is now created (and chmod'd - Path.mkdir(mode=...) is
+#    masked by the umask and, unlike chmod, does not fix an already-existing
+#    directory's permissions) as 0o700, and oauth_tokens.json is now written
+#    via os.open(..., 0o600) so it's never briefly or permanently
+#    group/world-readable.
 #
 # MIT License
 #
@@ -80,6 +90,7 @@ Usage:
 """
 
 import json
+import os
 import secrets
 import time
 import logging
@@ -150,7 +161,10 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
         ]
         self.access_token_expiry_seconds = access_token_expiry_seconds
         self._state_dir = Path(state_dir or DEFAULT_STATE_DIR)
-        self._state_dir.mkdir(parents=True, exist_ok=True)
+        self._state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # mkdir's mode= is masked by the umask and won't fix an already-existing
+        # dir, so chmod explicitly too (LOCAL PATCH 3).
+        os.chmod(self._state_dir, 0o700)
         self._load_state()
 
     # --- State persistence ---
@@ -195,7 +209,12 @@ class PersonalAuthProvider(InMemoryOAuthProvider):
             "a2r": self._access_to_refresh_map,
             "r2a": self._refresh_to_access_map,
         }
-        self._state_file().write_text(json.dumps(data, indent=2))
+        # oauth_tokens.json holds plaintext bearer/refresh tokens - open with
+        # 0o600 up front instead of write_text()'s default-umask permissions
+        # (LOCAL PATCH 3).
+        fd = os.open(self._state_file(), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2))
 
     # --- Authorization gate ---
 

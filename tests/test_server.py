@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from unittest.mock import MagicMock
 
 import pytest
 from fastmcp.exceptions import ToolError
 
 from nextcloud_task_mcp.caldav_client import CalDavService
+from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import TaskListNotFoundError
 from nextcloud_task_mcp.server import build_server
 
@@ -101,3 +103,49 @@ def test_unexpected_error_does_not_leak_internals(tools, fake_service):
     with pytest.raises(ToolError) as exc_info:
         tools["list_tasks"].fn("Personal")
     assert "some internal detail" not in str(exc_info.value)
+
+
+# --- Redirect-domain allow-list defaults (D9) ---
+#
+# PersonalAuthProvider's own vendored default allow-list is
+# ["claude.ai", "claude.com", "localhost"]. build_server overrides that
+# default (only when the operator hasn't set MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS
+# themselves) to drop "localhost" once PUBLIC_BASE_URL is not local, since a
+# "localhost" entry can never be reached by a real OAuth redirect against a
+# public deployment.
+
+
+def test_build_server_drops_localhost_when_public_base_url_is_public(settings, fake_service):
+    # The `settings` fixture already uses a non-local public_base_url and leaves
+    # oauth_allowed_redirect_domains unset (None).
+    assert settings.oauth_allowed_redirect_domains is None
+    mcp = build_server(settings, service=fake_service)
+    assert mcp.auth.allowed_redirect_domains == ["claude.ai", "claude.com"]
+    assert "localhost" not in mcp.auth.allowed_redirect_domains
+
+
+def test_build_server_keeps_vendored_default_when_public_base_url_is_local(fake_service, tmp_path):
+    local_settings = Settings(
+        caldav_url="https://cloud.example.com/remote.php/dav/",
+        caldav_username="testuser",
+        caldav_password="testpass",
+        public_base_url="http://127.0.0.1:8000",
+        oauth_password=None,
+        oauth_state_dir=str(tmp_path / "oauth-state"),
+        oauth_allowed_redirect_domains=None,
+        oauth_access_token_expiry_seconds=30 * 24 * 60 * 60,
+        host="127.0.0.1",
+        port=8000,
+    )
+    mcp = build_server(local_settings, service=fake_service)
+    assert mcp.auth.allowed_redirect_domains == ["claude.ai", "claude.com", "localhost"]
+
+
+def test_build_server_respects_explicitly_configured_redirect_domains(settings, fake_service):
+    public_settings = replace(
+        settings,
+        public_base_url="https://public.example.com",
+        oauth_allowed_redirect_domains=["only-this.example.com"],
+    )
+    mcp = build_server(public_settings, service=fake_service)
+    assert mcp.auth.allowed_redirect_domains == ["only-this.example.com"]
