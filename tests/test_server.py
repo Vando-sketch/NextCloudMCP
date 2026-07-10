@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from dataclasses import replace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -13,7 +13,8 @@ from fastmcp.exceptions import ToolError
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import TaskListNotFoundError
-from nextcloud_task_mcp.server import build_server
+from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
+from nextcloud_task_mcp.server import build_server, main
 
 
 def _run(coro):
@@ -197,13 +198,22 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
 # public deployment.
 
 
+def _allowed_redirect_domains(mcp) -> list[str]:
+    # `mcp.auth` is typed as fastmcp's generic `AuthProvider | None`, which
+    # doesn't know about `allowed_redirect_domains` (specific to the vendored
+    # PersonalAuthProvider) - narrow it for both mypy and as a runtime check
+    # that build_server actually wired up our auth provider.
+    assert isinstance(mcp.auth, PersonalAuthProvider)
+    return mcp.auth.allowed_redirect_domains
+
+
 def test_build_server_drops_localhost_when_public_base_url_is_public(settings, fake_service):
     # The `settings` fixture already uses a non-local public_base_url and leaves
     # oauth_allowed_redirect_domains unset (None).
     assert settings.oauth_allowed_redirect_domains is None
     mcp = build_server(settings, service=fake_service)
-    assert mcp.auth.allowed_redirect_domains == ["claude.ai", "claude.com"]
-    assert "localhost" not in mcp.auth.allowed_redirect_domains
+    assert _allowed_redirect_domains(mcp) == ["claude.ai", "claude.com"]
+    assert "localhost" not in _allowed_redirect_domains(mcp)
 
 
 def test_build_server_keeps_vendored_default_when_public_base_url_is_local(fake_service, tmp_path):
@@ -220,7 +230,7 @@ def test_build_server_keeps_vendored_default_when_public_base_url_is_local(fake_
         port=8000,
     )
     mcp = build_server(local_settings, service=fake_service)
-    assert mcp.auth.allowed_redirect_domains == ["claude.ai", "claude.com", "localhost"]
+    assert _allowed_redirect_domains(mcp) == ["claude.ai", "claude.com", "localhost"]
 
 
 def test_build_server_respects_explicitly_configured_redirect_domains(settings, fake_service):
@@ -230,4 +240,29 @@ def test_build_server_respects_explicitly_configured_redirect_domains(settings, 
         oauth_allowed_redirect_domains=["only-this.example.com"],
     )
     mcp = build_server(public_settings, service=fake_service)
-    assert mcp.auth.allowed_redirect_domains == ["only-this.example.com"]
+    assert _allowed_redirect_domains(mcp) == ["only-this.example.com"]
+
+
+# --- main(): access-log-disabled security control must not silently regress (E7) ---
+#
+# Uvicorn's default access log records the full request path including the
+# query string, which is where PersonalAuthProvider's /authorize gate reads
+# MCP_OAUTH_PASSWORD from (see the comment in `main()`) - so `access_log`
+# staying disabled is a load-bearing security control, not a style choice.
+# This test guards it against a silent regression by a future refactor.
+
+
+def test_main_disables_uvicorn_access_log_and_passes_host_port(settings):
+    with (
+        patch("nextcloud_task_mcp.server.Settings.from_env", return_value=settings) as from_env,
+        patch("nextcloud_task_mcp.server.FastMCP.run") as fastmcp_run,
+    ):
+        main()
+
+    from_env.assert_called_once()
+    fastmcp_run.assert_called_once_with(
+        transport="http",
+        host=settings.host,
+        port=settings.port,
+        uvicorn_config={"access_log": False},
+    )

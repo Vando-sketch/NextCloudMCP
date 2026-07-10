@@ -33,7 +33,7 @@ def _make_calendar(name: str, url: str = "https://cloud.example.com/dav/personal
 
 @pytest.fixture
 def mock_dav_client():
-    with patch("nextcloud_task_mcp.caldav_client.caldav.DAVClient") as mock_cls:
+    with patch("nextcloud_task_mcp.caldav_client.DAVClient") as mock_cls:
         yield mock_cls
 
 
@@ -406,6 +406,144 @@ def test_translate_etag_mismatch_message_mentions_retry():
     message = str(result).lower()
     assert "modified" in message or "conflict" in message
     assert "retry" in message or "re-fetch" in message
+
+
+# --- Generic (non-TaskMcpError, non-NotFoundError) exceptions through every
+# --- public CalDavService method (E4 remainder: outer except-Exception
+# --- branches, and _resolve_calendar's own except-Exception branch). ---
+
+
+def test_resolve_calendar_translates_generic_exception_from_principal_calendars(service, principal):
+    # Hits `_resolve_calendar`'s own `except Exception` branch (not the outer
+    # per-method one): the very first, uncached resolution of "Personal" asks
+    # `principal.calendars()` directly, which here raises something that is
+    # neither a TaskMcpError nor a caldav NotFoundError.
+    principal.calendars.side_effect = caldav_client_module._http_errors.ConnectionError("down")
+
+    with pytest.raises(ConnectionFailedError):
+        service.list_tasks("Personal")
+
+
+def test_list_task_lists_translates_generic_exception(service, principal):
+    principal.calendars.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.list_task_lists()
+
+
+def test_list_tasks_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.todos.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.list_tasks("Personal")
+
+
+def test_create_task_list_not_found_raises(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.save_todo.side_effect = caldav_error.NotFoundError("no such list")
+
+    with pytest.raises(TaskListNotFoundError):
+        service.create_task("Personal", mapping.TaskFields(titel="x"))
+
+
+def test_create_task_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.save_todo.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.create_task("Personal", mapping.TaskFields(titel="x"))
+
+
+def test_update_task_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.update_task("Personal", "abc", mapping.TaskFields(titel="x"))
+
+
+def test_get_task_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.get_task("Personal", "abc")
+
+
+def test_complete_task_not_found_raises(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = caldav_error.NotFoundError("no such task")
+
+    with pytest.raises(TaskNotFoundError):
+        service.complete_task("Personal", "missing-uid")
+
+
+def test_complete_task_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.complete_task("Personal", "abc")
+
+
+def test_delete_task_not_found_raises(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = caldav_error.NotFoundError("no such task")
+
+    with pytest.raises(TaskNotFoundError):
+        service.delete_task("Personal", "missing-uid")
+
+
+def test_delete_task_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+    calendar.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.delete_task("Personal", "abc")
+
+
+def test_resolve_calendar_reraises_task_mcp_error_from_get_principal(service, mock_dav_client):
+    # `_resolve_calendar`'s own `except TaskMcpError: raise` branch: the
+    # failure happens resolving the *principal* itself (already translated to
+    # a TaskMcpError by `_get_principal`), not in `.calendars()`.
+    mock_dav_client.return_value.principal.side_effect = caldav_error.AuthorizationError(
+        "bad creds"
+    )
+
+    with pytest.raises(AuthenticationFailedError):
+        service.list_tasks("Personal")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda service: service.create_task("Personal", mapping.TaskFields(titel="x")),
+        lambda service: service.update_task("Personal", "abc", mapping.TaskFields(titel="x")),
+        lambda service: service.complete_task("Personal", "abc"),
+        lambda service: service.delete_task("Personal", "abc"),
+    ],
+    ids=["create_task", "update_task", "complete_task", "delete_task"],
+)
+def test_ambiguous_list_name_reraises_as_task_mcp_error(service, principal, call):
+    # Each mutating method's own `except TaskMcpError: raise` branch: the
+    # ambiguity is detected during calendar *resolution* (_resolve_calendar),
+    # before the method's own CalDAV operation ever runs.
+    cal1 = _make_calendar("Personal", "https://cloud.example.com/dav/p1/")
+    cal2 = _make_calendar("Personal", "https://cloud.example.com/dav/p2/")
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        call(service)
 
 
 def test_translate_scrubbed_branches_log_the_real_exception(caplog):

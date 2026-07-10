@@ -9,9 +9,18 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
-import caldav
+from caldav.collection import Calendar as DAVCalendar
+from caldav.collection import Principal as DAVPrincipal
+from caldav.davclient import DAVClient
 from caldav.lib import error as caldav_error
 from icalendar import Calendar, Todo
+
+# caldav's top-level `caldav.DAVClient`/`DAVPrincipal`/`DAVCalendar`
+# are exposed via PEP 562 module-level lazy imports (see caldav/__init__.py),
+# which mypy cannot resolve as concrete classes usable in annotations
+# ("Variable is not valid as a type"). Importing the same classes directly
+# from their defining submodules sidesteps that - same runtime objects,
+# just statically resolvable.
 
 try:
     # caldav 3.x uses niquests (a requests-API-compatible client) by default,
@@ -79,10 +88,8 @@ class CalDavService:
     """Holds one reused CalDAV connection and exposes task CRUD operations on it."""
 
     def __init__(self, url: str, username: str, password: str, timeout: int = 30) -> None:
-        self._client = caldav.DAVClient(
-            url=url, username=username, password=password, timeout=timeout
-        )
-        self._principal: caldav.Principal | None = None
+        self._client = DAVClient(url=url, username=username, password=password, timeout=timeout)
+        self._principal: DAVPrincipal | None = None
         # A1 moves CalDavService calls onto worker threads (via
         # anyio.to_thread.run_sync in server.py) so they no longer block the
         # asyncio event loop - but that means calls can now genuinely run
@@ -98,9 +105,9 @@ class CalDavService:
         # calendars by display name so repeat calls for the same list_name
         # skip that round-trip entirely (A3). Guarded by `_lock`, like
         # everything else that touches CalDAV state.
-        self._calendar_cache: dict[str, caldav.Calendar] = {}
+        self._calendar_cache: dict[str, DAVCalendar] = {}
 
-    def _get_principal(self) -> caldav.Principal:
+    def _get_principal(self) -> DAVPrincipal:
         with self._lock:
             if self._principal is None:
                 try:
@@ -109,7 +116,7 @@ class CalDavService:
                     raise _translate(exc) from exc
             return self._principal
 
-    def _resolve_calendar(self, list_name: str) -> caldav.Calendar:
+    def _resolve_calendar(self, list_name: str) -> DAVCalendar:
         """Resolve `list_name` to a calendar via a fresh `principal.calendars()` call.
 
         Raises `TaskListNotFoundError` if no calendar has that display name,
@@ -135,18 +142,18 @@ class CalDavService:
             )
         return matches[0]
 
-    def _resolve_and_cache(self, list_name: str) -> caldav.Calendar:
+    def _resolve_and_cache(self, list_name: str) -> DAVCalendar:
         calendar = self._resolve_calendar(list_name)
         self._calendar_cache[list_name] = calendar
         return calendar
 
-    def _get_calendar(self, list_name: str) -> caldav.Calendar:
+    def _get_calendar(self, list_name: str) -> DAVCalendar:
         cached = self._calendar_cache.get(list_name)
         if cached is not None:
             return cached
         return self._resolve_and_cache(list_name)
 
-    def _with_calendar(self, list_name: str, fn: Callable[[caldav.Calendar], _T]) -> _T:
+    def _with_calendar(self, list_name: str, fn: Callable[[DAVCalendar], _T]) -> _T:
         """Resolve `list_name`'s (cached) calendar and call `fn(calendar)`.
 
         `fn` should perform raw caldav operations without translating
@@ -198,7 +205,7 @@ class CalDavService:
         """Return all tasks in the given list, parsed into German task dicts."""
         with self._lock:
 
-            def op(calendar: caldav.Calendar):
+            def op(calendar: DAVCalendar):
                 return calendar.todos(include_completed=not only_open)
 
             try:
@@ -228,7 +235,7 @@ class CalDavService:
             vcal.add_component(todo)
             ical_text = vcal.to_ical().decode("utf-8")
 
-            def op(calendar: caldav.Calendar):
+            def op(calendar: DAVCalendar):
                 calendar.save_todo(ical=ical_text)
 
             try:
@@ -245,7 +252,7 @@ class CalDavService:
         """Update only the given (non-None) fields of an existing task."""
         with self._lock:
 
-            def op(calendar: caldav.Calendar):
+            def op(calendar: DAVCalendar):
                 todo_obj = calendar.get_todo_by_uid(task_uid)
                 mapping.apply_task_fields(todo_obj.icalendar_component, fields)
                 todo_obj.save()
@@ -263,7 +270,7 @@ class CalDavService:
         """Return a single task, parsed into the server's German task dict."""
         with self._lock:
 
-            def op(calendar: caldav.Calendar):
+            def op(calendar: DAVCalendar):
                 return calendar.get_todo_by_uid(task_uid)
 
             try:
@@ -280,7 +287,7 @@ class CalDavService:
         """Mark a task as completed (STATUS, PERCENT-COMPLETE, COMPLETED timestamp)."""
         with self._lock:
 
-            def op(calendar: caldav.Calendar):
+            def op(calendar: DAVCalendar):
                 todo_obj = calendar.get_todo_by_uid(task_uid)
                 mapping.mark_completed(todo_obj.icalendar_component)
                 todo_obj.save()
@@ -298,7 +305,7 @@ class CalDavService:
         """Permanently delete a task."""
         with self._lock:
 
-            def op(calendar: caldav.Calendar):
+            def op(calendar: DAVCalendar):
                 todo_obj = calendar.get_todo_by_uid(task_uid)
                 todo_obj.delete()
 

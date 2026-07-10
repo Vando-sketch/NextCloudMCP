@@ -242,13 +242,17 @@ def test_non_canonical_date_strings_are_not_treated_as_all_day(text):
 
 def test_naive_datetime_input_is_interpreted_as_utc():
     result = mapping.parse_datetime_input("2026-07-20T14:00:00")
+    assert isinstance(result, datetime)  # narrows away the `date` half of the return type
     assert result.tzinfo == timezone.utc
     assert result.hour == 14
 
 
 def test_offset_datetime_input_keeps_its_offset():
     result = mapping.parse_datetime_input("2026-07-20T14:00:00+02:00")
-    assert result.utcoffset().total_seconds() == 2 * 3600
+    assert isinstance(result, datetime)  # narrows away the `date` half of the return type
+    offset = result.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 2 * 3600
 
 
 def test_naive_datetime_matches_absolute_trigger_semantics():
@@ -396,3 +400,45 @@ def test_clear_on_field_that_was_never_set_is_a_no_op():
     parsed = mapping.parse_vtodo(todo)
     assert parsed["titel"] == "Task"
     assert parsed["ort"] is None
+
+
+# --- Remaining branch coverage (WP5, E1/E4 remainder) ---
+
+
+@pytest.mark.parametrize("value", [10, 20, -1])
+def test_ical_priority_to_label_out_of_range_is_none(value):
+    # Real RFC 5545 PRIORITY is 0-9, but ical_priority_to_label doesn't assume
+    # that - anything outside 1-9 (other than the falsy 0/None handled above)
+    # is "undefined", not an error.
+    assert mapping.ical_priority_to_label(value) is None
+
+
+def test_date_shaped_but_invalid_date_falls_through_and_raises():
+    # Matches the "YYYY-MM-DD" shape but isn't a real date (month 13) - both
+    # date.fromisoformat and datetime.fromisoformat reject it, so parsing
+    # must fall all the way through to the final InvalidTaskDataError.
+    with pytest.raises(InvalidTaskDataError):
+        mapping.parse_datetime_input("2026-13-40")
+
+
+def test_absolute_trigger_with_explicit_offset_is_converted_to_utc():
+    result = mapping._parse_absolute_trigger("2026-07-20T14:00:00+05:00")
+    assert result == datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    assert result.tzinfo == timezone.utc
+
+
+def test_extract_categories_handles_plain_string_entry():
+    # A CATEGORIES value that isn't a vCategory-like object with a `.cats`
+    # attribute (e.g. built/edited by another client) must still be read
+    # back as a single plain string, not dropped or crash the parser.
+    todo = _new_todo()
+    todo["categories"] = "just-a-string"  # bypass icalendar's vCategory wrapping
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["tags"] == ["just-a-string"]
+
+
+def test_extract_parent_uid_ignores_non_parent_reltype():
+    todo = _new_todo()
+    todo.add("related-to", "sibling-uid", parameters={"RELTYPE": "CHILD"})
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["übergeordnete_uid"] is None
