@@ -1,0 +1,25 @@
+# Local hooks that shell out to `uv run`, so the tool versions used here are
+# always the ones pinned in uv.lock - no separate, potentially-drifting
+# pre-commit-managed toolchain to keep in sync (E10). Run `pre-commit install`
+# once (see CONTRIBUTING.md) to wire these into `git commit`.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check --fix
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      - id: mypy
+        name: mypy src tests
+        entry: uv run mypy src tests
+        language: system
+        pass_filenames: false
+        types: [python]

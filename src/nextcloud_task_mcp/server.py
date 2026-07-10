@@ -2,28 +2,37 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
+import anyio.to_thread
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from . import mapping
 from .caldav_client import CalDavService
-from .config import Settings
+from .config import Settings, is_local_hostname
 from .errors import TaskMcpError
 from .personal_auth import PersonalAuthProvider
 
 logger = logging.getLogger(__name__)
 
 
-def _call(fn, *args: Any, **kwargs: Any) -> Any:
-    """Run a CalDavService call, turning our errors into clean ToolErrors.
+async def _call(fn, *args: Any, **kwargs: Any) -> Any:
+    """Run a (blocking) CalDavService call in a worker thread and translate errors.
 
-    Anything unexpected is logged server-side but never shown to the
-    client as a raw stack trace.
+    `caldav.DAVClient` does blocking HTTP, so calling `fn` inline here would
+    stall the asyncio event loop for every other client (A1). We offload the
+    actual call to a worker thread via `anyio.to_thread.run_sync` - which only
+    accepts a no-arg callable, hence the `functools.partial` wrapping - and
+    keep the error-translation semantics identical to the previous sync
+    version: our own errors become clean ToolErrors, anything unexpected is
+    logged server-side but never shown to the client as a raw stack trace.
     """
     try:
-        return fn(*args, **kwargs)
+        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
     except TaskMcpError as exc:
         raise ToolError(str(exc)) from exc
     except Exception as exc:  # pragma: no cover - safety net for unforeseen failures
@@ -37,11 +46,26 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
     `service` can be injected for testing; defaults to a real CalDavService
     built from `settings`.
     """
+    allowed_redirect_domains = settings.oauth_allowed_redirect_domains
+    if allowed_redirect_domains is None and not is_local_hostname(
+        urlparse(settings.public_base_url).hostname
+    ):
+        # PersonalAuthProvider's own built-in default allow-list includes
+        # "localhost" (see its docstring), which is reasonable for its own
+        # local-dev use case but meaningless - and needlessly widens a
+        # security-relevant list - once PUBLIC_BASE_URL is public: a
+        # redirect_uri claiming host "localhost" can never actually reach the
+        # browser completing a real claude.ai OAuth flow against a public
+        # deployment. Only override when the operator hasn't explicitly set
+        # MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS themselves. (D9)
+        allowed_redirect_domains = ["claude.ai", "claude.com"]
+
     auth = PersonalAuthProvider(
         base_url=settings.public_base_url,
         password=settings.oauth_password,
-        allowed_redirect_domains=settings.oauth_allowed_redirect_domains,
+        allowed_redirect_domains=allowed_redirect_domains,
         access_token_expiry_seconds=settings.oauth_access_token_expiry_seconds,
+        refresh_token_expiry_seconds=settings.oauth_refresh_token_expiry_seconds,
         state_dir=settings.oauth_state_dir,
     )
     mcp = FastMCP(name="nextcloud-task-mcp", auth=auth)
@@ -50,35 +74,77 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         url=settings.caldav_url,
         username=settings.caldav_username,
         password=settings.caldav_password,
+        timeout=settings.caldav_timeout_seconds,
     )
 
     @mcp.tool
-    def list_task_lists() -> list[dict[str, str]]:
+    async def list_task_lists() -> list[dict[str, str]]:
         """List all available Nextcloud task lists.
 
         Returns:
             A list of {"name": display name, "url": internal CalDAV URL/ID} dicts.
         """
-        return _call(caldav_service.list_task_lists)
+        return await _call(caldav_service.list_task_lists)
 
     @mcp.tool
-    def list_tasks(list_name: str, nur_offene: bool = True) -> list[dict[str, Any]]:
+    async def list_tasks(
+        list_name: str,
+        nur_offene: bool = True,
+        fällig_vor: str | None = None,
+        fällig_nach: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         """List tasks in a Nextcloud task list.
 
         Args:
             list_name: Display name of the task list.
             nur_offene: If True (default), only return tasks that are not completed.
+            fällig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
+                before this point. A date-only bound (e.g. "2026-07-20") includes
+                tasks due at any time on that day.
+            fällig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
+                after this point. A date-only bound includes tasks due from the start
+                of that day onward.
+            limit: Optional maximum number of results to return (must be > 0).
+
+        If `fällig_vor` and/or `fällig_nach` is given, tasks with no fällig_datum
+        (due date) at all are excluded - they can't be judged "before"/"after"
+        anything. `limit` is applied after any due-date filtering.
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, fällig_datum,
             priorität, fortschritt_prozent, status, ort, url, tags, notizen,
-            übergeordnete_uid (None unless the task is a subtask).
+            übergeordnete_uid (None unless the task is a subtask), wiederholung
+            (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO", or None if the task
+            doesn't recur; read-only - this server can't create/edit recurrence).
         """
-        return _call(caldav_service.list_tasks, list_name, only_open=nur_offene)
+        return await _call(
+            caldav_service.list_tasks,
+            list_name,
+            only_open=nur_offene,
+            due_before=fällig_vor,
+            due_after=fällig_nach,
+            limit=limit,
+        )
 
     @mcp.tool
-    def create_task(
-        liste: str,
+    async def get_task(list_name: str, task_uid: str) -> dict[str, Any]:
+        """Fetch a single task by UID, without listing the whole task list.
+
+        Args:
+            list_name: Display name of the task list containing the task.
+            task_uid: UID of the task to fetch.
+
+        Returns:
+            A task dict with the same shape as one entry from list_tasks: uid,
+            titel, start_datum, fällig_datum, priorität, fortschritt_prozent,
+            status, ort, url, tags, notizen, übergeordnete_uid, wiederholung.
+        """
+        return await _call(caldav_service.get_task, list_name, task_uid)
+
+    @mcp.tool
+    async def create_task(
+        list_name: str,
         titel: str,
         start_datum: str | None = None,
         fällig_datum: str | None = None,
@@ -95,7 +161,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         """Create a new task in a Nextcloud task list.
 
         Args:
-            liste: Display name of the target task list.
+            list_name: Display name of the target task list.
             titel: Task title (VTODO SUMMARY).
             start_datum: Optional ISO 8601 date/datetime -> DTSTART.
             fällig_datum: Optional ISO 8601 date/datetime -> DUE.
@@ -112,12 +178,16 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             übergeordnete_aufgabe: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
 
+        Date/time semantics for start_datum and fällig_datum: a value that is
+        exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
+        (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
+        datetime; a *naive* datetime (no UTC offset, e.g.
+        "2026-07-20T14:00:00") is interpreted as UTC.
+
         Returns:
             {"uid": the new task's UID}.
         """
-        new_uid = _call(
-            caldav_service.create_task,
-            liste,
+        fields = mapping.TaskFields(
             titel=titel,
             start_datum=start_datum,
             faellig_datum=fällig_datum,
@@ -131,10 +201,11 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=übergeordnete_aufgabe,
         )
+        new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
 
     @mcp.tool
-    def update_task(
+    async def update_task(
         list_name: str,
         task_uid: str,
         titel: str | None = None,
@@ -149,6 +220,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         übergeordnete_aufgabe: str | None = None,
+        felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
 
@@ -156,15 +228,22 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             list_name: Display name of the task list containing the task.
             task_uid: UID of the task to update.
             (all other args): Same meaning and mapping as in create_task; a field
-                left as None is left unchanged on the existing task.
+                left as None is left unchanged on the existing task. Date/time
+                semantics also match create_task: a "YYYY-MM-DD" value creates an
+                all-day entry, and naive datetimes are interpreted as UTC.
+            felder_leeren: Optional list of field names to clear (remove the
+                property from the task entirely) instead of changing them.
+                Accepted values: "start_datum", "fällig_datum", "priorität",
+                "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
+                "notizen", "sichtbarkeit", "übergeordnete_aufgabe". "titel"
+                cannot be cleared. Naming an unknown field, or naming a field
+                here that is *also* given a new value in the same call, is an
+                error.
 
         Returns:
             {"uid": task_uid} on success.
         """
-        _call(
-            caldav_service.update_task,
-            list_name,
-            task_uid,
+        fields = mapping.TaskFields(
             titel=titel,
             start_datum=start_datum,
             faellig_datum=fällig_datum,
@@ -177,11 +256,13 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=übergeordnete_aufgabe,
+            clear=tuple(felder_leeren) if felder_leeren else (),
         )
+        await _call(caldav_service.update_task, list_name, task_uid, fields)
         return {"uid": task_uid}
 
     @mcp.tool
-    def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
+    async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
 
         Args:
@@ -191,11 +272,11 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             {"uid": task_uid} on success.
         """
-        _call(caldav_service.complete_task, list_name, task_uid)
+        await _call(caldav_service.complete_task, list_name, task_uid)
         return {"uid": task_uid}
 
     @mcp.tool
-    def delete_task(list_name: str, task_uid: str) -> dict[str, str]:
+    async def delete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Permanently delete a task.
 
         Args:
@@ -205,7 +286,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Returns:
             {"uid": task_uid} on success.
         """
-        _call(caldav_service.delete_task, list_name, task_uid)
+        await _call(caldav_service.delete_task, list_name, task_uid)
         return {"uid": task_uid}
 
     return mcp

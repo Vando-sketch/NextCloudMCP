@@ -32,6 +32,8 @@ never goes through HTTP.
 from __future__ import annotations
 
 import asyncio
+import stat
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
@@ -228,3 +230,40 @@ def test_authorize_rejects_password_sent_via_scope(app):
     location = response.headers["location"]
     assert "error=" in location
     assert "code=" not in location
+
+
+# --- State-file/dir permissions (D4, LOCAL PATCH 3 in personal_auth.py) ---
+
+
+def test_oauth_state_dir_and_file_have_restrictive_permissions(app, settings):
+    # Registering a client is enough to trigger PersonalAuthProvider._save_state()
+    # (it writes oauth_tokens.json after every register_client/authorize/token
+    # call), and the state dir itself is created (and chmod'd) in __init__.
+    _run(_register_and_authorize(app, state=TEST_OAUTH_PASSWORD))
+
+    state_dir = Path(settings.oauth_state_dir)
+    state_file = state_dir / "oauth_tokens.json"
+
+    assert state_file.exists()
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
+
+
+def test_oauth_state_dir_permissions_enforced_even_if_dir_preexists(settings, tmp_path):
+    # Path.mkdir(mode=...) is masked by the process umask and does not fix an
+    # already-existing directory's permissions - PersonalAuthProvider must
+    # chmod explicitly, not just pass mode= to mkdir.
+    from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
+
+    state_dir = Path(settings.oauth_state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_dir.chmod(0o755)
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o755
+
+    PersonalAuthProvider(
+        base_url=settings.public_base_url,
+        password=settings.oauth_password,
+        state_dir=str(state_dir),
+    )
+
+    assert stat.S_IMODE(state_dir.stat().st_mode) == 0o700
