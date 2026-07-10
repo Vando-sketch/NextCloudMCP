@@ -12,6 +12,8 @@ Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, an
 - [Deployment guide](docs/deployment.md) — Ubuntu LXC + Tailscale + systemd + Claude connector setup
 - [Tool reference](docs/tools.md) — all tools with parameters, examples and error messages
 - [Architecture](docs/architecture.md) — module layout, request flow, design decisions
+- [Contributing](CONTRIBUTING.md) — dev setup, checks to run, pre-commit, vendored-file rules
+- [Changelog](CHANGELOG.md) — notable changes by work package
 
 ## How it works
 
@@ -45,6 +47,10 @@ Generate a Nextcloud app password under **Settings → Security → Devices & se
 ```
 https://<your-nextcloud-domain>/remote.php/dav/
 ```
+
+Must be `https://` - the server refuses to start with a `http://` CalDAV URL unless it
+points at a local address (`localhost`/`127.0.0.1`/`::1`) or `NEXTCLOUD_ALLOW_INSECURE_HTTP=1`
+is set, since `http://` sends the app password above in cleartext Basic Auth.
 
 `PUBLIC_BASE_URL` is the exact URL clients will use to reach this server - see
 [Authentication](#authentication) below for why this has to match precisely.
@@ -81,11 +87,17 @@ registration endpoints once the server is public:
   never has to actually control a listed domain (e.g. `claude.ai`) to pass this check -
   it only has to *claim* a matching `redirect_uri` when calling `/authorize`, and the
   authorization code comes back directly in that same HTTP response. Configurable via
-  `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`, but don't rely on it alone.
+  `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`; when unset and `PUBLIC_BASE_URL` isn't local, the
+  server also drops `localhost` from the vendored default allow-list (a `localhost`
+  entry can never be reached by a real OAuth redirect on a public deployment anyway) -
+  but don't rely on this list alone either way.
 - **`MCP_OAUTH_PASSWORD` is the actual security gate**, and is required (the server
-  refuses to start without it) whenever `PUBLIC_BASE_URL` isn't `localhost`/`127.0.0.1`.
+  refuses to start without it) whenever `PUBLIC_BASE_URL` isn't `localhost`/`127.0.0.1`,
+  or `MCP_HOST` is bound to a non-local address (e.g. `0.0.0.0` - a stale localhost
+  `PUBLIC_BASE_URL` with a `0.0.0.0` bind is a common Docker misconfiguration).
   Without it, anyone who can reach the server can self-issue a valid access token - see
-  [deployment guide](docs/deployment.md) for how it's checked.
+  [deployment guide](docs/deployment.md) for how it's checked. The placeholder value
+  shipped (commented out) in `.env.example` is rejected outright if left in place.
 - **Access tokens are opaque random strings** (not JWTs with inspectable claims) and are
   persisted to `MCP_OAUTH_STATE_DIR` (default `.oauth-state/oauth_tokens.json`, gitignored)
   so they survive server restarts.
@@ -143,16 +155,30 @@ schema Claude calls.
 Returns all available Nextcloud task lists as `{"name": ..., "url": ...}` dicts
 (display name and internal CalDAV URL/ID).
 
-### `list_tasks(list_name, nur_offene=True)`
+### `list_tasks(list_name, nur_offene=True, fällig_vor=None, fällig_nach=None, limit=None)`
 
 Returns tasks in a list. `nur_offene=True` (default) excludes completed tasks. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `fällig_datum`, `priorität`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
-`notizen`, `übergeordnete_uid` (parent task UID, or `null` if not a subtask).
+`notizen`, `übergeordnete_uid` (parent task UID, or `null` if not a subtask),
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only).
 
-### `create_task(liste, titel, ...)`
+A date-only `start_datum`/`fällig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
+anything else is a datetime.
 
-Creates a task. Required: `liste`, `titel`. Optional fields and their CalDAV mapping:
+`fällig_vor`/`fällig_nach` optionally filter to tasks due before/after a given ISO 8601
+date or datetime (a date-only bound covers the whole day); either one excludes tasks with
+no due date at all. `limit` (must be `> 0`) caps the number of results, applied after any
+due-date filtering. See [`docs/tools.md`](docs/tools.md) for the exact boundary semantics.
+
+### `get_task(list_name, task_uid)`
+
+Fetches a single task by UID, without listing the whole task list. Returns the same
+dict shape as one entry from `list_tasks`.
+
+### `create_task(list_name, titel, ...)`
+
+Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV mapping:
 
 | Parameter | CalDAV property | Notes |
 |---|---|---|
@@ -174,11 +200,23 @@ Creates a task. Required: `liste`, `titel`. Optional fields and their CalDAV map
 date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
 RFC 5545, VALARM triggers must be in UTC).
 
+**Date/time semantics** (applies to `start_datum`, `fällig_datum`, and absolute
+`erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
+(`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
+offset) is interpreted as UTC.
+
 ### `update_task(list_name, task_uid, ...)`
 
 Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
 changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
 *all* existing reminders on the task.
+
+To remove a property entirely (e.g. delete a due date), list its field name in the
+optional `felder_leeren` parameter instead of just omitting it — omitting a field
+leaves it unchanged. Accepted names: `start_datum`, `fällig_datum`, `priorität`,
+`fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
+`übergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
+cleared in the same call. See [`docs/tools.md`](docs/tools.md) for details and examples.
 
 ### `complete_task(list_name, task_uid)`
 
@@ -208,6 +246,13 @@ export NEXTCLOUD_CALDAV_URL=... NEXTCLOUD_USERNAME=... NEXTCLOUD_APP_PASSWORD=..
 export INTEGRATION_TEST_LIST="Test"   # an existing task list; tasks are created/deleted in it
 uv run pytest -q
 ```
+
+`.github/workflows/integration.yml` runs these on a weekly schedule (and on manual
+dispatch) against a disposable `nextcloud` Docker container, so this path is exercised
+against a real server periodically even though it's excluded from per-PR CI.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full local dev setup (lint/type-check/
+coverage commands, pre-commit hooks, and the vendored-file rules for `personal_auth.py`).
 
 ## License
 
