@@ -297,11 +297,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO)
     settings = Settings.from_env()
     mcp = build_server(settings)
-    # PersonalAuthProvider's /authorize gate reads MCP_OAUTH_PASSWORD out of the
-    # `state`/`scope` query string (see personal_auth.py). Uvicorn's default access
-    # log records the full request path including the query string, which would
-    # otherwise write that password in plaintext into server logs on every
-    # authorization - the exact secret this deployment relies on once public.
+    # MCP_OAUTH_PASSWORD now only ever travels in the POST body of the
+    # /consent form (personal_auth.py, LOCAL PATCH 5), which Uvicorn never
+    # logs - but its default access log still records full request paths
+    # including query strings, which for /consent carry the single-use pending
+    # keys gating authorization. Keep the access log disabled.
     mcp.run(
         transport="http",
         host=settings.host,
