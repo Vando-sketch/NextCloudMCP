@@ -44,15 +44,15 @@ def test_apply_and_parse_round_trip():
     assert parsed["titel"] == "Steuererklärung"
     # Date-only input (B1): all-day, not a midnight datetime.
     assert parsed["start_datum"] == "2026-07-01"
-    assert parsed["fällig_datum"] == "2026-07-20"
-    assert parsed["priorität"] == "hoch"
+    assert parsed["faellig_datum"] == "2026-07-20"
+    assert parsed["prioritaet"] == "hoch"
     assert parsed["fortschritt_prozent"] == 20
     assert parsed["status"] == "offen"
     assert parsed["ort"] == "Zuhause"
     assert parsed["url"] == "https://example.com/steuer"
     assert set(parsed["tags"]) == {"Finanzen", "Wichtig"}
     assert parsed["notizen"] == "Belege sammeln"
-    assert parsed["übergeordnete_uid"] is None
+    assert parsed["uebergeordnete_uid"] is None
 
 
 def test_apply_task_fields_replaces_instead_of_appending():
@@ -63,7 +63,7 @@ def test_apply_task_fields_replaces_instead_of_appending():
 
     parsed = mapping.parse_vtodo(todo)
     assert parsed["titel"] == "Zweiter Titel"
-    assert parsed["fällig_datum"] == "2026-07-20"  # untouched field survives
+    assert parsed["faellig_datum"] == "2026-07-20"  # untouched field survives
 
 
 def test_apply_task_fields_leaves_unset_fields_untouched():
@@ -154,7 +154,7 @@ def test_relative_reminder_on_all_day_due_is_legal():
     _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-P1D"])
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["fällig_datum"] == "2026-07-20"  # all-day, not midnight datetime
+    assert parsed["faellig_datum"] == "2026-07-20"  # all-day, not midnight datetime
     assert isinstance(todo.get("due").dt, date)
 
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
@@ -183,7 +183,7 @@ def test_parent_uid_set_and_extracted():
     todo = _new_todo()
     _apply(todo, titel="Subtask", uebergeordnete_aufgabe="parent-uid-42")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["übergeordnete_uid"] == "parent-uid-42"
+    assert parsed["uebergeordnete_uid"] == "parent-uid-42"
 
 
 def test_mark_completed_sets_status_and_percent():
@@ -212,7 +212,7 @@ def test_date_only_input_round_trips_to_date_string_not_midnight_datetime():
     todo = _new_todo()
     _apply(todo, faellig_datum="2026-07-20")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["fällig_datum"] == "2026-07-20"
+    assert parsed["faellig_datum"] == "2026-07-20"
 
 
 def test_full_datetime_input_still_produces_datetime():
@@ -279,7 +279,7 @@ def test_clear_removes_due_date():
     todo = _new_todo()
     _apply(todo, faellig_datum="2026-07-20")
     assert "due" in todo
-    mapping.apply_task_fields(todo, TaskFields(clear=("fällig_datum",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum",)))
     assert "due" not in todo
 
 
@@ -293,7 +293,7 @@ def test_clear_removes_start_datum():
 def test_clear_removes_priority():
     todo = _new_todo()
     _apply(todo, prioritaet="hoch")
-    mapping.apply_task_fields(todo, TaskFields(clear=("priorität",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("prioritaet",)))
     assert "priority" not in todo
 
 
@@ -342,7 +342,7 @@ def test_clear_removes_class():
 def test_clear_removes_related_to():
     todo = _new_todo()
     _apply(todo, uebergeordnete_aufgabe="parent-uid")
-    mapping.apply_task_fields(todo, TaskFields(clear=("übergeordnete_aufgabe",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("uebergeordnete_aufgabe",)))
     assert "related-to" not in todo
 
 
@@ -358,7 +358,7 @@ def test_clear_removes_all_alarms():
 def test_clear_multiple_fields_at_once():
     todo = _new_todo()
     _apply(todo, faellig_datum="2026-07-20", ort="Büro", prioritaet="hoch")
-    mapping.apply_task_fields(todo, TaskFields(clear=("fällig_datum", "ort", "priorität")))
+    mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum", "ort", "prioritaet")))
     assert "due" not in todo
     assert "location" not in todo
     assert "priority" not in todo
@@ -381,14 +381,14 @@ def test_clear_and_set_same_field_raises():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError):
         mapping.apply_task_fields(
-            todo, TaskFields(faellig_datum="2026-07-20", clear=("fällig_datum",))
+            todo, TaskFields(faellig_datum="2026-07-20", clear=("faellig_datum",))
         )
 
 
 def test_clear_does_not_affect_untouched_fields():
     todo = _new_todo()
     _apply(todo, faellig_datum="2026-07-20", ort="Büro")
-    mapping.apply_task_fields(todo, TaskFields(clear=("fällig_datum",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum",)))
     parsed = mapping.parse_vtodo(todo)
     assert parsed["ort"] == "Büro"
 
@@ -441,7 +441,7 @@ def test_extract_parent_uid_ignores_non_parent_reltype():
     todo = _new_todo()
     todo.add("related-to", "sibling-uid", parameters={"RELTYPE": "CHILD"})
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["übergeordnete_uid"] is None
+    assert parsed["uebergeordnete_uid"] is None
 
 
 # --- Recurrence surfaced read-only (C5) ---
@@ -463,20 +463,20 @@ def test_parse_vtodo_wiederholung_is_none_when_not_recurring():
 # --- list_tasks filtering (C4) ---
 
 
-def _task(uid: str, fällig_datum: str | None) -> dict:
+def _task(uid: str, faellig_datum: str | None) -> dict:
     return {
         "uid": uid,
         "titel": uid,
         "start_datum": None,
-        "fällig_datum": fällig_datum,
-        "priorität": None,
+        "faellig_datum": faellig_datum,
+        "prioritaet": None,
         "fortschritt_prozent": 0,
         "status": "offen",
         "ort": None,
         "url": None,
         "tags": [],
         "notizen": None,
-        "übergeordnete_uid": None,
+        "uebergeordnete_uid": None,
         "wiederholung": None,
     }
 
@@ -517,7 +517,7 @@ def test_filter_tasks_due_before_and_after_combined_is_a_range():
 
 
 def test_filter_tasks_date_only_due_before_bound_includes_all_day_task_on_boundary():
-    # An all-day task due exactly on the fällig_vor date must still be
+    # An all-day task due exactly on the faellig_vor date must still be
     # included: the bound expands to the end of that day (23:59:59 UTC), and
     # the task's own all-day due date compares as its start-of-day instant.
     tasks = [_task("boundary", "2026-07-20")]
@@ -532,7 +532,7 @@ def test_filter_tasks_date_only_due_after_bound_includes_all_day_task_on_boundar
 
 
 def test_filter_tasks_datetime_due_before_bound_excludes_all_day_task_next_day():
-    # An all-day task due the day *after* a datetime fällig_vor bound must be
+    # An all-day task due the day *after* a datetime faellig_vor bound must be
     # excluded, even though the bound's date matches - the bound is a precise
     # instant here, not expanded to end-of-day (only date-only bounds are).
     tasks = [_task("next-day", "2026-07-21")]

@@ -47,9 +47,9 @@ def test_all_tools_registered(tools):
 
 def test_create_task_uses_umlaut_parameter_names(tools):
     schema = tools["create_task"].parameters
-    assert "fällig_datum" in schema["properties"]
-    assert "priorität" in schema["properties"]
-    assert "übergeordnete_aufgabe" in schema["properties"]
+    assert "faellig_datum" in schema["properties"]
+    assert "prioritaet" in schema["properties"]
+    assert "uebergeordnete_aufgabe" in schema["properties"]
     assert schema["required"] == ["list_name", "titel"]
 
 
@@ -89,7 +89,7 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(
         tools["list_tasks"].fn(
-            "Personal", fällig_vor="2026-08-01", fällig_nach="2026-07-01", limit=5
+            "Personal", faellig_vor="2026-08-01", faellig_nach="2026-07-01", limit=5
         )
     )
     fake_service.list_tasks.assert_called_once_with(
@@ -107,9 +107,9 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
         tools["create_task"].fn(
             list_name="Personal",
             titel="Neue Aufgabe",
-            fällig_datum="2026-07-20",
-            priorität="hoch",
-            übergeordnete_aufgabe="parent-uid",
+            faellig_datum="2026-07-20",
+            prioritaet="hoch",
+            uebergeordnete_aufgabe="parent-uid",
         )
     )
     assert result == {"uid": "new-uid"}
@@ -134,10 +134,10 @@ def test_update_task_returns_uid(tools, fake_service):
 
 
 def test_update_task_passes_felder_leeren_as_clear(tools, fake_service):
-    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["fällig_datum", "ort"]))
+    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["faellig_datum", "ort"]))
     args, _ = fake_service.update_task.call_args
     _, _, fields = args
-    assert fields.clear == ("fällig_datum", "ort")
+    assert fields.clear == ("faellig_datum", "ort")
 
 
 def test_update_task_without_felder_leeren_has_empty_clear(tools, fake_service):
