@@ -90,8 +90,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
     async def list_tasks(
         list_name: str,
         nur_offene: bool = True,
-        fällig_vor: str | None = None,
-        fällig_nach: str | None = None,
+        faellig_vor: str | None = None,
+        faellig_nach: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """List tasks in a Nextcloud task list.
@@ -99,22 +99,22 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         Args:
             list_name: Display name of the task list.
             nur_offene: If True (default), only return tasks that are not completed.
-            fällig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
+            faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
                 tasks due at any time on that day.
-            fällig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
+            faellig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
             limit: Optional maximum number of results to return (must be > 0).
 
-        If `fällig_vor` and/or `fällig_nach` is given, tasks with no fällig_datum
+        If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
         (due date) at all are excluded - they can't be judged "before"/"after"
         anything. `limit` is applied after any due-date filtering.
 
         Returns:
-            A list of task dicts with keys: uid, titel, start_datum, fällig_datum,
-            priorität, fortschritt_prozent, status, ort, url, tags, notizen,
-            übergeordnete_uid (None unless the task is a subtask), wiederholung
+            A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
+            prioritaet, fortschritt_prozent, status, ort, url, tags, notizen,
+            uebergeordnete_uid (None unless the task is a subtask), wiederholung
             (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO", or None if the task
             doesn't recur; read-only - this server can't create/edit recurrence).
         """
@@ -122,8 +122,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             caldav_service.list_tasks,
             list_name,
             only_open=nur_offene,
-            due_before=fällig_vor,
-            due_after=fällig_nach,
+            due_before=faellig_vor,
+            due_after=faellig_nach,
             limit=limit,
         )
 
@@ -137,8 +137,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
 
         Returns:
             A task dict with the same shape as one entry from list_tasks: uid,
-            titel, start_datum, fällig_datum, priorität, fortschritt_prozent,
-            status, ort, url, tags, notizen, übergeordnete_uid, wiederholung.
+            titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
+            status, ort, url, tags, notizen, uebergeordnete_uid, wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 
@@ -147,8 +147,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         list_name: str,
         titel: str,
         start_datum: str | None = None,
-        fällig_datum: str | None = None,
-        priorität: str | None = None,
+        faellig_datum: str | None = None,
+        prioritaet: str | None = None,
         fortschritt_prozent: int | None = None,
         ort: str | None = None,
         url: str | None = None,
@@ -156,7 +156,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         erinnerungen: list[str] | None = None,
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
-        übergeordnete_aufgabe: str | None = None,
+        uebergeordnete_aufgabe: str | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -164,21 +164,21 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             list_name: Display name of the target task list.
             titel: Task title (VTODO SUMMARY).
             start_datum: Optional ISO 8601 date/datetime -> DTSTART.
-            fällig_datum: Optional ISO 8601 date/datetime -> DUE.
-            priorität: Optional "hoch" / "mittel" / "niedrig" -> PRIORITY (1/5/9).
+            faellig_datum: Optional ISO 8601 date/datetime -> DUE.
+            prioritaet: Optional "hoch" / "mittel" / "niedrig" -> PRIORITY (1/5/9).
             fortschritt_prozent: Optional 0-100 -> PERCENT-COMPLETE.
             ort: Optional location -> LOCATION.
             url: Optional URL -> URL.
             tags: Optional list of category strings -> CATEGORIES.
             erinnerungen: Optional list of reminders, each either a relative RFC 5545
-                duration (e.g. "-P1D", "-PT1H", relative to fällig_datum, falling
+                duration (e.g. "-P1D", "-PT1H", relative to faellig_datum, falling
                 back to start_datum) or an absolute ISO 8601 datetime -> VALARM.
             notizen: Optional notes -> DESCRIPTION.
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
-            übergeordnete_aufgabe: Optional UID of an existing task to link this
+            uebergeordnete_aufgabe: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
 
-        Date/time semantics for start_datum and fällig_datum: a value that is
+        Date/time semantics for start_datum and faellig_datum: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
         (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
         datetime; a *naive* datetime (no UTC offset, e.g.
@@ -190,8 +190,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         fields = mapping.TaskFields(
             titel=titel,
             start_datum=start_datum,
-            faellig_datum=fällig_datum,
-            prioritaet=priorität,
+            faellig_datum=faellig_datum,
+            prioritaet=prioritaet,
             fortschritt_prozent=fortschritt_prozent,
             ort=ort,
             url=url,
@@ -199,7 +199,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             erinnerungen=erinnerungen,
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
-            uebergeordnete_aufgabe=übergeordnete_aufgabe,
+            uebergeordnete_aufgabe=uebergeordnete_aufgabe,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -210,8 +210,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         task_uid: str,
         titel: str | None = None,
         start_datum: str | None = None,
-        fällig_datum: str | None = None,
-        priorität: str | None = None,
+        faellig_datum: str | None = None,
+        prioritaet: str | None = None,
         fortschritt_prozent: int | None = None,
         ort: str | None = None,
         url: str | None = None,
@@ -219,7 +219,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         erinnerungen: list[str] | None = None,
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
-        übergeordnete_aufgabe: str | None = None,
+        uebergeordnete_aufgabe: str | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
@@ -233,9 +233,9 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
                 all-day entry, and naive datetimes are interpreted as UTC.
             felder_leeren: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
-                Accepted values: "start_datum", "fällig_datum", "priorität",
+                Accepted values: "start_datum", "faellig_datum", "prioritaet",
                 "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
-                "notizen", "sichtbarkeit", "übergeordnete_aufgabe". "titel"
+                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe". "titel"
                 cannot be cleared. Naming an unknown field, or naming a field
                 here that is *also* given a new value in the same call, is an
                 error.
@@ -246,8 +246,8 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         fields = mapping.TaskFields(
             titel=titel,
             start_datum=start_datum,
-            faellig_datum=fällig_datum,
-            prioritaet=priorität,
+            faellig_datum=faellig_datum,
+            prioritaet=prioritaet,
             fortschritt_prozent=fortschritt_prozent,
             ort=ort,
             url=url,
@@ -255,7 +255,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             erinnerungen=erinnerungen,
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
-            uebergeordnete_aufgabe=übergeordnete_aufgabe,
+            uebergeordnete_aufgabe=uebergeordnete_aufgabe,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)

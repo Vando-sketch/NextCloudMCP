@@ -7,12 +7,12 @@ Values for enum-like fields:
 
 | Field | Allowed values |
 |---|---|
-| `priorität` | `"hoch"`, `"mittel"`, `"niedrig"` |
+| `prioritaet` | `"hoch"`, `"mittel"`, `"niedrig"` |
 | `sichtbarkeit` | `"öffentlich"`, `"privat"`, `"vertraulich"` |
 | `status` (in results) | `"offen"`, `"erledigt"` |
 
 Dates are ISO 8601 strings. Two rules apply everywhere a date/datetime is
-accepted (`start_datum`, `fällig_datum`, and absolute `erinnerungen` entries):
+accepted (`start_datum`, `faellig_datum`, and absolute `erinnerungen` entries):
 
 - A value that is exactly `"YYYY-MM-DD"` (e.g. `"2026-07-20"`) creates an
   **all-day** entry (iCalendar `VALUE=DATE`) — it comes back from `list_tasks`
@@ -40,14 +40,14 @@ cost one extra CalDAV property request per calendar, so it's deliberately not do
 
 ---
 
-## `list_tasks(list_name, nur_offene=True, fällig_vor=None, fällig_nach=None, limit=None)`
+## `list_tasks(list_name, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `list_name` | string | yes | Display name of the task list |
 | `nur_offene` | boolean | no (default `true`) | Exclude completed tasks |
-| `fällig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
-| `fällig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
+| `faellig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
+| `faellig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
 | `limit` | integer | no | Max number of results; must be `> 0` |
 
 Result — one dict per task:
@@ -58,37 +58,37 @@ Result — one dict per task:
     "uid": "0f8ba4a4-...",
     "titel": "Steuererklärung",
     "start_datum": "2026-07-01",
-    "fällig_datum": "2026-07-20",
-    "priorität": "hoch",
+    "faellig_datum": "2026-07-20",
+    "prioritaet": "hoch",
     "fortschritt_prozent": 20,
     "status": "offen",
     "ort": "Zuhause",
     "url": "https://example.com/steuer",
     "tags": ["Finanzen", "Wichtig"],
     "notizen": "Belege sammeln",
-    "übergeordnete_uid": null,
+    "uebergeordnete_uid": null,
     "wiederholung": null
   }
 ]
 ```
 
-`übergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
+`uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
 only surfaces whether/how an existing task recurs.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
 
-### Filtering (`fällig_vor` / `fällig_nach` / `limit`)
+### Filtering (`faellig_vor` / `faellig_nach` / `limit`)
 
-- If either `fällig_vor` or `fällig_nach` is given, tasks with **no** `fällig_datum` at all
+- If either `faellig_vor` or `faellig_nach` is given, tasks with **no** `faellig_datum` at all
   are excluded from the result — a task without a due date can't be judged "before" or
   "after" anything.
-- Both accept the same ISO 8601 date/datetime formats as `create_task`'s `fällig_datum`. A
-  date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `fällig_vor` expands
-  to the end of that day (`23:59:59` UTC), `fällig_nach` to the start of it (`00:00:00`
+- Both accept the same ISO 8601 date/datetime formats as `create_task`'s `faellig_datum`. A
+  date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `faellig_vor` expands
+  to the end of that day (`23:59:59` UTC), `faellig_nach` to the start of it (`00:00:00`
   UTC) — so an all-day task due exactly on the boundary date is included by either bound.
   A datetime bound (with a specific time) is used exactly as given.
-- `fällig_vor` and `fällig_nach` can be combined to select a range.
+- `faellig_vor` and `faellig_nach` can be combined to select a range.
 - `limit` caps the number of results, applied *after* any due-date filtering. `limit <= 0`
   is an error (`InvalidTaskDataError`).
 
@@ -115,8 +115,8 @@ Returns the same dict shape as one entry from `list_tasks` (see above), includin
 | `list_name` | string | yes | — (target task list) |
 | `titel` | string | yes | `SUMMARY` |
 | `start_datum` | string (ISO 8601) | no | `DTSTART` |
-| `fällig_datum` | string (ISO 8601) | no | `DUE` |
-| `priorität` | string enum | no | `PRIORITY` (hoch→1, mittel→5, niedrig→9) |
+| `faellig_datum` | string (ISO 8601) | no | `DUE` |
+| `prioritaet` | string enum | no | `PRIORITY` (hoch→1, mittel→5, niedrig→9) |
 | `fortschritt_prozent` | integer 0–100 | no | `PERCENT-COMPLETE` |
 | `ort` | string | no | `LOCATION` |
 | `url` | string | no | `URL` |
@@ -124,7 +124,7 @@ Returns the same dict shape as one entry from `list_tasks` (see above), includin
 | `erinnerungen` | list of strings | no | one `VALARM` per entry |
 | `notizen` | string | no | `DESCRIPTION` |
 | `sichtbarkeit` | string enum | no | `CLASS` |
-| `übergeordnete_aufgabe` | string (UID) | no | `RELATED-TO;RELTYPE=PARENT` |
+| `uebergeordnete_aufgabe` | string (UID) | no | `RELATED-TO;RELTYPE=PARENT` |
 
 Returns `{"uid": "<new task uid>"}`.
 
@@ -133,7 +133,7 @@ Returns `{"uid": "<new task uid>"}`.
 Each entry is either:
 
 - a **relative** RFC 5545 duration, e.g. `"-P1D"` (1 day before), `"-PT1H"` (1 hour
-  before), `"-PT15M"` (15 minutes before). Anchored to `fällig_datum`
+  before), `"-PT15M"` (15 minutes before). Anchored to `faellig_datum`
   (`TRIGGER;RELATED=END`) when the task has one, otherwise to `start_datum`
   (`RELATED=START`). A relative reminder on a task with neither date is an error.
 - an **absolute** ISO 8601 datetime, e.g. `"2026-07-19T09:00:00+02:00"`. Stored as a UTC
@@ -145,8 +145,8 @@ Example call:
 {
   "list_name": "Personal",
   "titel": "Steuererklärung abgeben",
-  "fällig_datum": "2026-07-20",
-  "priorität": "hoch",
+  "faellig_datum": "2026-07-20",
+  "prioritaet": "hoch",
   "tags": ["Finanzen"],
   "erinnerungen": ["-P1D", "-PT2H"]
 }
@@ -154,7 +154,7 @@ Example call:
 
 ### Subtasks
 
-Pass the UID of an existing task (e.g. from `list_tasks`) as `übergeordnete_aufgabe`.
+Pass the UID of an existing task (e.g. from `list_tasks`) as `uebergeordnete_aufgabe`.
 The Nextcloud Tasks app then displays the new task nested under its parent. The parent
 must be in the same task list.
 
@@ -185,9 +185,9 @@ Only fields explicitly present in the call are modified; everything else on the 
 `felder_leeren` is a list of field names to remove from the task entirely, rather
 than change. Accepted values:
 
-`"start_datum"`, `"fällig_datum"`, `"priorität"`, `"fortschritt_prozent"`, `"ort"`,
+`"start_datum"`, `"faellig_datum"`, `"prioritaet"`, `"fortschritt_prozent"`, `"ort"`,
 `"url"`, `"tags"`, `"erinnerungen"`, `"notizen"`, `"sichtbarkeit"`,
-`"übergeordnete_aufgabe"`.
+`"uebergeordnete_aufgabe"`.
 
 `"titel"` cannot be cleared (a task always needs a title) and is not accepted. Naming
 an unknown field, or naming a field in `felder_leeren` that is *also* given a new
@@ -200,8 +200,8 @@ setting a new priority:
 {
   "list_name": "Personal",
   "task_uid": "0f8ba4a4-...",
-  "priorität": "niedrig",
-  "felder_leeren": ["fällig_datum", "ort", "erinnerungen"]
+  "prioritaet": "niedrig",
+  "felder_leeren": ["faellig_datum", "ort", "erinnerungen"]
 }
 ```
 
@@ -244,12 +244,12 @@ All failures come back as short, single-line MCP tool errors, for example:
   Re-fetch the task and retry.` — another client (e.g. the Nextcloud Tasks app) changed
   this task between your last read and this write; re-fetch it with `list_tasks` and
   retry the change.
-- `Unknown priorität 'dringend'. Expected one of: hoch, mittel, niedrig.`
+- `Unknown prioritaet 'dringend'. Expected one of: hoch, mittel, niedrig.`
 - `Could not parse Erinnerung '1 Tag vorher': expected an ISO 8601 duration like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime.`
 - `Unknown felder_leeren entry/entries: telefonnummer. Expected one of: start_datum,
-  fällig_datum, priorität, fortschritt_prozent, ort, url, tags, erinnerungen, notizen,
-  sichtbarkeit, übergeordnete_aufgabe.`
-- `Cannot both set and clear the same field in one call: fällig_datum.`
+  faellig_datum, prioritaet, fortschritt_prozent, ort, url, tags, erinnerungen, notizen,
+  sichtbarkeit, uebergeordnete_aufgabe.`
+- `Cannot both set and clear the same field in one call: faellig_datum.`
 - `limit must be greater than 0, got 0.` — `list_tasks`'s `limit` parameter was `<= 0`.
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level

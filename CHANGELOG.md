@@ -7,6 +7,19 @@ This project does not yet follow Semantic Versioning releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Umlauts removed from the public tool schema** (`ä`→`ae`, `ü`→`ue`). The
+  Anthropic API validates every MCP tool's `input_schema` property names
+  against `^[a-zA-Z0-9_.-]{1,64}$`, so parameter names like `fällig_datum`,
+  `priorität` and `übergeordnete_aufgabe` made the API reject the whole tool
+  list and the connector unusable. Renamed across the entire public surface -
+  tool parameters, `felder_leeren` values, returned task-dict keys
+  (`faellig_datum`, `prioritaet`, `uebergeordnete_aufgabe`,
+  `uebergeordnete_uid`, `faellig_vor`, `faellig_nach`) - and in error
+  messages, docs and tests. **Breaking** for any client that consumed the old
+  umlaut spellings.
+
 ### Changed
 
 - **OAuth password gate replaced by an interactive consent page** (D2, LOCAL

@@ -33,8 +33,8 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # `apply_task_fields`.
 _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
     "start_datum": ("start_datum", "dtstart"),
-    "fällig_datum": ("faellig_datum", "due"),
-    "priorität": ("prioritaet", "priority"),
+    "faellig_datum": ("faellig_datum", "due"),
+    "prioritaet": ("prioritaet", "priority"),
     "fortschritt_prozent": ("fortschritt_prozent", "percent-complete"),
     "ort": ("ort", "location"),
     "url": ("url", "url"),
@@ -42,7 +42,7 @@ _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
     "erinnerungen": ("erinnerungen", None),
     "notizen": ("notizen", "description"),
     "sichtbarkeit": ("sichtbarkeit", "class"),
-    "übergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
+    "uebergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
 }
 
 
@@ -85,7 +85,7 @@ def priority_label_to_ical(label: str) -> int:
         return PRIORITY_LABELS[label]
     except KeyError:
         raise InvalidTaskDataError(
-            f"Unknown priorität '{label}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
+            f"Unknown prioritaet '{label}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
         ) from None
 
 
@@ -200,7 +200,7 @@ def _parse_trigger(
         related = "START"
     else:
         raise InvalidTaskDataError(
-            f"Relative Erinnerung '{spec}' needs the task to have a fällig_datum or "
+            f"Relative Erinnerung '{spec}' needs the task to have a faellig_datum or "
             "start_datum to be relative to."
         )
     return delta, {"RELATED": related}
@@ -376,15 +376,15 @@ def parse_vtodo(component) -> dict[str, Any]:
         "uid": str(component.get("uid")),
         "titel": str(component.get("summary", "")),
         "start_datum": _format_date_property(component, "dtstart"),
-        "fällig_datum": _format_date_property(component, "due"),
-        "priorität": ical_priority_to_label(int(priority)) if priority is not None else None,
+        "faellig_datum": _format_date_property(component, "due"),
+        "prioritaet": ical_priority_to_label(int(priority)) if priority is not None else None,
         "fortschritt_prozent": int(percent) if percent is not None else 0,
         "status": "erledigt" if status == "COMPLETED" else "offen",
         "ort": _get_text(component, "location"),
         "url": _get_text(component, "url"),
         "tags": _extract_categories(component),
         "notizen": _get_text(component, "description"),
-        "übergeordnete_uid": _extract_parent_uid(component),
+        "uebergeordnete_uid": _extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
     }
 
@@ -398,8 +398,8 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     compare directly, so it's expanded to a single instant within that day:
     start-of-day (00:00:00 UTC) when `end_of_day` is False, end-of-day
     (23:59:59 UTC) when True. Callers use `end_of_day=True` only for the
-    `fällig_vor` (due-before) bound, so a date-only bound like "2026-07-20"
-    still includes tasks due at any time on the 20th; `fällig_nach`
+    `faellig_vor` (due-before) bound, so a date-only bound like "2026-07-20"
+    still includes tasks due at any time on the 20th; `faellig_nach`
     (due-after) bounds and the tasks' own stored due values use
     `end_of_day=False` (start-of-day), so a date-only bound includes tasks due
     from the very start of that day onward, and an all-day task's own due date
@@ -423,7 +423,7 @@ def filter_tasks(
 
     `due_before`/`due_after` are ISO 8601 date/datetime strings (same format
     `parse_datetime_input` accepts elsewhere). When either is given, tasks with
-    no `fällig_datum` (due date) are excluded - a task can't be "due before X"
+    no `faellig_datum` (due date) are excluded - a task can't be "due before X"
     or "due after X" if it has no due date at all. See `_to_comparable_datetime`
     for how date-vs-datetime bounds/values are normalized for comparison.
 
@@ -442,7 +442,7 @@ def filter_tasks(
         )
         filtered: list[dict[str, Any]] = []
         for task in tasks:
-            due_text = task.get("fällig_datum")
+            due_text = task.get("faellig_datum")
             if due_text is None:
                 continue
             due_dt = _to_comparable_datetime(due_text, end_of_day=False)

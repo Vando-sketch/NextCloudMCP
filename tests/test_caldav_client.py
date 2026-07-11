@@ -107,15 +107,15 @@ def test_list_tasks_parses_todos(service, principal):
             "uid": "abc",
             "titel": "Milch kaufen",
             "start_datum": None,
-            "fällig_datum": None,
-            "priorität": None,
+            "faellig_datum": None,
+            "prioritaet": None,
             "fortschritt_prozent": 0,
             "status": "offen",
             "ort": None,
             "url": None,
             "tags": [],
             "notizen": None,
-            "übergeordnete_uid": None,
+            "uebergeordnete_uid": None,
             "wiederholung": None,
         }
     ]

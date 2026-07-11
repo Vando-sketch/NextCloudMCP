@@ -154,8 +154,9 @@ Claude Desktop (no native remote-connector UI yet) instead uses the
 
 ## Tools
 
-All tool parameter names match the field names below exactly (including German field
-names with umlauts, e.g. `priorität`, `fällig_datum`) - this is the literal MCP tool
+All tool parameter names match the field names below exactly (German field names in
+ASCII transliteration, e.g. `prioritaet`, `faellig_datum` - the Anthropic API only
+allows `[a-zA-Z0-9_.-]` in schema property names) - this is the literal MCP tool
 schema Claude calls.
 
 ### `list_task_lists()`
@@ -163,18 +164,18 @@ schema Claude calls.
 Returns all available Nextcloud task lists as `{"name": ..., "url": ...}` dicts
 (display name and internal CalDAV URL/ID).
 
-### `list_tasks(list_name, nur_offene=True, fällig_vor=None, fällig_nach=None, limit=None)`
+### `list_tasks(list_name, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None)`
 
 Returns tasks in a list. `nur_offene=True` (default) excludes completed tasks. Each task
-is a dict with: `uid`, `titel`, `start_datum`, `fällig_datum`, `priorität`,
+is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
-`notizen`, `übergeordnete_uid` (parent task UID, or `null` if not a subtask),
+`notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
 `wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only).
 
-A date-only `start_datum`/`fällig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
+A date-only `start_datum`/`faellig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
 anything else is a datetime.
 
-`fällig_vor`/`fällig_nach` optionally filter to tasks due before/after a given ISO 8601
+`faellig_vor`/`faellig_nach` optionally filter to tasks due before/after a given ISO 8601
 date or datetime (a date-only bound covers the whole day); either one excludes tasks with
 no due date at all. `limit` (must be `> 0`) caps the number of results, applied after any
 due-date filtering. See [`docs/tools.md`](docs/tools.md) for the exact boundary semantics.
@@ -191,8 +192,8 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | Parameter | CalDAV property | Notes |
 |---|---|---|
 | `start_datum` | `DTSTART` | ISO 8601 date or datetime |
-| `fällig_datum` | `DUE` | ISO 8601 date or datetime |
-| `priorität` | `PRIORITY` | `"hoch"`→1, `"mittel"`→5, `"niedrig"`→9 |
+| `faellig_datum` | `DUE` | ISO 8601 date or datetime |
+| `prioritaet` | `PRIORITY` | `"hoch"`→1, `"mittel"`→5, `"niedrig"`→9 |
 | `fortschritt_prozent` | `PERCENT-COMPLETE` | 0-100 |
 | `ort` | `LOCATION` | |
 | `url` | `URL` | |
@@ -200,15 +201,15 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | `erinnerungen` | `VALARM` | see below |
 | `notizen` | `DESCRIPTION` | |
 | `sichtbarkeit` | `CLASS` | `"öffentlich"`→PUBLIC, `"privat"`→PRIVATE, `"vertraulich"`→CONFIDENTIAL |
-| `übergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
+| `uebergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
 
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
-`fällig_datum` if set, otherwise before `start_datum`; a relative reminder without either
+`faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
 date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
 RFC 5545, VALARM triggers must be in UTC).
 
-**Date/time semantics** (applies to `start_datum`, `fällig_datum`, and absolute
+**Date/time semantics** (applies to `start_datum`, `faellig_datum`, and absolute
 `erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
 (`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
 offset) is interpreted as UTC.
@@ -221,9 +222,9 @@ changed; everything else on the task is left untouched. Passing `erinnerungen` r
 
 To remove a property entirely (e.g. delete a due date), list its field name in the
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
-leaves it unchanged. Accepted names: `start_datum`, `fällig_datum`, `priorität`,
+leaves it unchanged. Accepted names: `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
-`übergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
+`uebergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
 cleared in the same call. See [`docs/tools.md`](docs/tools.md) for details and examples.
 
 ### `complete_task(list_name, task_uid)`

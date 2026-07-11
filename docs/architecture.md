@@ -117,11 +117,13 @@ debugging.
 default 30s) into `DAVClient`, so a hung Nextcloud server can no longer hang this server
 forever.
 
-**German tool schema on purpose.** The tool parameters (`fällig_datum`, `priorität`,
-`übergeordnete_aufgabe`, ...) are the literal MCP schema field names. Since the server is
+**German tool schema on purpose.** The tool parameters (`faellig_datum`, `prioritaet`,
+`uebergeordnete_aufgabe`, ...) are the literal MCP schema field names. Since the server is
 operated in German via Claude, keeping the schema in German gives the model the most
-direct mapping from user language to tool arguments. Code, comments and docs stay
-English.
+direct mapping from user language to tool arguments. The names are ASCII-transliterated
+(`ä`→`ae`, `ü`→`ue`) because the Anthropic API rejects tool schemas whose property names
+fall outside `^[a-zA-Z0-9_.-]{1,64}$` - literal umlauts in parameter names made the API
+refuse the entire tool list at connect time. Code, comments and docs stay English.
 
 ## Testing strategy
 
