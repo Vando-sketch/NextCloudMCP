@@ -104,6 +104,39 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return await _call(caldav_service.create_task_list, display_name)
 
     @mcp.tool
+    async def delete_task_list(list_name: str) -> dict[str, str]:
+        """Permanently delete a Nextcloud task list and every task inside it.
+
+        WARNING: this is irreversible from this server's point of view -
+        deleting the list deletes all of its tasks along with it. Confirm
+        with the user before calling this.
+
+        Args:
+            list_name: Display name of the task list to delete.
+
+        Returns:
+            {"list_name": list_name} on success.
+        """
+        await _call(caldav_service.delete_task_list, list_name)
+        return {"list_name": list_name}
+
+    @mcp.tool
+    async def rename_task_list(list_name: str, new_display_name: str) -> dict[str, str]:
+        """Rename a Nextcloud task list. Only its display name changes, not its URL/id.
+
+        Args:
+            list_name: Current display name of the task list to rename.
+            new_display_name: New display name for the list. The call fails
+                if another list already has this exact name, instead of
+                silently producing two identically-named lists.
+
+        Returns:
+            {"name": new display name, "url": internal CalDAV URL/ID} for the
+            renamed list, in the same shape as one entry of list_task_lists.
+        """
+        return await _call(caldav_service.rename_task_list, list_name, new_display_name)
+
+    @mcp.tool
     async def list_tasks(
         list_name: str,
         nur_offene: bool = True,
