@@ -17,6 +17,7 @@ from nextcloud_task_mcp.errors import (
     ConnectionFailedError,
     InvalidTaskDataError,
     TaskConflictError,
+    TaskListAlreadyExistsError,
     TaskListNotFoundError,
     TaskMcpError,
     TaskNotFoundError,
@@ -86,6 +87,132 @@ def test_list_task_lists_returns_names_and_urls(service, principal):
         {"name": "Personal", "url": "https://cloud.example.com/dav/personal/"},
         {"name": "Arbeit", "url": "https://cloud.example.com/dav/arbeit/"},
     ]
+
+
+# --- create_task_list ---
+
+
+def test_create_task_list_creates_and_returns_info(service, principal):
+    principal.calendars.return_value = []
+    new_calendar = _make_calendar(
+        "Groceries", "https://cloud.example.com/dav/calendars/u/groceries/"
+    )
+    principal.make_calendar.return_value = new_calendar
+
+    result = service.create_task_list("Groceries")
+
+    principal.make_calendar.assert_called_once_with(
+        name="Groceries", cal_id="groceries", supported_calendar_component_set=["VTODO"]
+    )
+    assert result == {
+        "name": "Groceries",
+        "url": "https://cloud.example.com/dav/calendars/u/groceries/",
+    }
+
+
+def test_create_task_list_slugifies_display_name(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.return_value = _make_calendar("Grocery List!")
+
+    service.create_task_list("Grocery List!")
+
+    _, kwargs = principal.make_calendar.call_args
+    assert kwargs["cal_id"] == "grocery-list"
+
+
+def test_create_task_list_slugifies_with_no_ascii_alnum_falls_back(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.return_value = _make_calendar("日本語")
+
+    service.create_task_list("日本語")
+
+    _, kwargs = principal.make_calendar.call_args
+    assert kwargs["cal_id"].startswith("list-")
+    assert len(kwargs["cal_id"]) > len("list-")
+
+
+def test_create_task_list_populates_cache(service, principal):
+    principal.calendars.return_value = []
+    new_calendar = _make_calendar("Groceries")
+    principal.make_calendar.return_value = new_calendar
+
+    service.create_task_list("Groceries")
+    new_calendar.todos.return_value = []
+
+    service.list_tasks("Groceries")
+
+    # No second principal.calendars() PROPFIND - the newly-created calendar
+    # was cached directly instead of requiring a fresh resolution.
+    assert principal.calendars.call_count == 1
+
+
+def test_create_task_list_requires_display_name(service):
+    with pytest.raises(InvalidTaskDataError):
+        service.create_task_list("")
+
+
+def test_create_task_list_requires_non_whitespace_display_name(service):
+    with pytest.raises(InvalidTaskDataError):
+        service.create_task_list("   ")
+
+
+def test_create_task_list_raises_when_display_name_already_exists(service, principal):
+    existing = _make_calendar("Groceries")
+    principal.calendars.return_value = [existing]
+
+    with pytest.raises(TaskListAlreadyExistsError):
+        service.create_task_list("Groceries")
+
+    principal.make_calendar.assert_not_called()
+
+
+def test_create_task_list_raises_when_collection_id_conflicts(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
+
+    with pytest.raises(TaskListAlreadyExistsError):
+        service.create_task_list("Groceries")
+
+
+def test_create_task_list_raises_when_collection_id_conflicts_409(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.side_effect = caldav_error.MkcalendarError("409 Conflict")
+
+    with pytest.raises(TaskListAlreadyExistsError):
+        service.create_task_list("Groceries")
+
+
+def test_create_task_list_reraises_unrelated_mkcol_error_as_generic(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.side_effect = caldav_error.MkcolError("403 Forbidden")
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.create_task_list("Groceries")
+    assert not isinstance(exc_info.value, TaskListAlreadyExistsError)
+
+
+def test_create_task_list_translates_generic_exception(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.create_task_list("Groceries")
+
+
+def test_create_task_list_translates_generic_exception_from_calendars_lookup(service, principal):
+    principal.calendars.side_effect = caldav_client_module._http_errors.ConnectionError("down")
+
+    with pytest.raises(ConnectionFailedError):
+        service.create_task_list("Groceries")
+
+
+def test_create_task_list_reraises_task_mcp_error_from_get_principal(service, mock_dav_client):
+    mock_dav_client.return_value.principal.side_effect = caldav_error.AuthorizationError(
+        "bad creds"
+    )
+
+    with pytest.raises(AuthenticationFailedError):
+        service.create_task_list("Groceries")
 
 
 def test_list_tasks_parses_todos(service, principal):

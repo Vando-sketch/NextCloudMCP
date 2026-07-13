@@ -25,6 +25,11 @@ class TaskListNotFoundError(TaskMcpError):
     """Raised when the requested task list does not exist."""
 
 
+class TaskListAlreadyExistsError(TaskMcpError):
+    """Raised when creating a task list whose display name (or generated
+    collection id) collides with one that already exists on the server."""
+
+
 class TaskNotFoundError(TaskMcpError):
     """Raised when the requested task UID does not exist in the given list."""
 

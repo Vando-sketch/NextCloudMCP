@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import uuid
 from collections.abc import Callable
@@ -35,6 +36,7 @@ from .errors import (
     ConnectionFailedError,
     InvalidTaskDataError,
     TaskConflictError,
+    TaskListAlreadyExistsError,
     TaskListNotFoundError,
     TaskMcpError,
     TaskNotFoundError,
@@ -43,6 +45,23 @@ from .errors import (
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# Runs of anything that isn't an ASCII letter/digit collapse to a single
+# hyphen, so "Groceries & Errands!" -> "groceries-errands" (leading/trailing
+# hyphens stripped separately, below).
+_SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(display_name: str) -> str:
+    """Derive a URL-safe CalDAV collection id from a task list's display name.
+
+    Lowercases, collapses runs of non-alphanumeric characters to a single
+    hyphen, and strips leading/trailing hyphens. Falls back to a random id
+    if that leaves nothing usable (e.g. a name that's all emoji/CJK/etc. -
+    non-ASCII scripts have no case-folded alphanumeric equivalent here).
+    """
+    slug = _SLUG_INVALID_CHARS.sub("-", display_name.strip().lower()).strip("-")
+    return slug or f"list-{uuid.uuid4().hex[:8]}"
 
 
 def _translate(exc: Exception) -> TaskMcpError:
@@ -218,6 +237,71 @@ class CalDavService:
                 {"name": name, "url": str(calendar.url)}
                 for calendar, name in zip(calendars, names, strict=True)
             ]
+
+    def create_task_list(self, display_name: str) -> dict[str, str]:
+        """Create a new Nextcloud task list (a CalDAV calendar collection supporting VTODO).
+
+        The collection id (the last path segment of its URL) is derived from
+        `display_name` via `_slugify` rather than left to caldav's own
+        default (a random UUID) - a human still has to look at this URL in
+        Nextcloud's web UI or a CalDAV client, so a readable id is worth
+        generating deliberately.
+
+        Two conflict cases are both rejected rather than silently handled,
+        mirroring `_resolve_calendar`'s "don't guess" stance on ambiguous
+        names: another list already has this exact display name (checked
+        proactively via `principal.calendars()`, before ever attempting the
+        server-side create), or the generated collection id happens to
+        collide with an existing collection (surfaces as a 405/409 from the
+        MKCOL/MKCALENDAR request itself, since two different display names
+        can slugify to the same id).
+
+        Returns:
+            {"name": display name, "url": internal CalDAV URL} for the new
+            list, matching one entry of `list_task_lists`'s return value.
+        """
+        if not display_name or not display_name.strip():
+            raise InvalidTaskDataError("display_name is required to create a task list.")
+
+        slug = _slugify(display_name)
+
+        with self._lock:
+            try:
+                principal = self._get_principal()
+                existing = principal.calendars()
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            if any(calendar.get_display_name() == display_name for calendar in existing):
+                raise TaskListAlreadyExistsError(
+                    f"A task list named '{display_name}' already exists."
+                )
+
+            try:
+                calendar = principal.make_calendar(
+                    name=display_name,
+                    cal_id=slug,
+                    supported_calendar_component_set=["VTODO"],
+                )
+            except (caldav_error.MkcolError, caldav_error.MkcalendarError) as exc:
+                # 405 (Method Not Allowed) is what a MKCOL/MKCALENDAR against
+                # an already-existing collection URL returns; 409 (Conflict)
+                # is the same idea from servers that respond differently.
+                # Anything else here is a genuine, unrelated CalDAV failure.
+                if "405" in str(exc) or "409" in str(exc):
+                    raise TaskListAlreadyExistsError(
+                        f"A task list with id '{slug}' already exists on the server. "
+                        "Try a different display name."
+                    ) from exc
+                logger.warning("CalDAV request failed creating task list", exc_info=exc)
+                raise TaskMcpError("The CalDAV request failed on the Nextcloud server.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            self._calendar_cache[display_name] = calendar
+            return {"name": display_name, "url": str(calendar.url)}
 
     def list_tasks(
         self,
