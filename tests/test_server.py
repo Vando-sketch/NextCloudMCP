@@ -12,7 +12,7 @@ from fastmcp.exceptions import ToolError
 
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
-from nextcloud_task_mcp.errors import TaskListNotFoundError
+from nextcloud_task_mcp.errors import TaskListAlreadyExistsError, TaskListNotFoundError
 from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
 from nextcloud_task_mcp.server import build_server, main
 
@@ -36,6 +36,7 @@ def tools(settings, fake_service):
 def test_all_tools_registered(tools):
     assert set(tools) == {
         "list_task_lists",
+        "create_task_list",
         "list_tasks",
         "get_task",
         "create_task",
@@ -43,6 +44,12 @@ def test_all_tools_registered(tools):
         "complete_task",
         "delete_task",
     }
+
+
+def test_create_task_list_uses_ascii_parameter_names(tools):
+    schema = tools["create_task_list"].parameters
+    assert set(schema["properties"]) == {"display_name"}
+    assert schema["required"] == ["display_name"]
 
 
 def test_create_task_uses_umlaut_parameter_names(tools):
@@ -75,6 +82,24 @@ def test_list_task_lists_delegates_to_service(tools, fake_service):
     fake_service.list_task_lists.return_value = [{"name": "Personal", "url": "https://x/"}]
     result = _run(tools["list_task_lists"].fn())
     assert result == [{"name": "Personal", "url": "https://x/"}]
+
+
+def test_create_task_list_delegates_to_service(tools, fake_service):
+    fake_service.create_task_list.return_value = {
+        "name": "Groceries",
+        "url": "https://x/groceries/",
+    }
+    result = _run(tools["create_task_list"].fn(display_name="Groceries"))
+    assert result == {"name": "Groceries", "url": "https://x/groceries/"}
+    fake_service.create_task_list.assert_called_once_with("Groceries")
+
+
+def test_create_task_list_conflict_becomes_clean_tool_error(tools, fake_service):
+    fake_service.create_task_list.side_effect = TaskListAlreadyExistsError(
+        "A task list named 'Groceries' already exists."
+    )
+    with pytest.raises(ToolError, match="Groceries"):
+        _run(tools["create_task_list"].fn(display_name="Groceries"))
 
 
 def test_list_tasks_passes_nur_offene_through(tools, fake_service):
