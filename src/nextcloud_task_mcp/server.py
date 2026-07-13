@@ -87,6 +87,23 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return await _call(caldav_service.list_task_lists)
 
     @mcp.tool
+    async def create_task_list(display_name: str) -> dict[str, str]:
+        """Create a new Nextcloud task list (a CalDAV calendar collection supporting VTODO).
+
+        Args:
+            display_name: Display name for the new task list. A URL-safe
+                collection id is generated from it automatically; if that id
+                collides with an existing collection, or another list
+                already has this exact display name, the call fails instead
+                of silently reusing/overwriting the existing list.
+
+        Returns:
+            {"name": display name, "url": internal CalDAV URL/ID} for the new
+            list, in the same shape as one entry of list_task_lists.
+        """
+        return await _call(caldav_service.create_task_list, display_name)
+
+    @mcp.tool
     async def list_tasks(
         list_name: str,
         nur_offene: bool = True,
