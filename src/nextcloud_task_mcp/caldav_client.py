@@ -7,15 +7,16 @@ import re
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, TypeVar
 
 from caldav.collection import Calendar as DAVCalendar
 from caldav.collection import Principal as DAVPrincipal
 from caldav.davclient import DAVClient
 from caldav.elements import dav
+from caldav.elements import ical as ical_elements
 from caldav.lib import error as caldav_error
-from icalendar import Calendar, Todo
+from icalendar import Calendar, Event, Todo
 
 # caldav's top-level `caldav.DAVClient`/`DAVPrincipal`/`DAVCalendar`
 # are exposed via PEP 562 module-level lazy imports (see caldav/__init__.py),
@@ -31,10 +32,14 @@ try:
 except ImportError:  # pragma: no cover - depends on caldav's installed backend
     from requests import exceptions as _http_errors  # type: ignore[no-redef]
 
-from . import mapping
+from . import event_mapping, mapping
 from .errors import (
     AuthenticationFailedError,
+    CalendarAlreadyExistsError,
+    CalendarNotFoundError,
     ConnectionFailedError,
+    EventNotFoundError,
+    InvalidEventDataError,
     InvalidTaskDataError,
     TaskConflictError,
     TaskListAlreadyExistsError,
@@ -46,6 +51,26 @@ from .errors import (
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+# Nextcloud stores the calendar color as "#RRGGBB" or "#RRGGBBAA" (the Apple
+# calendar-color extension property). Anything else is rejected up front so a
+# typo can't end up as an unparseable property on the server.
+_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
+
+# Fallback bounds for one-sided time-range queries: CalDAV time-range filters
+# technically allow an open side, but caldav's search() + expand handling is
+# only well-defined with both ends present, so an omitted bound is widened to
+# a range that comfortably covers any real-world calendar instead.
+_RANGE_MIN = datetime(1901, 1, 1, tzinfo=timezone.utc)
+_RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+# The two supported task<->event link semantics, mapped to the RELATED-TO
+# RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
+# VTODO would make Nextcloud Tasks render the task as a subtask of a
+# non-task, garbling its UI; the event side has no such interpretation):
+#   "zeitblock":      the event reserves time for the task (event = child).
+#   "voraussetzung":  the event must happen before the task (event = parent).
+_LINK_RELTYPES: dict[str, str] = {"zeitblock": "PARENT", "voraussetzung": "CHILD"}
 
 # Runs of anything that isn't an ASCII letter/digit collapse to a single
 # hyphen, so "Groceries & Errands!" -> "groceries-errands" (leading/trailing
@@ -89,6 +114,20 @@ def _translate(exc: Exception) -> TaskMcpError:
         return TaskConflictError(
             "The task was modified by another client since it was last read "
             "(conflicting edit). Re-fetch the task and retry."
+        )
+    # Also a DAVError subclass, so checked before the generic branch. caldav's
+    # built-in backoff (rate_limit_handle, see __init__) retries 429/503
+    # transparently; this error only surfaces once those retries are
+    # exhausted, i.e. the server is enforcing a longer window. Nextcloud does
+    # this by design for calendar *creation* (~10 new calendars per user per
+    # hour), so the message names waiting as the fix rather than reading like
+    # a server defect.
+    if isinstance(exc, caldav_error.RateLimitError):
+        return TaskMcpError(
+            "Nextcloud is rate-limiting these requests (HTTP 429/503). This is "
+            "expected after creating many calendars/task lists in a short time "
+            "(Nextcloud allows roughly 10 new calendars per hour). Wait a while "
+            "and retry."
         )
     if isinstance(exc, caldav_error.DAVError):
         logger.warning("CalDAV request failed", exc_info=exc)
@@ -140,10 +179,13 @@ class CalDavService:
         self._lock = threading.RLock()
         # Resolving a calendar by display name costs a full PROPFIND + linear
         # scan (`principal.calendars()`) on every call. Cache resolved
-        # calendars by display name so repeat calls for the same list_name
-        # skip that round-trip entirely (A3). Guarded by `_lock`, like
+        # calendars by (component, display name) so repeat calls for the same
+        # name skip that round-trip entirely (A3). The component is part of
+        # the key because Nextcloud keeps task lists (VTODO) and event
+        # calendars (VEVENT) in the same DAV namespace, and the same display
+        # name may legitimately exist once per kind. Guarded by `_lock`, like
         # everything else that touches CalDAV state.
-        self._calendar_cache: dict[str, DAVCalendar] = {}
+        self._calendar_cache: dict[tuple[str, str], DAVCalendar] = {}
 
     def _get_principal(self) -> DAVPrincipal:
         with self._lock:
@@ -154,13 +196,43 @@ class CalDavService:
                     raise _translate(exc) from exc
             return self._principal
 
-    def _resolve_calendar(self, list_name: str) -> DAVCalendar:
-        """Resolve `list_name` to a calendar via a fresh `principal.calendars()` call.
+    @staticmethod
+    def _supports_component(calendar: DAVCalendar, component: str) -> bool:
+        """True if `calendar` supports `component` ("VTODO"/"VEVENT"), or can't tell.
 
-        Raises `TaskListNotFoundError` if no calendar has that display name,
-        or a generic `TaskMcpError` if more than one does - a duplicate
-        display name is genuinely ambiguous, so callers are told to rename
-        their lists rather than have the server silently pick one (A3).
+        Nextcloud advertises `supported-calendar-component-set` on every
+        calendar, but a collection that doesn't (or whose PROPFIND fails,
+        e.g. an external webcal subscription with flaky props) is treated as
+        supporting everything - failing open here only means a name shows up
+        in one listing too many, while failing closed would make an entire
+        calendar silently unreachable.
+        """
+        try:
+            components = calendar.get_supported_components()
+        except Exception:
+            return True
+        return not components or component in components
+
+    @staticmethod
+    def _kind_label(component: str) -> str:
+        return "calendar" if component == "VEVENT" else "task list"
+
+    def _not_found(self, name: str, component: str) -> TaskMcpError:
+        if component == "VEVENT":
+            return CalendarNotFoundError(f"Calendar '{name}' was not found.")
+        return TaskListNotFoundError(f"Task list '{name}' was not found.")
+
+    def _resolve_collection(self, name: str, component: str) -> DAVCalendar:
+        """Resolve a display name to a collection supporting `component`, freshly.
+
+        Nextcloud keeps task lists (VTODO) and event calendars (VEVENT) side
+        by side under `/calendars/<user>/`, so resolution filters by
+        component support - asking for the task list "Personal" must not
+        return an events-only calendar of the same name. Raises the
+        kind-specific not-found error if nothing matches, or a generic
+        `TaskMcpError` if more than one does - a duplicate display name is
+        genuinely ambiguous, so callers are told to rename rather than have
+        the server silently pick one (A3).
         """
         try:
             calendars = self._get_principal().calendars()
@@ -169,34 +241,39 @@ class CalDavService:
         except Exception as exc:
             raise _translate(exc) from exc
 
-        matches = [c for c in calendars if c.get_display_name() == list_name]
+        matches = [
+            c
+            for c in calendars
+            if c.get_display_name() == name and self._supports_component(c, component)
+        ]
         if not matches:
-            raise TaskListNotFoundError(f"Task list '{list_name}' was not found.")
+            raise self._not_found(name, component)
         if len(matches) > 1:
+            kind = self._kind_label(component)
             raise TaskMcpError(
-                f"Multiple task lists are named '{list_name}', which is ambiguous. "
-                "Rename the task lists in Nextcloud so each has a distinct name, or "
-                "use a different, unambiguous list name."
+                f"Multiple {kind}s are named '{name}', which is ambiguous. "
+                f"Rename the {kind}s in Nextcloud so each has a distinct name, or "
+                "use a different, unambiguous name."
             )
         return matches[0]
 
-    def _resolve_and_cache(self, list_name: str) -> DAVCalendar:
-        calendar = self._resolve_calendar(list_name)
-        self._calendar_cache[list_name] = calendar
+    def _resolve_and_cache(self, name: str, component: str) -> DAVCalendar:
+        calendar = self._resolve_collection(name, component)
+        self._calendar_cache[(component, name)] = calendar
         return calendar
 
-    def _get_calendar(self, list_name: str) -> DAVCalendar:
-        cached = self._calendar_cache.get(list_name)
+    def _get_collection(self, name: str, component: str) -> DAVCalendar:
+        cached = self._calendar_cache.get((component, name))
         if cached is not None:
             return cached
-        return self._resolve_and_cache(list_name)
+        return self._resolve_and_cache(name, component)
 
-    def _with_calendar(self, list_name: str, fn: Callable[[DAVCalendar], _T]) -> _T:
-        """Resolve `list_name`'s (cached) calendar and call `fn(calendar)`.
+    def _with_collection(self, name: str, component: str, fn: Callable[[DAVCalendar], _T]) -> _T:
+        """Resolve `name`'s (cached) collection and call `fn(calendar)`.
 
         `fn` should perform raw caldav operations without translating
         `caldav_error.NotFoundError` itself: a cached calendar may have gone
-        stale (the list was deleted/renamed server-side since it was
+        stale (the collection was deleted/renamed server-side since it was
         cached), which surfaces as that same NotFoundError on the actual
         request. On that specific error, the stale cache entry is dropped
         and resolution is retried exactly once with a fresh
@@ -204,16 +281,27 @@ class CalDavService:
         common case cheap while still recovering from a stale cache instead
         of failing (or silently misbehaving) forever.
         """
-        calendar = self._get_calendar(list_name)
+        calendar = self._get_collection(name, component)
         try:
             return fn(calendar)
         except caldav_error.NotFoundError:
-            self._calendar_cache.pop(list_name, None)
-            calendar = self._resolve_and_cache(list_name)
+            self._calendar_cache.pop((component, name), None)
+            calendar = self._resolve_and_cache(name, component)
             return fn(calendar)
 
+    def _with_calendar(self, list_name: str, fn: Callable[[DAVCalendar], _T]) -> _T:
+        """Task-list flavour of `_with_collection`, kept for the VTODO call sites."""
+        return self._with_collection(list_name, "VTODO", fn)
+
     def list_task_lists(self) -> list[dict[str, str]]:
-        """Return all calendars on the account as {"name", "url"} dicts."""
+        """Return all VTODO-supporting calendars on the account as {"name", "url"} dicts.
+
+        Event-only calendars (VEVENT, e.g. Nextcloud's default "Personal"
+        calendar) are excluded - they live in the same DAV namespace but
+        can't hold tasks, so listing them here would invite task operations
+        that the server then rejects. `list_calendars` is the event-side
+        counterpart.
+        """
         with self._lock:
             try:
                 calendars = self._get_principal().calendars()
@@ -222,6 +310,7 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
+            calendars = [c for c in calendars if self._supports_component(c, "VTODO")]
             names = [calendar.get_display_name() or str(calendar.url) for calendar in calendars]
             name_counts: dict[str, int] = {}
             for name in names:
@@ -229,10 +318,10 @@ class CalDavService:
             # Populate the resolution cache opportunistically (A3), but only
             # for names that are actually unambiguous - caching one of
             # several same-named calendars would silently hide the
-            # ambiguity that `_resolve_calendar` is supposed to surface.
+            # ambiguity that `_resolve_collection` is supposed to surface.
             for calendar, name in zip(calendars, names, strict=True):
                 if name_counts[name] == 1:
-                    self._calendar_cache[name] = calendar
+                    self._calendar_cache[("VTODO", name)] = calendar
 
             return [
                 {"name": name, "url": str(calendar.url)}
@@ -248,14 +337,12 @@ class CalDavService:
         Nextcloud's web UI or a CalDAV client, so a readable id is worth
         generating deliberately.
 
-        Two conflict cases are both rejected rather than silently handled,
-        mirroring `_resolve_calendar`'s "don't guess" stance on ambiguous
-        names: another list already has this exact display name (checked
-        proactively via `principal.calendars()`, before ever attempting the
-        server-side create), or the generated collection id happens to
-        collide with an existing collection (surfaces as a 405/409 from the
-        MKCOL/MKCALENDAR request itself, since two different display names
-        can slugify to the same id).
+        A display-name conflict (another list already has this exact name,
+        checked proactively via `principal.calendars()` before the
+        server-side create) is rejected rather than silently handled,
+        mirroring `_resolve_collection`'s "don't guess" stance on ambiguous
+        names. A collision of the generated collection *id*, by contrast, is
+        dodged automatically - see `_make_collection`.
 
         Returns:
             {"name": display name, "url": internal CalDAV URL} for the new
@@ -275,34 +362,70 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
-            if any(calendar.get_display_name() == display_name for calendar in existing):
+            if any(
+                calendar.get_display_name() == display_name
+                and self._supports_component(calendar, "VTODO")
+                for calendar in existing
+            ):
                 raise TaskListAlreadyExistsError(
                     f"A task list named '{display_name}' already exists."
                 )
 
+            calendar = self._make_collection(
+                principal,
+                display_name,
+                slug,
+                component="VTODO",
+                conflict_error=TaskListAlreadyExistsError,
+                kind="task list",
+            )
+
+            self._calendar_cache[("VTODO", display_name)] = calendar
+            return {"name": display_name, "url": str(calendar.url)}
+
+    def _make_collection(
+        self,
+        principal: DAVPrincipal,
+        display_name: str,
+        slug: str,
+        *,
+        component: str,
+        conflict_error: type[TaskMcpError],
+        kind: str,
+    ) -> DAVCalendar:
+        """MKCALENDAR a new collection, dodging occupied collection ids.
+
+        A 405 (Method Not Allowed) / 409 (Conflict) response means the
+        collection URL is already taken - either by a different-named
+        collection whose name slugifies to the same id, or by a *deleted*
+        collection still sitting in Nextcloud's trashbin, which keeps its URI
+        occupied (invisibly - it no longer shows up in listings) until the
+        trash is purged. Since the display name is this API's identity and
+        the id is internal, the id is not worth failing over: retry with
+        "<slug>-2", "<slug>-3", ... before giving up. Display-name conflicts
+        are still rejected by the callers, before ever getting here.
+        """
+        candidates = [slug] + [f"{slug}-{i}" for i in range(2, 7)]
+        for cal_id in candidates:
             try:
-                calendar = principal.make_calendar(
+                return principal.make_calendar(
                     name=display_name,
-                    cal_id=slug,
-                    supported_calendar_component_set=["VTODO"],
+                    cal_id=cal_id,
+                    supported_calendar_component_set=[component],
                 )
             except (caldav_error.MkcolError, caldav_error.MkcalendarError) as exc:
-                # 405 (Method Not Allowed) is what a MKCOL/MKCALENDAR against
-                # an already-existing collection URL returns; 409 (Conflict)
-                # is the same idea from servers that respond differently.
-                # Anything else here is a genuine, unrelated CalDAV failure.
                 if "405" in str(exc) or "409" in str(exc):
-                    raise TaskListAlreadyExistsError(
-                        f"A task list with id '{slug}' already exists on the server. "
-                        "Try a different display name."
-                    ) from exc
-                logger.warning("CalDAV request failed creating task list", exc_info=exc)
+                    continue  # id occupied - try the next candidate
+                logger.warning("CalDAV request failed creating %s", kind, exc_info=exc)
                 raise TaskMcpError("The CalDAV request failed on the Nextcloud server.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
-
-            self._calendar_cache[display_name] = calendar
-            return {"name": display_name, "url": str(calendar.url)}
+        raise conflict_error(
+            f"Could not create the {kind} '{display_name}': every generated collection id "
+            f"('{candidates[0]}' through '{candidates[-1]}') is already taken on the server "
+            "(possibly by deleted collections still in the trashbin). "
+            "Try a different display name."
+        )
 
     def delete_task_list(self, list_name: str) -> None:
         """Permanently delete a Nextcloud task list and every task inside it.
@@ -335,7 +458,7 @@ class CalDavService:
             # The list is gone - drop it from the cache so a later call
             # with this name resolves fresh instead of reusing a deleted
             # calendar's (now-invalid) object.
-            self._calendar_cache.pop(list_name, None)
+            self._calendar_cache.pop(("VTODO", list_name), None)
 
     def rename_task_list(self, list_name: str, new_display_name: str) -> dict[str, str]:
         """Rename a Nextcloud task list (change its CalDAV displayname property).
@@ -370,7 +493,11 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
-            matches = [c for c in existing if c.get_display_name() == list_name]
+            matches = [
+                c
+                for c in existing
+                if c.get_display_name() == list_name and self._supports_component(c, "VTODO")
+            ]
             if not matches:
                 raise TaskListNotFoundError(f"Task list '{list_name}' was not found.")
             if len(matches) > 1:
@@ -382,7 +509,8 @@ class CalDavService:
             calendar = matches[0]
 
             if new_display_name != list_name and any(
-                c.get_display_name() == new_display_name for c in existing
+                c.get_display_name() == new_display_name and self._supports_component(c, "VTODO")
+                for c in existing
             ):
                 raise TaskListAlreadyExistsError(
                     f"A task list named '{new_display_name}' already exists."
@@ -393,8 +521,8 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
-            self._calendar_cache.pop(list_name, None)
-            self._calendar_cache[new_display_name] = calendar
+            self._calendar_cache.pop(("VTODO", list_name), None)
+            self._calendar_cache[("VTODO", new_display_name)] = calendar
             return {"name": new_display_name, "url": str(calendar.url)}
 
     def list_tasks(
@@ -529,3 +657,550 @@ class CalDavService:
                 raise TaskNotFoundError(f"Task '{task_uid}' was not found.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
+
+    # ------------------------------------------------------------------
+    # Event calendars (VEVENT)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _range_bound(value: str | None, *, exclusive_end: bool) -> datetime | None:
+        """Normalize a `von`/`bis` filter value to a timezone-aware datetime.
+
+        A date-only value expands to the start of that day (for `von`) or the
+        start of the *next* day (for `bis`, making a date-only upper bound
+        inclusive of the whole day - the resulting datetime is used as the
+        exclusive end of a CalDAV time-range filter). Naive datetimes are
+        interpreted as UTC, matching `parse_datetime_input` everywhere else.
+        """
+        if value is None:
+            return None
+        parsed = mapping.parse_datetime_input(value)
+        if isinstance(parsed, datetime):
+            return parsed
+        day_start = datetime.combine(parsed, time.min, tzinfo=timezone.utc)
+        return day_start + timedelta(days=1) if exclusive_end else day_start
+
+    def _event_calendars(self, calendar_names: list[str] | None) -> list[tuple[str, DAVCalendar]]:
+        """Return (display name, calendar) pairs for the VEVENT calendars to query.
+
+        With explicit `calendar_names`, each is resolved individually (going
+        through the cache); unknown names raise `CalendarNotFoundError`
+        instead of being skipped, so a typo can't silently produce an empty
+        result. With `None`, every VEVENT-supporting calendar on the account
+        is returned, freshly listed.
+        """
+        if calendar_names is not None:
+            return [(name, self._get_collection(name, "VEVENT")) for name in calendar_names]
+
+        try:
+            calendars = self._get_principal().calendars()
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
+        result: list[tuple[str, DAVCalendar]] = []
+        for calendar in calendars:
+            if not self._supports_component(calendar, "VEVENT"):
+                continue
+            name = calendar.get_display_name() or str(calendar.url)
+            result.append((name, calendar))
+        return result
+
+    def list_calendars(self) -> list[dict[str, Any]]:
+        """Return all VEVENT-supporting calendars as {"name", "url", "farbe", "komponenten"}.
+
+        Task-only lists (VTODO) are excluded - `list_task_lists` is their
+        counterpart. `komponenten` reports the full advertised component set
+        so a mixed VEVENT+VTODO collection is recognizable as both.
+        """
+        with self._lock:
+            try:
+                calendars = self._get_principal().calendars()
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            result: list[dict[str, Any]] = []
+            for calendar in calendars:
+                try:
+                    components = list(calendar.get_supported_components())
+                except Exception:
+                    components = []
+                if components and "VEVENT" not in components:
+                    continue
+                name = calendar.get_display_name() or str(calendar.url)
+                # The color property is cosmetic; a calendar whose PROPFIND
+                # for it fails should still be listed rather than error out.
+                farbe: str | None
+                try:
+                    props = calendar.get_properties([ical_elements.CalendarColor()])
+                    raw = props.get(ical_elements.CalendarColor.tag)
+                    farbe = str(raw) if raw else None
+                except Exception:
+                    farbe = None
+                result.append(
+                    {
+                        "name": name,
+                        "url": str(calendar.url),
+                        "farbe": farbe,
+                        "komponenten": [str(c) for c in components],
+                    }
+                )
+                if sum(1 for entry in result if entry["name"] == name) == 1:
+                    self._calendar_cache[("VEVENT", name)] = calendar
+            # Drop cache entries that turned out to be ambiguous after all.
+            counts: dict[str, int] = {}
+            for entry in result:
+                counts[str(entry["name"])] = counts.get(str(entry["name"]), 0) + 1
+            for dup_name, count in counts.items():
+                if count > 1:
+                    self._calendar_cache.pop(("VEVENT", dup_name), None)
+            return result
+
+    def create_calendar(self, display_name: str, farbe: str | None = None) -> dict[str, Any]:
+        """Create a new VEVENT calendar, optionally with a "#RRGGBB" color.
+
+        Mirrors `create_task_list`'s conflict handling: a display-name clash
+        with an existing event calendar, or a collection-id clash on the
+        server (405/409 from MKCALENDAR), both fail loudly instead of
+        silently reusing an existing calendar.
+        """
+        if not display_name or not display_name.strip():
+            raise InvalidEventDataError("display_name is required to create a calendar.")
+        if farbe is not None and not _COLOR_RE.match(farbe):
+            raise InvalidEventDataError(
+                f"farbe must look like '#RRGGBB' (or '#RRGGBBAA'), got '{farbe}'."
+            )
+
+        slug = _slugify(display_name)
+
+        with self._lock:
+            try:
+                principal = self._get_principal()
+                existing = principal.calendars()
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            if any(
+                calendar.get_display_name() == display_name
+                and self._supports_component(calendar, "VEVENT")
+                for calendar in existing
+            ):
+                raise CalendarAlreadyExistsError(
+                    f"A calendar named '{display_name}' already exists."
+                )
+
+            calendar = self._make_collection(
+                principal,
+                display_name,
+                slug,
+                component="VEVENT",
+                conflict_error=CalendarAlreadyExistsError,
+                kind="calendar",
+            )
+
+            if farbe is not None:
+                try:
+                    calendar.set_properties([ical_elements.CalendarColor(farbe)])
+                except Exception as exc:
+                    raise _translate(exc) from exc
+
+            self._calendar_cache[("VEVENT", display_name)] = calendar
+            return {"name": display_name, "url": str(calendar.url), "farbe": farbe}
+
+    def delete_calendar(self, calendar_name: str) -> None:
+        """Permanently delete an event calendar and every event inside it.
+
+        Irreversible from this API's point of view (the server may keep a
+        trashbin, but this client can't restore from it) - callers should
+        confirm with the user first.
+        """
+
+        def op(calendar: DAVCalendar) -> None:
+            calendar.delete()
+
+        with self._lock:
+            try:
+                self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise CalendarNotFoundError(f"Calendar '{calendar_name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+            self._calendar_cache.pop(("VEVENT", calendar_name), None)
+
+    def update_calendar(
+        self,
+        calendar_name: str,
+        new_display_name: str | None = None,
+        farbe: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename an event calendar and/or set its color (PROPPATCH).
+
+        Only the display name/color change - the collection's URL/id stays
+        stable, so clients that reference the calendar by URL are unaffected.
+        Renaming to a name another event calendar already has raises
+        `CalendarAlreadyExistsError`, mirroring `rename_task_list`.
+        """
+        if new_display_name is not None and not new_display_name.strip():
+            raise InvalidEventDataError("new_display_name must not be empty.")
+        if new_display_name is None and farbe is None:
+            raise InvalidEventDataError("Nothing to update: give new_display_name and/or farbe.")
+        if farbe is not None and not _COLOR_RE.match(farbe):
+            raise InvalidEventDataError(
+                f"farbe must look like '#RRGGBB' (or '#RRGGBBAA'), got '{farbe}'."
+            )
+
+        with self._lock:
+            try:
+                existing = self._get_principal().calendars()
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            matches = [
+                c
+                for c in existing
+                if c.get_display_name() == calendar_name and self._supports_component(c, "VEVENT")
+            ]
+            if not matches:
+                raise CalendarNotFoundError(f"Calendar '{calendar_name}' was not found.")
+            if len(matches) > 1:
+                raise TaskMcpError(
+                    f"Multiple calendars are named '{calendar_name}', which is ambiguous. "
+                    "Rename the calendars in Nextcloud so each has a distinct name, or "
+                    "use a different, unambiguous name."
+                )
+            calendar = matches[0]
+
+            if (
+                new_display_name is not None
+                and new_display_name != calendar_name
+                and any(
+                    c.get_display_name() == new_display_name
+                    and self._supports_component(c, "VEVENT")
+                    for c in existing
+                )
+            ):
+                raise CalendarAlreadyExistsError(
+                    f"A calendar named '{new_display_name}' already exists."
+                )
+
+            props: list[Any] = []
+            if new_display_name is not None:
+                props.append(dav.DisplayName(new_display_name))
+            if farbe is not None:
+                props.append(ical_elements.CalendarColor(farbe))
+            try:
+                calendar.set_properties(props)
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            final_name = new_display_name if new_display_name is not None else calendar_name
+            self._calendar_cache.pop(("VEVENT", calendar_name), None)
+            self._calendar_cache[("VEVENT", final_name)] = calendar
+            return {"name": final_name, "url": str(calendar.url), "farbe": farbe}
+
+    def list_events(
+        self,
+        calendar_names: list[str] | None = None,
+        von: str | None = None,
+        bis: str | None = None,
+        suchtext: str | None = None,
+        tag: str | None = None,
+        limit: int | None = None,
+        expand: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return events across one, several, or all VEVENT calendars, sorted by start.
+
+        `von`/`bis` bound the query server-side (CalDAV time-range REPORT), so
+        recurring events that have an occurrence in the window are matched
+        even when their master event started long before it. With
+        `expand=True`, recurring events are additionally expanded into their
+        individual occurrences within the window (requires both bounds).
+        `suchtext`/`tag`/`limit` filter the parsed results client-side via
+        `event_mapping.filter_events`.
+        """
+        start_bound = self._range_bound(von, exclusive_end=False)
+        end_bound = self._range_bound(bis, exclusive_end=True)
+        if expand and (start_bound is None or end_bound is None):
+            raise InvalidEventDataError(
+                "Expanding recurring events requires both von and bis bounds."
+            )
+
+        with self._lock:
+
+            def op(calendar: DAVCalendar):
+                if start_bound is None and end_bound is None:
+                    return calendar.events()
+                # caldav's search/expand path is only well-defined with
+                # both ends present; widen an omitted side instead of
+                # passing None through (see _RANGE_MIN/_RANGE_MAX).
+                return calendar.search(
+                    start=start_bound or _RANGE_MIN,
+                    end=end_bound or _RANGE_MAX,
+                    event=True,
+                    expand=expand,
+                )
+
+            targets = self._event_calendars(calendar_names)
+            events: list[dict[str, Any]] = []
+            for name, target_calendar in targets:
+                try:
+                    if calendar_names is not None:
+                        # Named calendars go through the cache-aware path so a
+                        # stale cache entry is re-resolved once (A3).
+                        objs = self._with_collection(name, "VEVENT", op)
+                    else:
+                        # The all-calendars case just listed everything fresh;
+                        # querying the object directly also keeps two
+                        # same-named calendars both reachable here.
+                        objs = op(target_calendar)
+                except TaskMcpError:
+                    raise
+                except caldav_error.NotFoundError as exc:
+                    raise CalendarNotFoundError(f"Calendar '{name}' was not found.") from exc
+                except Exception as exc:
+                    raise _translate(exc) from exc
+
+                for obj in objs:
+                    parsed = event_mapping.parse_vevent(obj.icalendar_component)
+                    parsed["kalender"] = name
+                    events.append(parsed)
+
+            return event_mapping.filter_events(events, suchtext=suchtext, tag=tag, limit=limit)
+
+    def get_event(self, calendar_name: str, event_uid: str) -> dict[str, Any]:
+        """Return a single event, parsed into the server's German event dict."""
+        with self._lock:
+
+            def op(calendar: DAVCalendar):
+                return calendar.event_by_uid(event_uid)
+
+            try:
+                event_obj = self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise EventNotFoundError(f"Event '{event_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+            parsed = event_mapping.parse_vevent(event_obj.icalendar_component)
+            parsed["kalender"] = calendar_name
+            return parsed
+
+    def create_event(self, calendar_name: str, fields: event_mapping.EventFields) -> str:
+        """Create a new event in the given calendar and return its UID."""
+        if fields.titel is None:
+            raise InvalidEventDataError("titel is required to create an event.")
+        if fields.start is None:
+            raise InvalidEventDataError("start is required to create an event.")
+        with self._lock:
+            new_uid = str(uuid.uuid4())
+            event = Event()
+            event.add("uid", new_uid)
+            event.add("dtstamp", datetime.now(timezone.utc))
+            event_mapping.apply_event_fields(event, fields)
+
+            vcal = Calendar()
+            vcal.add("prodid", "-//nextcloud-task-mcp//EN")
+            vcal.add("version", "2.0")
+            vcal.add_component(event)
+            ical_text = vcal.to_ical().decode("utf-8")
+
+            def op(calendar: DAVCalendar):
+                calendar.save_event(ical=ical_text)
+
+            try:
+                self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise CalendarNotFoundError(f"Calendar '{calendar_name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+            return new_uid
+
+    def update_event(
+        self, calendar_name: str, event_uid: str, fields: event_mapping.EventFields
+    ) -> None:
+        """Update only the given (non-None) fields of an existing event."""
+        with self._lock:
+
+            def op(calendar: DAVCalendar):
+                event_obj = calendar.event_by_uid(event_uid)
+                event_mapping.apply_event_fields(event_obj.icalendar_component, fields)
+                event_obj.save()
+
+            try:
+                self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise EventNotFoundError(f"Event '{event_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+    def delete_event(self, calendar_name: str, event_uid: str) -> None:
+        """Permanently delete an event."""
+        with self._lock:
+
+            def op(calendar: DAVCalendar):
+                event_obj = calendar.event_by_uid(event_uid)
+                event_obj.delete()
+
+            try:
+                self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise EventNotFoundError(f"Event '{event_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+    # ------------------------------------------------------------------
+    # Task <-> event linking and combined views
+    # ------------------------------------------------------------------
+
+    def link_task_to_event(
+        self,
+        list_name: str,
+        task_uid: str,
+        calendar_name: str,
+        event_uid: str,
+        beziehung: str = "zeitblock",
+    ) -> None:
+        """Link a task (VTODO) to an event (VEVENT) via RELATED-TO on the event.
+
+        The RELATED-TO property is written on the *event*, never the task:
+        Nextcloud Tasks interprets a task's RELATED-TO as "subtask of", so
+        pointing one at an event UID would garble the task tree in its UI,
+        while the calendar app simply ignores the property (it round-trips
+        as raw data). See `_LINK_RELTYPES` for the two supported semantics.
+        """
+        reltype = _LINK_RELTYPES.get(beziehung)
+        if reltype is None:
+            raise InvalidEventDataError(
+                f"Unknown beziehung '{beziehung}'. Expected one of: {', '.join(_LINK_RELTYPES)}."
+            )
+
+        with self._lock:
+            # Verify the task actually exists before writing its UID onto the
+            # event - a dangling link would be invisible until someone tried
+            # to follow it.
+            def check_task(calendar: DAVCalendar):
+                calendar.get_todo_by_uid(task_uid)
+
+            try:
+                self._with_collection(list_name, "VTODO", check_task)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise TaskNotFoundError(f"Task '{task_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            def op(calendar: DAVCalendar):
+                event_obj = calendar.event_by_uid(event_uid)
+                event_mapping.add_relation(event_obj.icalendar_component, task_uid, reltype)
+                event_obj.save()
+
+            try:
+                self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise EventNotFoundError(f"Event '{event_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+    def create_event_from_task(
+        self,
+        list_name: str,
+        task_uid: str,
+        calendar_name: str,
+        start: str | None = None,
+        dauer_minuten: int = 60,
+    ) -> str:
+        """Create a calendar event from an existing task (timeboxing) and link them.
+
+        Title, notes, location and tags are copied from the task; the event
+        starts at `start` (or, if omitted, the task's due date/time) and runs
+        for `dauer_minuten`. A date-only start produces a one-day all-day
+        event instead. The new event carries RELATED-TO;RELTYPE=PARENT with
+        the task's UID (the "zeitblock" link semantics).
+        """
+        if dauer_minuten <= 0:
+            raise InvalidEventDataError(f"dauer_minuten must be > 0, got {dauer_minuten}.")
+
+        with self._lock:
+            task = self.get_task(list_name, task_uid)
+
+            start_spec = start if start is not None else task.get("faellig_datum")
+            if start_spec is None:
+                raise InvalidEventDataError(
+                    "The task has no faellig_datum (due date); pass an explicit start "
+                    "for the event instead."
+                )
+
+            parsed_start = mapping.parse_datetime_input(start_spec)
+            if isinstance(parsed_start, datetime):
+                ende = (parsed_start + timedelta(minutes=dauer_minuten)).isoformat()
+                start_value = parsed_start.isoformat()
+            else:
+                # All-day due date -> one-day all-day event (inclusive end).
+                start_value = parsed_start.isoformat()
+                ende = start_value
+
+            fields = event_mapping.EventFields(
+                titel=task.get("titel") or "Aufgabe",
+                start=start_value,
+                ende=ende,
+                beschreibung=task.get("notizen"),
+                ort=task.get("ort"),
+                tags=task.get("tags") or None,
+                verknuepfte_aufgabe=task_uid,
+            )
+            return self.create_event(calendar_name, fields)
+
+    def get_agenda(
+        self,
+        datum: str,
+        calendar_names: list[str] | None = None,
+        list_names: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return one day's events and due tasks together (a combined agenda).
+
+        CalDAV has no single query spanning VEVENTs and VTODOs, so this is
+        plain server-side composition: a time-range event query (recurring
+        events expanded to that day's occurrences) plus a due-date-filtered
+        task listing per VTODO list. `datum` must be a date-only "YYYY-MM-DD"
+        string; day boundaries are UTC, consistent with the naive-input-is-UTC
+        rule used everywhere else in this server.
+        """
+        parsed = mapping.parse_datetime_input(datum)
+        if isinstance(parsed, datetime):
+            raise InvalidEventDataError(
+                f"datum must be a date-only 'YYYY-MM-DD' string, got '{datum}'."
+            )
+
+        with self._lock:
+            termine = self.list_events(
+                calendar_names=calendar_names, von=datum, bis=datum, expand=True
+            )
+
+            if list_names is None:
+                list_names = [entry["name"] for entry in self.list_task_lists()]
+            aufgaben: list[dict[str, Any]] = []
+            for name in list_names:
+                tasks = self.list_tasks(name, only_open=True, due_before=datum, due_after=datum)
+                for task in tasks:
+                    task["liste"] = name
+                    aufgaben.append(task)
+
+            return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}

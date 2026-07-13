@@ -11,7 +11,7 @@ import anyio.to_thread
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
-from . import mapping
+from . import event_mapping, mapping
 from .caldav_client import CalDavService
 from .config import Settings, is_local_hostname
 from .errors import TaskMcpError
@@ -338,6 +338,373 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         """
         await _call(caldav_service.delete_task, list_name, task_uid)
         return {"uid": task_uid}
+
+    @mcp.tool
+    async def list_calendars() -> list[dict[str, Any]]:
+        """List all Nextcloud event calendars (VEVENT); task-only lists are excluded.
+
+        Returns:
+            A list of {"name": display name, "url": internal CalDAV URL/ID,
+            "farbe": "#RRGGBB" color or None, "komponenten": supported
+            component names (e.g. ["VEVENT"])} dicts.
+        """
+        return await _call(caldav_service.list_calendars)
+
+    @mcp.tool
+    async def create_calendar(display_name: str, farbe: str | None = None) -> dict[str, Any]:
+        """Create a new Nextcloud event calendar (a CalDAV collection supporting VEVENT).
+
+        Args:
+            display_name: Display name for the new calendar. A URL-safe
+                collection id is generated from it automatically; a collision
+                with an existing calendar (by display name or generated id)
+                fails instead of silently reusing the existing one.
+            farbe: Optional calendar color as "#RRGGBB" (or "#RRGGBBAA").
+
+        Returns:
+            {"name", "url", "farbe"} for the new calendar.
+        """
+        return await _call(caldav_service.create_calendar, display_name, farbe)
+
+    @mcp.tool
+    async def delete_calendar(calendar_name: str) -> dict[str, str]:
+        """Permanently delete an event calendar and every event inside it.
+
+        WARNING: this is irreversible from this server's point of view -
+        deleting the calendar deletes all of its events along with it.
+        Confirm with the user before calling this.
+
+        Args:
+            calendar_name: Display name of the calendar to delete.
+
+        Returns:
+            {"calendar_name": calendar_name} on success.
+        """
+        await _call(caldav_service.delete_calendar, calendar_name)
+        return {"calendar_name": calendar_name}
+
+    @mcp.tool
+    async def update_calendar(
+        calendar_name: str,
+        new_display_name: str | None = None,
+        farbe: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename an event calendar and/or change its color. The URL/id stays stable.
+
+        Args:
+            calendar_name: Current display name of the calendar.
+            new_display_name: Optional new display name; fails if another
+                event calendar already has this exact name.
+            farbe: Optional new color as "#RRGGBB" (or "#RRGGBBAA").
+
+        At least one of new_display_name / farbe must be given.
+
+        Returns:
+            {"name", "url", "farbe"} for the updated calendar.
+        """
+        return await _call(caldav_service.update_calendar, calendar_name, new_display_name, farbe)
+
+    @mcp.tool
+    async def list_events(
+        kalender_namen: list[str] | None = None,
+        von: str | None = None,
+        bis: str | None = None,
+        suchtext: str | None = None,
+        tag: str | None = None,
+        limit: int | None = None,
+        wiederholungen_aufloesen: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List calendar events, across one, several, or all event calendars.
+
+        Args:
+            kalender_namen: Optional list of calendar display names to query;
+                None queries every event calendar on the account.
+            von: Optional ISO 8601 date/datetime lower bound. Recurring events
+                with an occurrence inside the window are included. A date-only
+                value means the start of that day.
+            bis: Optional ISO 8601 date/datetime upper bound. A date-only
+                value includes that entire day.
+            suchtext: Optional case-insensitive substring filter over title,
+                description and location.
+            tag: Optional category/tag filter (exact, case-insensitive match).
+            limit: Optional maximum number of results (must be > 0).
+            wiederholungen_aufloesen: If True, expand recurring events into
+                their individual occurrences within [von, bis] (both bounds
+                required); each occurrence carries wiederholung_von.
+
+        Naive datetimes (no UTC offset) are interpreted as UTC, like everywhere
+        else in this server.
+
+        Returns:
+            Event dicts sorted by start, each with keys: uid, titel, start,
+            ende (all-day: inclusive last day), ganztaegig, ort, beschreibung,
+            tags, status ("bestätigt"/"vorläufig"/"abgesagt" or None),
+            sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
+            url, verknuepfte_aufgaben (RELATED-TO links), wiederholung_von,
+            kalender (the calendar's display name).
+        """
+        return await _call(
+            caldav_service.list_events,
+            calendar_names=kalender_namen,
+            von=von,
+            bis=bis,
+            suchtext=suchtext,
+            tag=tag,
+            limit=limit,
+            expand=wiederholungen_aufloesen,
+        )
+
+    @mcp.tool
+    async def get_event(kalender_name: str, event_uid: str) -> dict[str, Any]:
+        """Fetch a single event by UID.
+
+        Args:
+            kalender_name: Display name of the calendar containing the event.
+            event_uid: UID of the event to fetch.
+
+        Returns:
+            An event dict with the same shape as one entry from list_events.
+        """
+        return await _call(caldav_service.get_event, kalender_name, event_uid)
+
+    @mcp.tool
+    async def create_event(
+        kalender_name: str,
+        titel: str,
+        start: str,
+        ende: str | None = None,
+        ort: str | None = None,
+        beschreibung: str | None = None,
+        tags: list[str] | None = None,
+        status: str | None = None,
+        sichtbarkeit: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
+        erinnerungen: list[str] | None = None,
+        url: str | None = None,
+        verknuepfte_aufgabe: str | None = None,
+    ) -> dict[str, str]:
+        """Create a new calendar event.
+
+        Args:
+            kalender_name: Display name of the target event calendar.
+            titel: Event title (VEVENT SUMMARY).
+            start: ISO 8601 start -> DTSTART. Exactly "YYYY-MM-DD" creates an
+                all-day event; naive datetimes are interpreted as UTC.
+            ende: Optional ISO 8601 end -> DTEND. For all-day events this is
+                the last day INCLUSIVE (e.g. start="2026-07-20",
+                ende="2026-07-21" spans two days). start and ende must both be
+                dates or both be datetimes.
+            ort: Optional location -> LOCATION.
+            beschreibung: Optional description -> DESCRIPTION.
+            tags: Optional list of category strings -> CATEGORIES.
+            status: Optional "bestätigt" / "vorläufig" / "abgesagt" -> STATUS.
+            sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
+            wiederholung: Optional recurrence rule as raw RFC 5545 RRULE text,
+                e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE.
+            ausnahme_daten: Optional ISO 8601 dates/datetimes of skipped
+                occurrences of a recurring event -> EXDATE.
+            erinnerungen: Optional reminders, each either a relative RFC 5545
+                duration before the start (e.g. "-PT30M", "-P1D") or an
+                absolute ISO 8601 datetime -> VALARM.
+            url: Optional URL -> URL.
+            verknuepfte_aufgabe: Optional UID of an existing task this event
+                reserves time for -> RELATED-TO;RELTYPE=PARENT on the event.
+
+        Returns:
+            {"uid": the new event's UID}.
+        """
+        fields = event_mapping.EventFields(
+            titel=titel,
+            start=start,
+            ende=ende,
+            ort=ort,
+            beschreibung=beschreibung,
+            tags=tags,
+            status=status,
+            sichtbarkeit=sichtbarkeit,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
+            erinnerungen=erinnerungen,
+            url=url,
+            verknuepfte_aufgabe=verknuepfte_aufgabe,
+        )
+        new_uid = await _call(caldav_service.create_event, kalender_name, fields)
+        return {"uid": new_uid}
+
+    @mcp.tool
+    async def update_event(
+        kalender_name: str,
+        event_uid: str,
+        titel: str | None = None,
+        start: str | None = None,
+        ende: str | None = None,
+        ort: str | None = None,
+        beschreibung: str | None = None,
+        tags: list[str] | None = None,
+        status: str | None = None,
+        sichtbarkeit: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
+        erinnerungen: list[str] | None = None,
+        url: str | None = None,
+        verknuepfte_aufgabe: str | None = None,
+        felder_leeren: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Update an existing event. Only fields that are explicitly given are changed.
+
+        Args:
+            kalender_name: Display name of the calendar containing the event.
+            event_uid: UID of the event to update.
+            (all other args): Same meaning and mapping as in create_event; a
+                field left as None is left unchanged. To move a single
+                occurrence of a recurring event, add its original date to
+                ausnahme_daten and create a separate replacement event.
+            felder_leeren: Optional list of field names to clear (remove the
+                property entirely). Accepted values: "ende", "ort",
+                "beschreibung", "tags", "status", "sichtbarkeit",
+                "wiederholung", "ausnahme_daten", "erinnerungen", "url",
+                "verknuepfte_aufgabe". "titel" and "start" cannot be cleared.
+                Naming an unknown field, or naming a field that is also given
+                a new value in the same call, is an error.
+
+        Returns:
+            {"uid": event_uid} on success.
+        """
+        fields = event_mapping.EventFields(
+            titel=titel,
+            start=start,
+            ende=ende,
+            ort=ort,
+            beschreibung=beschreibung,
+            tags=tags,
+            status=status,
+            sichtbarkeit=sichtbarkeit,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
+            erinnerungen=erinnerungen,
+            url=url,
+            verknuepfte_aufgabe=verknuepfte_aufgabe,
+            clear=tuple(felder_leeren) if felder_leeren else (),
+        )
+        await _call(caldav_service.update_event, kalender_name, event_uid, fields)
+        return {"uid": event_uid}
+
+    @mcp.tool
+    async def delete_event(kalender_name: str, event_uid: str) -> dict[str, str]:
+        """Permanently delete an event.
+
+        Args:
+            kalender_name: Display name of the calendar containing the event.
+            event_uid: UID of the event to delete.
+
+        Returns:
+            {"uid": event_uid} on success.
+        """
+        await _call(caldav_service.delete_event, kalender_name, event_uid)
+        return {"uid": event_uid}
+
+    @mcp.tool
+    async def link_task_to_event(
+        list_name: str,
+        task_uid: str,
+        kalender_name: str,
+        event_uid: str,
+        beziehung: str = "zeitblock",
+    ) -> dict[str, str]:
+        """Link an existing task to an existing calendar event (RELATED-TO).
+
+        The link is stored on the event (the Nextcloud Tasks UI would
+        misrender a task-side link as a broken subtask), and shows up in the
+        event's verknuepfte_aufgaben.
+
+        Args:
+            list_name: Display name of the task list containing the task.
+            task_uid: UID of the task to link.
+            kalender_name: Display name of the calendar containing the event.
+            event_uid: UID of the event to link.
+            beziehung: "zeitblock" (default) - the event reserves time to work
+                on the task; or "voraussetzung" - the event must happen before
+                the task can be completed.
+
+        Returns:
+            {"task_uid", "event_uid", "beziehung"} on success.
+        """
+        await _call(
+            caldav_service.link_task_to_event,
+            list_name,
+            task_uid,
+            kalender_name,
+            event_uid,
+            beziehung,
+        )
+        return {"task_uid": task_uid, "event_uid": event_uid, "beziehung": beziehung}
+
+    @mcp.tool
+    async def create_event_from_task(
+        list_name: str,
+        task_uid: str,
+        kalender_name: str,
+        start: str | None = None,
+        dauer_minuten: int = 60,
+    ) -> dict[str, str]:
+        """Create a calendar event from an existing task (timeboxing) and link them.
+
+        Title, notes, location and tags are copied from the task. The event is
+        linked back to the task via RELATED-TO (the "zeitblock" semantics of
+        link_task_to_event); the task itself is not modified.
+
+        Args:
+            list_name: Display name of the task list containing the task.
+            task_uid: UID of the task to convert.
+            kalender_name: Display name of the calendar for the new event.
+            start: Optional ISO 8601 start for the event; defaults to the
+                task's faellig_datum (due date). Fails if neither is given. A
+                date-only start produces a one-day all-day event.
+            dauer_minuten: Event duration in minutes (default 60); ignored for
+                all-day events.
+
+        Returns:
+            {"uid": the new event's UID, "task_uid": task_uid}.
+        """
+        new_uid = await _call(
+            caldav_service.create_event_from_task,
+            list_name,
+            task_uid,
+            kalender_name,
+            start,
+            dauer_minuten,
+        )
+        return {"uid": new_uid, "task_uid": task_uid}
+
+    @mcp.tool
+    async def get_agenda(
+        datum: str,
+        kalender_namen: list[str] | None = None,
+        listen_namen: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Return one day's calendar events and due tasks together (agenda view).
+
+        Args:
+            datum: The day as a date-only "YYYY-MM-DD" string. Day boundaries
+                are UTC, consistent with the naive-input-is-UTC rule used
+                everywhere else in this server.
+            kalender_namen: Optional list of event calendars to include;
+                None means all.
+            listen_namen: Optional list of task lists to include; None means
+                all.
+
+        Returns:
+            {"datum": the day, "termine": event dicts (recurring events
+            expanded to that day's occurrences, sorted by start), "aufgaben":
+            open tasks due that day, each with an added "liste" key}.
+        """
+        return await _call(
+            caldav_service.get_agenda,
+            datum,
+            calendar_names=kalender_namen,
+            list_names=listen_namen,
+        )
 
     return mcp
 

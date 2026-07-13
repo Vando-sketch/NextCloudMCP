@@ -1,7 +1,8 @@
 # Tool reference
 
-Detailed reference for all seven MCP tools, including argument/result examples.
-Parameter names are the literal MCP schema names — including the German umlauts.
+Detailed reference for all MCP tools (task, task-list, calendar and event
+tools), including argument/result examples. Parameter names are the literal
+MCP schema names (German field names in ASCII transliteration).
 
 Values for enum-like fields:
 
@@ -9,10 +10,14 @@ Values for enum-like fields:
 |---|---|
 | `prioritaet` | `"hoch"`, `"mittel"`, `"niedrig"` |
 | `sichtbarkeit` | `"öffentlich"`, `"privat"`, `"vertraulich"` |
-| `status` (in results) | `"offen"`, `"erledigt"` |
+| `status` (in task results) | `"offen"`, `"erledigt"` |
+| `status` (events) | `"bestätigt"`, `"vorläufig"`, `"abgesagt"` |
+| `beziehung` (`link_task_to_event`) | `"zeitblock"`, `"voraussetzung"` |
+| `farbe` | `"#RRGGBB"` or `"#RRGGBBAA"` |
 
 Dates are ISO 8601 strings. Two rules apply everywhere a date/datetime is
-accepted (`start_datum`, `faellig_datum`, and absolute `erinnerungen` entries):
+accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
+`ausnahme_daten` and absolute `erinnerungen` entries):
 
 - A value that is exactly `"YYYY-MM-DD"` (e.g. `"2026-07-20"`) creates an
   **all-day** entry (iCalendar `VALUE=DATE`) — it comes back from `list_tasks`
@@ -25,18 +30,19 @@ accepted (`start_datum`, `faellig_datum`, and absolute `erinnerungen` entries):
 
 ## `list_task_lists()`
 
-No parameters. Returns every calendar on the account:
+No parameters. Returns every VTODO-supporting calendar (task list) on the account:
 
 ```json
 [
-  {"name": "Personal", "url": "https://cloud.example.com/remote.php/dav/calendars/demo/personal/"},
-  {"name": "Arbeit",   "url": "https://cloud.example.com/remote.php/dav/calendars/demo/arbeit/"}
+  {"name": "Privat", "url": "https://cloud.example.com/remote.php/dav/calendars/demo/privat/"},
+  {"name": "Arbeit", "url": "https://cloud.example.com/remote.php/dav/calendars/demo/arbeit/"}
 ]
 ```
 
-Note: Nextcloud exposes task lists and event calendars through the same CalDAV
-collection listing, so event-only calendars appear here too. Filtering them out would
-cost one extra CalDAV property request per calendar, so it's deliberately not done.
+Note: Nextcloud keeps task lists and event calendars in the same CalDAV
+namespace. Event-only calendars (e.g. the default "Personal" calendar) are
+excluded here — they can't hold tasks; `list_calendars` is their counterpart.
+A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
@@ -227,6 +233,214 @@ Returns `{"uid": "<task_uid>"}`.
 
 ---
 
+## Task-list management
+
+### `create_task_list(display_name)`
+
+Creates a new task list (a CalDAV collection supporting VTODO). A URL-safe
+collection id is derived from the name (`"Grocery List!"` → `grocery-list`);
+if that id is occupied (including by a deleted list still in Nextcloud's
+trashbin), `-2`, `-3`, … suffixes are tried automatically. A display-name
+conflict with an existing task list fails instead. Returns
+`{"name": ..., "url": ...}`.
+
+### `rename_task_list(list_name, new_display_name)`
+
+Changes only the display name; the URL/id stays stable. Fails if another task
+list already has the new name.
+
+### `delete_task_list(list_name)`
+
+Permanently deletes the list **and every task inside it**. Returns
+`{"list_name": ...}`.
+
+---
+
+## Calendar management (VEVENT)
+
+### `list_calendars()`
+
+No parameters. Returns every VEVENT-supporting calendar:
+
+```json
+[
+  {
+    "name": "Personal",
+    "url": "https://cloud.example.com/remote.php/dav/calendars/demo/personal/",
+    "farbe": "#00679e",
+    "komponenten": ["VEVENT"]
+  }
+]
+```
+
+### `create_calendar(display_name, farbe=None)`
+
+Creates a new VEVENT calendar (CalDAV `MKCALENDAR`), optionally with a color.
+Collection-id handling matches `create_task_list` (auto-suffix on occupied
+ids). Returns `{"name", "url", "farbe"}`.
+
+### `update_calendar(calendar_name, new_display_name=None, farbe=None)`
+
+Renames and/or recolors a calendar (CalDAV `PROPPATCH`); at least one of the
+two optional parameters is required. The URL/id stays stable.
+
+### `delete_calendar(calendar_name)`
+
+Permanently deletes the calendar **and every event inside it**. Returns
+`{"calendar_name": ...}`.
+
+---
+
+## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False)`
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_namen` | list of strings | no | Calendars to query; `null` = all event calendars |
+| `von` | string (ISO 8601) | no | Lower bound; date-only = start of that day |
+| `bis` | string (ISO 8601) | no | Upper bound; date-only includes that whole day |
+| `suchtext` | string | no | Case-insensitive substring over `titel`, `beschreibung`, `ort` |
+| `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
+| `limit` | integer | no | Max results, must be `> 0`; applied last (earliest events win) |
+| `wiederholungen_aufloesen` | boolean | no (default `false`) | Expand recurring events into single occurrences within `[von, bis]` (both bounds required) |
+
+The time-range filter runs server-side (CalDAV `time-range` REPORT), so a
+recurring event with an occurrence in the window matches even if its master
+event started long before. Results are sorted by `start`. One event dict:
+
+```json
+{
+  "uid": "7f0c9e2a-...",
+  "titel": "Team-Meeting",
+  "start": "2026-07-20T14:00:00+00:00",
+  "ende": "2026-07-20T15:00:00+00:00",
+  "ganztaegig": false,
+  "ort": "Konferenzraum",
+  "beschreibung": "Sprint-Planung",
+  "tags": ["Arbeit"],
+  "status": "bestätigt",
+  "sichtbarkeit": null,
+  "wiederholung": "FREQ=WEEKLY;BYDAY=MO",
+  "ausnahme_daten": ["2026-07-27T14:00:00+00:00"],
+  "url": null,
+  "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "uebergeordnet"}],
+  "wiederholung_von": null,
+  "kalender": "Personal"
+}
+```
+
+`wiederholung_von` carries the `RECURRENCE-ID` when `wiederholungen_aufloesen`
+materialized a single occurrence of a series. For **all-day** events `start`
+and `ende` are date-only strings and `ende` is the **inclusive** last day
+(RFC 5545's exclusive `DTEND` is translated on the way in and out).
+
+---
+
+## `get_event(kalender_name, event_uid)`
+
+Fetches a single event by UID; same dict shape as one `list_events` entry.
+
+---
+
+## `create_event(kalender_name, titel, start, ...)`
+
+Required: `kalender_name`, `titel`, `start`. Optional fields and their CalDAV
+mapping:
+
+| Parameter | CalDAV property | Notes |
+|---|---|---|
+| `ende` | `DTEND` | Same type as `start` (both dates or both datetimes); all-day: inclusive last day |
+| `ort` | `LOCATION` | |
+| `beschreibung` | `DESCRIPTION` | |
+| `tags` | `CATEGORIES` | list of strings |
+| `status` | `STATUS` | `"bestätigt"`→CONFIRMED, `"vorläufig"`→TENTATIVE, `"abgesagt"`→CANCELLED |
+| `sichtbarkeit` | `CLASS` | same values as tasks |
+| `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO;COUNT=10"` |
+| `ausnahme_daten` | `EXDATE` | list of ISO dates/datetimes: occurrences of the series to skip |
+| `erinnerungen` | `VALARM` | relative durations (e.g. `"-PT30M"`) trigger before `start`; absolute ISO datetimes as-is |
+| `url` | `URL` | |
+| `verknuepfte_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of a task this event reserves time for |
+
+Returns `{"uid": ...}`.
+
+To move or cancel a **single occurrence** of a recurring event: add its
+original date to `ausnahme_daten` (via `update_event`) and, for a move, create
+a separate replacement event.
+
+---
+
+## `update_event(kalender_name, event_uid, ...)`
+
+Same fields as `create_event`, all optional. Only fields you pass are changed;
+`erinnerungen` and `ausnahme_daten` replace all existing entries. `felder_leeren`
+removes properties entirely — accepted names: `ende`, `ort`, `beschreibung`,
+`tags`, `status`, `sichtbarkeit`, `wiederholung`, `ausnahme_daten`,
+`erinnerungen`, `url`, `verknuepfte_aufgabe` (`titel` and `start` cannot be
+cleared; a field can't be both set and cleared in one call).
+
+---
+
+## `delete_event(kalender_name, event_uid)`
+
+Permanently deletes the event.
+
+---
+
+## `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")`
+
+Links an existing task (VTODO) to an existing event (VEVENT) via a
+cross-component `RELATED-TO` property. The property is written **on the
+event** — the Nextcloud Tasks app interprets a task-side `RELATED-TO` as
+"subtask of", so a task-side link would garble its task tree, while the
+calendar app simply round-trips the property as raw data (it is not shown in
+either web UI; it is visible in the `verknuepfte_aufgaben` field of this
+server's event dicts).
+
+- `"zeitblock"` — the event reserves time to work on the task (event is the
+  task's *child*, `RELTYPE=PARENT` pointing at the task).
+- `"voraussetzung"` — the event must happen before the task can be completed
+  (event is the task's *parent*, `RELTYPE=CHILD` pointing at the task).
+
+The task must exist; linking is idempotent (re-linking the same pair is a
+no-op).
+
+---
+
+## `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=60)`
+
+Timeboxing: creates an event from an existing task and links the two (the
+`"zeitblock"` semantics above). `titel`, `notizen`→`beschreibung`,
+`ort` and `tags` are copied; the task itself is not modified.
+
+- `start` defaults to the task's `faellig_datum`; if the task has none, the
+  call fails and you must pass `start` explicitly.
+- A datetime start produces an event of `dauer_minuten` length; a date-only
+  start produces a one-day all-day event (`dauer_minuten` is ignored).
+
+Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
+
+---
+
+## `get_agenda(datum, kalender_namen=None, listen_namen=None)`
+
+One day's calendar events and due tasks together — CalDAV has no combined
+VEVENT+VTODO query, so this is composed server-side. `datum` must be a
+date-only `"YYYY-MM-DD"` string; day boundaries are UTC (consistent with the
+naive-input-is-UTC rule).
+
+```json
+{
+  "datum": "2026-07-20",
+  "termine": [ ... ],
+  "aufgaben": [ ... ]
+}
+```
+
+`termine` are event dicts (recurring events expanded to that day's
+occurrences, sorted by start); `aufgaben` are open tasks due that day, each
+with an added `"liste"` key naming its task list.
+
+---
+
 ## Errors
 
 All failures come back as short, single-line MCP tool errors, for example:
@@ -251,6 +465,17 @@ All failures come back as short, single-line MCP tool errors, for example:
   sichtbarkeit, uebergeordnete_aufgabe.`
 - `Cannot both set and clear the same field in one call: faellig_datum.`
 - `limit must be greater than 0, got 0.` — `list_tasks`'s `limit` parameter was `<= 0`.
+- `Calendar 'Termine' was not found.` — typo in the calendar name, or the calendar
+  supports no VEVENTs; call `list_calendars` to see valid names.
+- `Event 'abc-123' was not found.` — stale or wrong event UID.
+- `A calendar named 'Termine' already exists.`
+- `farbe must look like '#RRGGBB' (or '#RRGGBBAA'), got 'rot'.`
+- `Could not parse wiederholung 'jeden Montag' as an RFC 5545 RRULE (e.g. 'FREQ=WEEKLY;BYDAY=MO').`
+- `start and ende must both be all-day dates or both be datetimes; got one of each. ...`
+- `Expanding recurring events requires both von and bis bounds.`
+- `Unknown beziehung 'egal'. Expected one of: zeitblock, voraussetzung.`
+- `The task has no faellig_datum (due date); pass an explicit start for the event instead.`
+- `datum must be a date-only 'YYYY-MM-DD' string, got '2026-07-20T14:00:00'.`
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).

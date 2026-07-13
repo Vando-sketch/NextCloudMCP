@@ -44,3 +44,20 @@ class TaskConflictError(TaskMcpError):
     The underlying CalDAV etag no longer matches (HTTP 412), so the write was
     rejected. Callers should re-fetch the current task and retry the change.
     """
+
+
+class CalendarNotFoundError(TaskMcpError):
+    """Raised when the requested event calendar does not exist (or supports no VEVENTs)."""
+
+
+class CalendarAlreadyExistsError(TaskMcpError):
+    """Raised when creating a calendar whose display name (or generated
+    collection id) collides with one that already exists on the server."""
+
+
+class EventNotFoundError(TaskMcpError):
+    """Raised when the requested event UID does not exist in the given calendar."""
+
+
+class InvalidEventDataError(TaskMcpError):
+    """Raised when event field values can't be mapped to valid iCalendar data."""
