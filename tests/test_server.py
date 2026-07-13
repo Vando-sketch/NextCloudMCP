@@ -37,6 +37,8 @@ def test_all_tools_registered(tools):
     assert set(tools) == {
         "list_task_lists",
         "create_task_list",
+        "delete_task_list",
+        "rename_task_list",
         "list_tasks",
         "get_task",
         "create_task",
@@ -50,6 +52,18 @@ def test_create_task_list_uses_ascii_parameter_names(tools):
     schema = tools["create_task_list"].parameters
     assert set(schema["properties"]) == {"display_name"}
     assert schema["required"] == ["display_name"]
+
+
+def test_delete_task_list_uses_ascii_parameter_names(tools):
+    schema = tools["delete_task_list"].parameters
+    assert set(schema["properties"]) == {"list_name"}
+    assert schema["required"] == ["list_name"]
+
+
+def test_rename_task_list_uses_ascii_parameter_names(tools):
+    schema = tools["rename_task_list"].parameters
+    assert set(schema["properties"]) == {"list_name", "new_display_name"}
+    assert set(schema["required"]) == {"list_name", "new_display_name"}
 
 
 def test_create_task_uses_umlaut_parameter_names(tools):
@@ -100,6 +114,46 @@ def test_create_task_list_conflict_becomes_clean_tool_error(tools, fake_service)
     )
     with pytest.raises(ToolError, match="Groceries"):
         _run(tools["create_task_list"].fn(display_name="Groceries"))
+
+
+def test_delete_task_list_delegates_to_service(tools, fake_service):
+    result = _run(tools["delete_task_list"].fn(list_name="Groceries"))
+    assert result == {"list_name": "Groceries"}
+    fake_service.delete_task_list.assert_called_once_with("Groceries")
+
+
+def test_delete_task_list_not_found_becomes_clean_tool_error(tools, fake_service):
+    fake_service.delete_task_list.side_effect = TaskListNotFoundError(
+        "Task list 'Groceries' was not found."
+    )
+    with pytest.raises(ToolError, match="Groceries"):
+        _run(tools["delete_task_list"].fn(list_name="Groceries"))
+
+
+def test_rename_task_list_delegates_to_service(tools, fake_service):
+    fake_service.rename_task_list.return_value = {
+        "name": "Shopping",
+        "url": "https://x/groceries/",
+    }
+    result = _run(tools["rename_task_list"].fn(list_name="Groceries", new_display_name="Shopping"))
+    assert result == {"name": "Shopping", "url": "https://x/groceries/"}
+    fake_service.rename_task_list.assert_called_once_with("Groceries", "Shopping")
+
+
+def test_rename_task_list_conflict_becomes_clean_tool_error(tools, fake_service):
+    fake_service.rename_task_list.side_effect = TaskListAlreadyExistsError(
+        "A task list named 'Shopping' already exists."
+    )
+    with pytest.raises(ToolError, match="Shopping"):
+        _run(tools["rename_task_list"].fn(list_name="Groceries", new_display_name="Shopping"))
+
+
+def test_rename_task_list_not_found_becomes_clean_tool_error(tools, fake_service):
+    fake_service.rename_task_list.side_effect = TaskListNotFoundError(
+        "Task list 'Groceries' was not found."
+    )
+    with pytest.raises(ToolError, match="Groceries"):
+        _run(tools["rename_task_list"].fn(list_name="Groceries", new_display_name="Shopping"))
 
 
 def test_list_tasks_passes_nur_offene_through(tools, fake_service):

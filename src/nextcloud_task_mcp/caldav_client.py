@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 from caldav.collection import Calendar as DAVCalendar
 from caldav.collection import Principal as DAVPrincipal
 from caldav.davclient import DAVClient
+from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from icalendar import Calendar, Todo
 
@@ -302,6 +303,99 @@ class CalDavService:
 
             self._calendar_cache[display_name] = calendar
             return {"name": display_name, "url": str(calendar.url)}
+
+    def delete_task_list(self, list_name: str) -> None:
+        """Permanently delete a Nextcloud task list and every task inside it.
+
+        This is irreversible from this API's point of view: deleting the
+        underlying CalDAV calendar collection deletes all VTODOs it contains
+        along with it (the server may retain them in a trashbin, but this
+        client has no way to recover them). Callers should confirm with the
+        user before calling this.
+
+        Resolution goes through the same (cached) `_with_calendar` path as
+        `delete_task`/`update_task`/etc., so a `list_name` that isn't
+        currently cached costs one `principal.calendars()` PROPFIND, and a
+        stale cache entry (list already deleted/recreated server-side) is
+        retried once against a fresh resolution before giving up (A3).
+        """
+
+        def op(calendar: DAVCalendar) -> None:
+            calendar.delete()
+
+        with self._lock:
+            try:
+                self._with_calendar(list_name, op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise TaskListNotFoundError(f"Task list '{list_name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+            # The list is gone - drop it from the cache so a later call
+            # with this name resolves fresh instead of reusing a deleted
+            # calendar's (now-invalid) object.
+            self._calendar_cache.pop(list_name, None)
+
+    def rename_task_list(self, list_name: str, new_display_name: str) -> dict[str, str]:
+        """Rename a Nextcloud task list (change its CalDAV displayname property).
+
+        Only the display name changes - the collection's URL/id is left
+        alone, so any client that referenced the list by URL is unaffected.
+
+        Mirrors `create_task_list`'s "don't guess" stance on name conflicts:
+        `principal.calendars()` is fetched fresh (not from the cache) so both
+        resolving `list_name` and checking `new_display_name` for conflicts
+        see the current server state in one round-trip. Renaming a list to
+        the name it already has is a no-op success rather than a
+        self-conflict; renaming it to a name some *other* list already has
+        raises `TaskListAlreadyExistsError` instead of silently producing two
+        identically-named lists (which `_resolve_calendar` would then report
+        as ambiguous).
+
+        Returns:
+            {"name": new display name, "url": internal CalDAV URL} for the
+            renamed list, matching one entry of `list_task_lists`'s return
+            value.
+        """
+        if not new_display_name or not new_display_name.strip():
+            raise InvalidTaskDataError("new_display_name is required to rename a task list.")
+
+        with self._lock:
+            try:
+                principal = self._get_principal()
+                existing = principal.calendars()
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            matches = [c for c in existing if c.get_display_name() == list_name]
+            if not matches:
+                raise TaskListNotFoundError(f"Task list '{list_name}' was not found.")
+            if len(matches) > 1:
+                raise TaskMcpError(
+                    f"Multiple task lists are named '{list_name}', which is ambiguous. "
+                    "Rename the task lists in Nextcloud so each has a distinct name, or "
+                    "use a different, unambiguous list name."
+                )
+            calendar = matches[0]
+
+            if new_display_name != list_name and any(
+                c.get_display_name() == new_display_name for c in existing
+            ):
+                raise TaskListAlreadyExistsError(
+                    f"A task list named '{new_display_name}' already exists."
+                )
+
+            try:
+                calendar.set_properties([dav.DisplayName(new_display_name)])
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            self._calendar_cache.pop(list_name, None)
+            self._calendar_cache[new_display_name] = calendar
+            return {"name": new_display_name, "url": str(calendar.url)}
 
     def list_tasks(
         self,

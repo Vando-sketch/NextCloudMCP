@@ -6,6 +6,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from icalendar import Todo
 
@@ -213,6 +214,208 @@ def test_create_task_list_reraises_task_mcp_error_from_get_principal(service, mo
 
     with pytest.raises(AuthenticationFailedError):
         service.create_task_list("Groceries")
+
+
+# --- delete_task_list ---
+
+
+def test_delete_task_list_deletes_calendar(service, principal):
+    calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [calendar]
+
+    service.delete_task_list("Groceries")
+
+    calendar.delete.assert_called_once_with()
+
+
+def test_delete_task_list_evicts_cache_entry(service, principal):
+    calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [calendar]
+
+    service.delete_task_list("Groceries")
+
+    # The deleted list must no longer be served from the cache - a later
+    # lookup has to hit principal.calendars() again, see it's really gone,
+    # and raise not-found rather than reusing the deleted calendar object.
+    principal.calendars.return_value = []
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tasks("Groceries")
+    assert principal.calendars.call_count == 2
+
+
+def test_delete_task_list_not_found_raises(service, principal):
+    principal.calendars.return_value = []
+
+    with pytest.raises(TaskListNotFoundError):
+        service.delete_task_list("Nonexistent")
+
+
+def test_delete_task_list_stale_cache_entry_is_invalidated_and_retried(service, principal):
+    stale_calendar = _make_calendar("Groceries", "https://cloud.example.com/dav/old/")
+    fresh_calendar = _make_calendar("Groceries", "https://cloud.example.com/dav/new/")
+
+    principal.calendars.return_value = [stale_calendar]
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+
+    stale_calendar.delete.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [fresh_calendar]
+
+    service.delete_task_list("Groceries")
+
+    assert principal.calendars.call_count == 2
+    fresh_calendar.delete.assert_called_once_with()
+
+
+def test_delete_task_list_stale_cache_entry_gives_up_after_one_retry(service, principal):
+    stale_calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [stale_calendar]
+    service.list_task_lists()
+
+    stale_calendar.delete.side_effect = caldav_error.NotFoundError("gone")
+
+    with pytest.raises(TaskListNotFoundError):
+        service.delete_task_list("Groceries")
+    assert principal.calendars.call_count == 2
+
+
+def test_delete_task_list_translates_generic_exception_from_op(service, principal):
+    calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [calendar]
+    calendar.delete.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.delete_task_list("Groceries")
+
+
+def test_delete_task_list_reraises_task_mcp_error_from_get_principal(service, mock_dav_client):
+    mock_dav_client.return_value.principal.side_effect = caldav_error.AuthorizationError(
+        "bad creds"
+    )
+
+    with pytest.raises(AuthenticationFailedError):
+        service.delete_task_list("Groceries")
+
+
+def test_delete_task_list_ambiguous_name_reraises_as_task_mcp_error(service, principal):
+    cal1 = _make_calendar("Groceries", "https://cloud.example.com/dav/g1/")
+    cal2 = _make_calendar("Groceries", "https://cloud.example.com/dav/g2/")
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.delete_task_list("Groceries")
+
+
+# --- rename_task_list ---
+
+
+def test_rename_task_list_sets_display_name_and_returns_info(service, principal):
+    calendar = _make_calendar("Groceries", "https://cloud.example.com/dav/groceries/")
+    principal.calendars.return_value = [calendar]
+
+    result = service.rename_task_list("Groceries", "Shopping")
+
+    calendar.set_properties.assert_called_once()
+    (props,), _ = calendar.set_properties.call_args
+    assert len(props) == 1
+    assert str(props[0]) == str(dav.DisplayName("Shopping"))
+    assert result == {
+        "name": "Shopping",
+        "url": "https://cloud.example.com/dav/groceries/",
+    }
+
+
+def test_rename_task_list_updates_cache(service, principal):
+    calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [calendar]
+
+    service.rename_task_list("Groceries", "Shopping")
+
+    # New name is served from the cache without a fresh PROPFIND...
+    calendar.get_display_name.return_value = "Shopping"
+    calendar.todos.return_value = []
+    service.list_tasks("Shopping")
+    assert principal.calendars.call_count == 1
+
+    # ...and the old name is gone from the cache, so it has to resolve fresh
+    # (and fail, since no calendar is named "Groceries" anymore).
+    principal.calendars.return_value = []
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tasks("Groceries")
+    assert principal.calendars.call_count == 2
+
+
+def test_rename_task_list_requires_new_display_name(service):
+    with pytest.raises(InvalidTaskDataError):
+        service.rename_task_list("Groceries", "")
+
+
+def test_rename_task_list_requires_non_whitespace_new_display_name(service):
+    with pytest.raises(InvalidTaskDataError):
+        service.rename_task_list("Groceries", "   ")
+
+
+def test_rename_task_list_not_found_raises(service, principal):
+    principal.calendars.return_value = []
+
+    with pytest.raises(TaskListNotFoundError):
+        service.rename_task_list("Nonexistent", "Shopping")
+
+
+def test_rename_task_list_ambiguous_list_name_reraises_as_task_mcp_error(service, principal):
+    cal1 = _make_calendar("Groceries", "https://cloud.example.com/dav/g1/")
+    cal2 = _make_calendar("Groceries", "https://cloud.example.com/dav/g2/")
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous") as exc_info:
+        service.rename_task_list("Groceries", "Shopping")
+    assert not isinstance(exc_info.value, TaskListNotFoundError)
+
+
+def test_rename_task_list_raises_when_new_name_already_exists(service, principal):
+    calendar = _make_calendar("Groceries")
+    other = _make_calendar("Shopping")
+    principal.calendars.return_value = [calendar, other]
+
+    with pytest.raises(TaskListAlreadyExistsError):
+        service.rename_task_list("Groceries", "Shopping")
+
+    calendar.set_properties.assert_not_called()
+
+
+def test_rename_task_list_to_same_name_is_not_a_self_conflict(service, principal):
+    calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [calendar]
+
+    result = service.rename_task_list("Groceries", "Groceries")
+
+    calendar.set_properties.assert_called_once()
+    assert result["name"] == "Groceries"
+
+
+def test_rename_task_list_translates_generic_exception_from_set_properties(service, principal):
+    calendar = _make_calendar("Groceries")
+    principal.calendars.return_value = [calendar]
+    calendar.set_properties.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.rename_task_list("Groceries", "Shopping")
+
+
+def test_rename_task_list_translates_generic_exception_from_calendars_lookup(service, principal):
+    principal.calendars.side_effect = caldav_client_module._http_errors.ConnectionError("down")
+
+    with pytest.raises(ConnectionFailedError):
+        service.rename_task_list("Groceries", "Shopping")
+
+
+def test_rename_task_list_reraises_task_mcp_error_from_get_principal(service, mock_dav_client):
+    mock_dav_client.return_value.principal.side_effect = caldav_error.AuthorizationError(
+        "bad creds"
+    )
+
+    with pytest.raises(AuthenticationFailedError):
+        service.rename_task_list("Groceries", "Shopping")
 
 
 def test_list_tasks_parses_todos(service, principal):
