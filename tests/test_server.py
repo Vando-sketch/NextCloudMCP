@@ -59,6 +59,7 @@ def test_all_tools_registered(tools):
         "update_event",
         "delete_event",
         "link_task_to_event",
+        "list_events_for_task",
         "create_event_from_task",
         "get_agenda",
     }
@@ -361,6 +362,29 @@ def test_link_task_to_event_defaults_to_zeitblock(tools, fake_service):
         "Privat", "task-1", "Termine", "event-1", "zeitblock"
     )
     assert result == {"task_uid": "task-1", "event_uid": "event-1", "beziehung": "zeitblock"}
+
+
+def test_list_events_for_task_delegates(tools, fake_service):
+    fake_service.list_events_for_task.return_value = [
+        {"uid": "event-1", "kalender_name": "Termine"}
+    ]
+    result = _run(tools["list_events_for_task"].fn(list_name="Privat", task_uid="task-1"))
+    fake_service.list_events_for_task.assert_called_once_with(
+        "Privat", "task-1", calendar_names=None
+    )
+    assert result == [{"uid": "event-1", "kalender_name": "Termine"}]
+
+
+def test_list_events_for_task_passes_kalender_namen_through(tools, fake_service):
+    fake_service.list_events_for_task.return_value = []
+    _run(
+        tools["list_events_for_task"].fn(
+            list_name="Privat", task_uid="task-1", kalender_namen=["Termine"]
+        )
+    )
+    fake_service.list_events_for_task.assert_called_once_with(
+        "Privat", "task-1", calendar_names=["Termine"]
+    )
 
 
 def test_create_event_from_task_delegates(tools, fake_service):

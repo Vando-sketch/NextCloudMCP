@@ -1119,6 +1119,67 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
+    def list_events_for_task(
+        self,
+        list_name: str,
+        task_uid: str,
+        calendar_names: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return events linked to the given task - the task-side counterpart of link_task_to_event.
+
+        The RELATED-TO link is only ever written on the event (see
+        `link_task_to_event`'s docstring for why), so there is no CalDAV
+        query that starts from a task UID and finds the events pointing at
+        it: every event in the queried calendars has to be fetched and its
+        parsed `verknuepfte_aufgaben` checked for `task_uid`. Verifies the
+        task exists first, same check and error as `link_task_to_event`.
+        """
+        with self._lock:
+
+            def check_task(calendar: DAVCalendar):
+                calendar.get_todo_by_uid(task_uid)
+
+            try:
+                self._with_collection(list_name, "VTODO", check_task)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise TaskNotFoundError(f"Task '{task_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            def op(calendar: DAVCalendar):
+                return calendar.events()
+
+            targets = self._event_calendars(calendar_names)
+            events: list[dict[str, Any]] = []
+            for name, target_calendar in targets:
+                try:
+                    if calendar_names is not None:
+                        # Named calendars go through the cache-aware path so a
+                        # stale cache entry is re-resolved once (A3).
+                        objs = self._with_collection(name, "VEVENT", op)
+                    else:
+                        # The all-calendars case just listed everything fresh;
+                        # querying the object directly also keeps two
+                        # same-named calendars both reachable here.
+                        objs = op(target_calendar)
+                except TaskMcpError:
+                    raise
+                except caldav_error.NotFoundError as exc:
+                    raise CalendarNotFoundError(f"Calendar '{name}' was not found.") from exc
+                except Exception as exc:
+                    raise _translate(exc) from exc
+
+                for obj in objs:
+                    parsed = event_mapping.parse_vevent(obj.icalendar_component)
+                    if any(rel["uid"] == task_uid for rel in parsed["verknuepfte_aufgaben"]):
+                        parsed["kalender_name"] = name
+                        events.append(parsed)
+
+            events.sort(key=event_mapping._start_sort_key)
+            return events
+
     def create_event_from_task(
         self,
         list_name: str,

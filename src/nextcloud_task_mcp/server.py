@@ -440,8 +440,12 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             ende (all-day: inclusive last day), ganztaegig, ort, beschreibung,
             tags, status ("bestätigt"/"vorläufig"/"abgesagt" or None),
             sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
-            url, verknuepfte_aufgaben (RELATED-TO links), wiederholung_von,
-            kalender (the calendar's display name).
+            url, verknuepfte_aufgaben (RELATED-TO links; each entry's
+            "beziehung" uses the same values as link_task_to_event's
+            beziehung parameter - "zeitblock"/"voraussetzung" - plus
+            "gleichrangig" or a raw lowercased RELTYPE for links written by
+            other CalDAV clients), wiederholung_von, kalender (the calendar's
+            display name).
         """
         return await _call(
             caldav_service.list_events,
@@ -509,7 +513,10 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
                 absolute ISO 8601 datetime -> VALARM.
             url: Optional URL -> URL.
             verknuepfte_aufgabe: Optional UID of an existing task this event
-                reserves time for -> RELATED-TO;RELTYPE=PARENT on the event.
+                reserves time for -> RELATED-TO;RELTYPE=PARENT on the event
+                (the "zeitblock" semantics of link_task_to_event; reading the
+                event back via list_events/get_event surfaces this as a
+                verknuepfte_aufgaben entry with beziehung "zeitblock").
 
         Returns:
             {"uid": the new event's UID}.
@@ -616,7 +623,11 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
 
         The link is stored on the event (the Nextcloud Tasks UI would
         misrender a task-side link as a broken subtask), and shows up in the
-        event's verknuepfte_aufgaben.
+        event's verknuepfte_aufgaben with a "beziehung" equal to the
+        `beziehung` value passed here - the request and response vocabulary
+        is identical ("zeitblock"/"voraussetzung"), so a link written as
+        "zeitblock" reads back as "zeitblock", never "uebergeordnet" or
+        similar internal RELTYPE naming.
 
         Args:
             list_name: Display name of the task list containing the task.
@@ -641,6 +652,37 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return {"task_uid": task_uid, "event_uid": event_uid, "beziehung": beziehung}
 
     @mcp.tool
+    async def list_events_for_task(
+        list_name: str,
+        task_uid: str,
+        kalender_namen: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find events linked to a task - the task-side counterpart of link_task_to_event.
+
+        link_task_to_event stores the RELATED-TO link on the event only (see
+        its docstring for why), so there is normally no way to discover a
+        link starting from the task; this tool does the reverse lookup by
+        scanning the queried calendars' events for a verknuepfte_aufgaben
+        entry pointing at task_uid.
+
+        Args:
+            list_name: Display name of the task list containing the task.
+            task_uid: UID of the task to find linked events for.
+            kalender_namen: Optional list of calendar display names to
+                search; None searches every event calendar on the account.
+
+        Returns:
+            Event dicts (same shape as list_events entries, each with an
+            added "kalender_name" key), sorted by start.
+        """
+        return await _call(
+            caldav_service.list_events_for_task,
+            list_name,
+            task_uid,
+            calendar_names=kalender_namen,
+        )
+
+    @mcp.tool
     async def create_event_from_task(
         list_name: str,
         task_uid: str,
@@ -652,7 +694,9 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
 
         Title, notes, location and tags are copied from the task. The event is
         linked back to the task via RELATED-TO (the "zeitblock" semantics of
-        link_task_to_event); the task itself is not modified.
+        link_task_to_event); the task itself is not modified. The new event's
+        verknuepfte_aufgaben will show this task with beziehung "zeitblock",
+        same as if link_task_to_event had been called explicitly.
 
         Args:
             list_name: Display name of the task list containing the task.

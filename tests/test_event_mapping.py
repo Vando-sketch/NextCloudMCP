@@ -275,7 +275,7 @@ def test_verknuepfte_aufgabe_written_as_parent_relation():
     event = _new_event()
     _apply(event, titel="T", start="2026-07-20T14:00:00", verknuepfte_aufgabe="task-42")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-42", "beziehung": "uebergeordnet"}]
+    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-42", "beziehung": "zeitblock"}]
 
 
 def test_add_relation_appends_and_is_idempotent():
@@ -285,8 +285,8 @@ def test_add_relation_appends_and_is_idempotent():
     event_mapping.add_relation(event, "task-2", "CHILD")  # no-op duplicate
     parsed = event_mapping.parse_vevent(event)
     assert parsed["verknuepfte_aufgaben"] == [
-        {"uid": "task-1", "beziehung": "uebergeordnet"},
-        {"uid": "task-2", "beziehung": "untergeordnet"},
+        {"uid": "task-1", "beziehung": "zeitblock"},
+        {"uid": "task-2", "beziehung": "voraussetzung"},
     ]
 
 
@@ -294,7 +294,25 @@ def test_related_without_reltype_defaults_to_parent():
     event = _new_event()
     event.add("related-to", "task-7")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-7", "beziehung": "uebergeordnet"}]
+    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-7", "beziehung": "zeitblock"}]
+
+
+def test_related_to_parent_reltype_round_trips_as_zeitblock():
+    """Round-trip check for the beziehung vocabulary fix: a RELATED-TO written
+    with RELTYPE=PARENT (as link_task_to_event writes for beziehung="zeitblock")
+    must parse back with the same "zeitblock" label, not a different word for
+    the same relation."""
+    event = _new_event()
+    event.add("related-to", "task-99", parameters={"RELTYPE": "PARENT"})
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-99", "beziehung": "zeitblock"}]
+
+
+def test_related_to_child_reltype_parses_as_voraussetzung():
+    event = _new_event()
+    event.add("related-to", "task-100", parameters={"RELTYPE": "CHILD"})
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-100", "beziehung": "voraussetzung"}]
 
 
 # --- parse edge cases ---
