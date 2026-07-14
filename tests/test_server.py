@@ -12,7 +12,11 @@ from fastmcp.exceptions import ToolError
 
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
-from nextcloud_task_mcp.errors import TaskListAlreadyExistsError, TaskListNotFoundError
+from nextcloud_task_mcp.errors import (
+    CalendarNotFoundError,
+    TaskListAlreadyExistsError,
+    TaskListNotFoundError,
+)
 from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
 from nextcloud_task_mcp.server import build_server, main
 
@@ -45,7 +49,26 @@ def test_all_tools_registered(tools):
         "update_task",
         "complete_task",
         "delete_task",
+        "list_calendars",
+        "create_calendar",
+        "delete_calendar",
+        "update_calendar",
+        "list_events",
+        "get_event",
+        "create_event",
+        "update_event",
+        "delete_event",
+        "link_task_to_event",
+        "create_event_from_task",
+        "get_agenda",
     }
+
+
+def test_all_tools_use_ascii_parameter_names(tools):
+    """The Anthropic API rejects non-ASCII schema property names (see commit 14d742d)."""
+    for tool_name, tool in tools.items():
+        for prop_name in tool.parameters.get("properties", {}):
+            assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
 
 
 def test_create_task_list_uses_ascii_parameter_names(tools):
@@ -236,6 +259,139 @@ def test_delete_task_delegates(tools, fake_service):
     result = _run(tools["delete_task"].fn("Personal", "task-uid"))
     assert result == {"uid": "task-uid"}
     fake_service.delete_task.assert_called_once_with("Personal", "task-uid")
+
+
+# --- Calendar/event tools ---
+
+
+def test_create_event_schema(tools):
+    schema = tools["create_event"].parameters
+    assert set(schema["required"]) == {"kalender_name", "titel", "start"}
+    assert "wiederholung" in schema["properties"]
+    assert "ausnahme_daten" in schema["properties"]
+    assert "erinnerungen" in schema["properties"]
+    assert "verknuepfte_aufgabe" in schema["properties"]
+
+
+def test_update_event_has_felder_leeren_parameter(tools):
+    schema = tools["update_event"].parameters
+    assert "felder_leeren" in schema["properties"]
+    assert set(schema["required"]) == {"kalender_name", "event_uid"}
+
+
+def test_list_events_schema(tools):
+    schema = tools["list_events"].parameters
+    assert set(schema["properties"]) == {
+        "kalender_namen",
+        "von",
+        "bis",
+        "suchtext",
+        "tag",
+        "limit",
+        "wiederholungen_aufloesen",
+    }
+    assert schema.get("required", []) == []
+
+
+def test_list_events_delegates_with_filters(tools, fake_service):
+    fake_service.list_events.return_value = []
+    _run(
+        tools["list_events"].fn(
+            kalender_namen=["Termine"],
+            von="2026-07-01",
+            bis="2026-07-31",
+            suchtext="Zahnarzt",
+            tag="Privat",
+            limit=10,
+            wiederholungen_aufloesen=True,
+        )
+    )
+    fake_service.list_events.assert_called_once_with(
+        calendar_names=["Termine"],
+        von="2026-07-01",
+        bis="2026-07-31",
+        suchtext="Zahnarzt",
+        tag="Privat",
+        limit=10,
+        expand=True,
+    )
+
+
+def test_create_event_builds_event_fields(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+    result = _run(
+        tools["create_event"].fn(
+            kalender_name="Termine",
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            ende="2026-07-20T15:00:00",
+            status="bestätigt",
+        )
+    )
+    assert result == {"uid": "new-uid"}
+    (cal_name, fields), _ = fake_service.create_event.call_args
+    assert cal_name == "Termine"
+    assert fields.titel == "Meeting"
+    assert fields.status == "bestätigt"
+    assert fields.clear == ()
+
+
+def test_update_event_passes_clear_fields(tools, fake_service):
+    _run(
+        tools["update_event"].fn(
+            kalender_name="Termine",
+            event_uid="event-1",
+            felder_leeren=["ende", "ort"],
+        )
+    )
+    (_, _, fields), _ = fake_service.update_event.call_args
+    assert fields.clear == ("ende", "ort")
+
+
+def test_link_task_to_event_defaults_to_zeitblock(tools, fake_service):
+    result = _run(
+        tools["link_task_to_event"].fn(
+            list_name="Privat",
+            task_uid="task-1",
+            kalender_name="Termine",
+            event_uid="event-1",
+        )
+    )
+    fake_service.link_task_to_event.assert_called_once_with(
+        "Privat", "task-1", "Termine", "event-1", "zeitblock"
+    )
+    assert result == {"task_uid": "task-1", "event_uid": "event-1", "beziehung": "zeitblock"}
+
+
+def test_create_event_from_task_delegates(tools, fake_service):
+    fake_service.create_event_from_task.return_value = "event-uid"
+    result = _run(
+        tools["create_event_from_task"].fn(
+            list_name="Privat",
+            task_uid="task-1",
+            kalender_name="Termine",
+            dauer_minuten=30,
+        )
+    )
+    fake_service.create_event_from_task.assert_called_once_with(
+        "Privat", "task-1", "Termine", None, 30
+    )
+    assert result == {"uid": "event-uid", "task_uid": "task-1"}
+
+
+def test_get_agenda_delegates(tools, fake_service):
+    fake_service.get_agenda.return_value = {"datum": "2026-07-20", "termine": [], "aufgaben": []}
+    result = _run(tools["get_agenda"].fn(datum="2026-07-20"))
+    fake_service.get_agenda.assert_called_once_with(
+        "2026-07-20", calendar_names=None, list_names=None
+    )
+    assert result["datum"] == "2026-07-20"
+
+
+def test_calendar_not_found_becomes_clean_tool_error(tools, fake_service):
+    fake_service.get_event.side_effect = CalendarNotFoundError("Calendar 'X' was not found.")
+    with pytest.raises(ToolError, match="was not found"):
+        _run(tools["get_event"].fn(kalender_name="X", event_uid="e1"))
 
 
 def test_task_mcp_error_becomes_clean_tool_error(tools, fake_service):

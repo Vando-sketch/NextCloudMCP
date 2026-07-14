@@ -1,8 +1,10 @@
 # nextcloud-task-mcp
 
-An MCP server that manages tasks (VTODOs) in a self-hosted Nextcloud instance over CalDAV.
-Connect it to Claude as a custom connector to create, list, update and complete Nextcloud
-tasks using natural language.
+An MCP server that manages tasks (VTODOs) and calendar events (VEVENTs) in a
+self-hosted Nextcloud instance over CalDAV. Connect it to Claude as a custom
+connector to create, list, update and complete Nextcloud tasks, manage
+calendars and events (including recurring ones), link tasks to events
+(timeboxing), and get combined day agendas using natural language.
 
 Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, and the
 [`caldav`](https://github.com/python-caldav/caldav) library for talking to Nextcloud.
@@ -161,8 +163,10 @@ schema Claude calls.
 
 ### `list_task_lists()`
 
-Returns all available Nextcloud task lists as `{"name": ..., "url": ...}` dicts
-(display name and internal CalDAV URL/ID).
+Returns all available Nextcloud task lists (calendars supporting VTODO) as
+`{"name": ..., "url": ...}` dicts (display name and internal CalDAV URL/ID).
+Event-only calendars (e.g. Nextcloud's default "Personal" calendar) are
+excluded — `list_calendars` is their counterpart.
 
 ### `list_tasks(list_name, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None)`
 
@@ -234,6 +238,33 @@ Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp.
 ### `delete_task(list_name, task_uid)`
 
 Permanently deletes the task.
+
+### Calendar & event tools (VEVENT)
+
+The same CalDAV account also holds event calendars; these tools mirror the task
+tools' conventions (German ASCII parameter names, same ISO 8601 date semantics,
+`felder_leeren` for clearing fields). See [`docs/tools.md`](docs/tools.md) for
+the full reference.
+
+| Tool | Purpose |
+|---|---|
+| `list_calendars()` | All event calendars with `farbe` (`#RRGGBB`) and supported `komponenten` |
+| `create_calendar(display_name, farbe=None)` | New VEVENT calendar via `MKCALENDAR`, optional color |
+| `update_calendar(calendar_name, new_display_name=None, farbe=None)` | Rename and/or recolor (`PROPPATCH`); URL/id stays stable |
+| `delete_calendar(calendar_name)` | Permanently delete a calendar and all its events |
+| `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False)` | Time-range query across one/several/all calendars, full-text and tag filter; optionally expands recurring events into single occurrences |
+| `get_event(kalender_name, event_uid)` | Single event by UID |
+| `create_event(kalender_name, titel, start, ...)` | Full event creation: all-day or timed, `ort`, `beschreibung`, `tags`, `status` (`"bestätigt"`/`"vorläufig"`/`"abgesagt"`), `sichtbarkeit`, recurrence (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE), reminders (`erinnerungen` → VALARM), `url`, task link (`verknuepfte_aufgabe`) |
+| `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
+| `delete_event(kalender_name, event_uid)` | Permanently delete an event |
+| `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
+| `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=60)` | Timeboxing: builds an event from a task (title/notes/location/tags, due date as start) and links both |
+| `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |
+
+For all-day events `ende` is the **inclusive** last day (RFC 5545's exclusive
+`DTEND` is translated on the way in and out). Mixed calendars (VEVENT+VTODO in
+one collection) are supported and show up in both `list_task_lists` and
+`list_calendars`.
 
 ## Testing
 

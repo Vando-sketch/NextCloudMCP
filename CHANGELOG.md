@@ -7,6 +7,40 @@ This project does not yet follow Semantic Versioning releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Calendar & event support (VEVENT)**: 12 new MCP tools alongside the task
+  tools. Calendar management (`list_calendars`, `create_calendar`,
+  `update_calendar` for rename/recolor, `delete_calendar`), full event CRUD
+  (`list_events` with server-side time-range REPORT, full-text/tag filters and
+  optional expansion of recurring events into single occurrences; `get_event`,
+  `create_event`, `update_event`, `delete_event`) including recurrence
+  (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE),
+  reminders (`erinnerungen` → VALARM relative to DTSTART), status/visibility,
+  and all-day events with *inclusive* `ende` semantics. Task↔event linking via
+  cross-component `RELATED-TO` written on the event (`link_task_to_event` with
+  `"zeitblock"`/`"voraussetzung"`), task→event conversion for timeboxing
+  (`create_event_from_task`), and a combined day view (`get_agenda`) returning
+  events plus due tasks. New `event_mapping.py` translation layer mirrors
+  `mapping.py`; verified live against a Nextcloud instance (calendar/event
+  lifecycle, recurrence expansion incl. EXDATE, linking, agenda).
+
+### Changed
+
+- **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
+  keeps task lists and event calendars in the same DAV namespace; previously
+  event-only calendars (e.g. the default "Personal" calendar) appeared as task
+  lists and task operations against them failed server-side. Name resolution
+  is component-aware throughout: a task list and an event calendar may share a
+  display name without becoming ambiguous, and mixed VEVENT+VTODO calendars
+  are reachable from both sides.
+- **Occupied collection ids are dodged on create.** Nextcloud's trashbin keeps
+  deleted calendars' URIs occupied (invisibly) until purged, which used to
+  make `create_task_list`/`create_calendar` fail with "already exists" after a
+  delete+recreate of the same name. The generated collection id now retries
+  with `-2`, `-3`, … suffixes before giving up; display-name conflicts are
+  still rejected.
+
 ### Fixed
 
 - **Umlauts removed from the public tool schema** (`ä`→`ae`, `ü`→`ue`). The

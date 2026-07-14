@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
-from icalendar import Todo
+from icalendar import Event, Todo
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
-from nextcloud_task_mcp import mapping
+from nextcloud_task_mcp import event_mapping, mapping
 from nextcloud_task_mcp.caldav_client import CalDavService, _translate
 from nextcloud_task_mcp.errors import (
     AuthenticationFailedError,
+    CalendarAlreadyExistsError,
+    CalendarNotFoundError,
     ConnectionFailedError,
+    EventNotFoundError,
+    InvalidEventDataError,
     InvalidTaskDataError,
     TaskConflictError,
     TaskListAlreadyExistsError,
@@ -25,11 +30,23 @@ from nextcloud_task_mcp.errors import (
 )
 
 
-def _make_calendar(name: str, url: str = "https://cloud.example.com/dav/personal/") -> MagicMock:
-    """A MagicMock standing in for a caldav.Calendar with the given display name."""
+def _make_calendar(
+    name: str,
+    url: str = "https://cloud.example.com/dav/personal/",
+    components: list[str] | None = None,
+) -> MagicMock:
+    """A MagicMock standing in for a caldav.Calendar with the given display name.
+
+    `components` is what `get_supported_components()` reports; it defaults to
+    VTODO-only (a plain Nextcloud task list) since most tests here exercise
+    the task side. Event-calendar tests pass ["VEVENT"] explicitly.
+    """
     calendar = MagicMock()
     calendar.get_display_name.return_value = name
     calendar.url = url
+    calendar.get_supported_components.return_value = (
+        components if components is not None else ["VTODO"]
+    )
     return calendar
 
 
@@ -906,3 +923,534 @@ def test_translate_scrubbed_branches_log_the_real_exception(caplog):
     # it) ends up in the formatted log output, not just the bare message.
     formatted = "\n".join(caplog.text.splitlines())
     assert _SECRET_MARKER in formatted or _SECRET_MARKER in logged_text
+
+
+# ======================================================================
+# Event calendars (VEVENT)
+# ======================================================================
+
+
+def _make_event_obj(component=None) -> MagicMock:
+    """A MagicMock standing in for a caldav Event object wrapping a real component."""
+    obj = MagicMock()
+    obj.icalendar_component = component if component is not None else _make_vevent()
+    return obj
+
+
+def _make_vevent(uid: str = "event-1", summary: str = "Meeting") -> Event:
+    event = Event()
+    event.add("uid", uid)
+    event.add("summary", summary)
+    event.add("dtstart", datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc))
+    return event
+
+
+# --- component-aware resolution ---
+
+
+def test_list_task_lists_excludes_event_only_calendars(service, principal):
+    todo_cal = _make_calendar("Privat", "https://cloud.example.com/dav/privat/")
+    event_cal = _make_calendar(
+        "Personal", "https://cloud.example.com/dav/personal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    result = service.list_task_lists()
+
+    assert result == [{"name": "Privat", "url": "https://cloud.example.com/dav/privat/"}]
+
+
+def test_task_resolution_skips_event_calendar_with_same_name(service, principal):
+    event_cal = _make_calendar("Personal", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tasks("Personal")
+
+
+def test_event_resolution_skips_task_list_with_same_name(service, principal):
+    todo_cal = _make_calendar("Personal", components=["VTODO"])
+    principal.calendars.return_value = [todo_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.get_event("Personal", "event-1")
+
+
+def test_same_name_todo_and_event_calendars_are_not_ambiguous(service, principal):
+    """One VTODO list and one VEVENT calendar sharing a name resolve per kind."""
+    todo_cal = _make_calendar("Personal", components=["VTODO"])
+    event_cal = _make_calendar("Personal", components=["VEVENT"])
+    todo_cal.todos.return_value = []
+    event_cal.events.return_value = []
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    assert service.list_tasks("Personal") == []
+    assert service.list_events(calendar_names=["Personal"]) == []
+
+
+def test_mixed_component_calendar_is_reachable_from_both_sides(service, principal):
+    mixed = _make_calendar("Alles", components=["VEVENT", "VTODO"])
+    mixed.todos.return_value = []
+    mixed.events.return_value = []
+    principal.calendars.return_value = [mixed]
+
+    assert service.list_tasks("Alles") == []
+    assert service.list_events(calendar_names=["Alles"]) == []
+
+
+# --- list_calendars ---
+
+
+def test_list_calendars_returns_color_and_components(service, principal):
+    event_cal = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    event_cal.get_properties.return_value = {
+        caldav_client_module.ical_elements.CalendarColor.tag: "#00679e"
+    }
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.list_calendars()
+
+    assert result == [
+        {
+            "name": "Termine",
+            "url": "https://cloud.example.com/dav/termine/",
+            "farbe": "#00679e",
+            "komponenten": ["VEVENT"],
+        }
+    ]
+
+
+def test_list_calendars_survives_color_propfind_failure(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.get_properties.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    result = service.list_calendars()
+
+    assert result[0]["farbe"] is None
+
+
+# --- create/update/delete calendar ---
+
+
+def test_create_calendar_passes_vevent_component_set(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.return_value = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+
+    result = service.create_calendar("Termine")
+
+    principal.make_calendar.assert_called_once_with(
+        name="Termine", cal_id="termine", supported_calendar_component_set=["VEVENT"]
+    )
+    assert result == {
+        "name": "Termine",
+        "url": "https://cloud.example.com/dav/termine/",
+        "farbe": None,
+    }
+
+
+def test_create_calendar_sets_color(service, principal):
+    principal.calendars.return_value = []
+    new_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.make_calendar.return_value = new_cal
+
+    service.create_calendar("Termine", farbe="#FF7A66")
+
+    new_cal.set_properties.assert_called_once()
+
+
+def test_create_calendar_rejects_invalid_color(service):
+    with pytest.raises(InvalidEventDataError, match="farbe"):
+        service.create_calendar("Termine", farbe="rot")
+
+
+def test_create_calendar_name_conflict(service, principal):
+    principal.calendars.return_value = [_make_calendar("Termine", components=["VEVENT"])]
+
+    with pytest.raises(CalendarAlreadyExistsError):
+        service.create_calendar("Termine")
+
+
+def test_create_calendar_does_not_conflict_with_task_list_of_same_name(service, principal):
+    principal.calendars.return_value = [_make_calendar("Termine", components=["VTODO"])]
+    principal.make_calendar.return_value = _make_calendar("Termine", components=["VEVENT"])
+
+    result = service.create_calendar("Termine")
+
+    assert result["name"] == "Termine"
+
+
+def test_delete_calendar_deletes(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.delete_calendar("Termine")
+
+    event_cal.delete.assert_called_once_with()
+
+
+def test_delete_calendar_not_found(service, principal):
+    principal.calendars.return_value = []
+
+    with pytest.raises(CalendarNotFoundError):
+        service.delete_calendar("Nonexistent")
+
+
+def test_update_calendar_renames_and_recolors(service, principal):
+    event_cal = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [event_cal]
+
+    result = service.update_calendar("Termine", new_display_name="Arbeit", farbe="#00679e")
+
+    event_cal.set_properties.assert_called_once()
+    (props,), _ = event_cal.set_properties.call_args
+    assert len(props) == 2
+    assert result["name"] == "Arbeit"
+
+
+def test_update_calendar_requires_something_to_update(service):
+    with pytest.raises(InvalidEventDataError, match="Nothing to update"):
+        service.update_calendar("Termine")
+
+
+def test_update_calendar_name_conflict(service, principal):
+    principal.calendars.return_value = [
+        _make_calendar("Termine", components=["VEVENT"]),
+        _make_calendar("Arbeit", components=["VEVENT"]),
+    ]
+
+    with pytest.raises(CalendarAlreadyExistsError):
+        service.update_calendar("Termine", new_display_name="Arbeit")
+
+
+# --- event CRUD ---
+
+
+def test_create_event_requires_titel_and_start(service):
+    with pytest.raises(InvalidEventDataError, match="titel"):
+        service.create_event("Termine", event_mapping.EventFields(start="2026-07-20T14:00:00"))
+    with pytest.raises(InvalidEventDataError, match="start"):
+        service.create_event("Termine", event_mapping.EventFields(titel="Meeting"))
+
+
+def test_create_event_saves_serialized_vevent(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    uid = service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting", start="2026-07-20T14:00:00", ende="2026-07-20T15:00:00"
+        ),
+    )
+
+    event_cal.save_event.assert_called_once()
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "BEGIN:VEVENT" in ical_text
+    assert "SUMMARY:Meeting" in ical_text
+    assert uid in ical_text
+
+
+def test_get_event_parses_and_annotates_calendar(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = _make_event_obj()
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_event("Termine", "event-1")
+
+    assert result["uid"] == "event-1"
+    assert result["titel"] == "Meeting"
+    assert result["kalender"] == "Termine"
+
+
+def test_get_event_not_found(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = caldav_error.NotFoundError("nope")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(EventNotFoundError):
+        service.get_event("Termine", "missing")
+
+
+def test_update_event_applies_fields_and_saves(service, principal):
+    component = _make_vevent()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.update_event("Termine", "event-1", event_mapping.EventFields(ort="Büro"))
+
+    assert str(component["location"]) == "Büro"
+    event_obj.save.assert_called_once_with()
+
+
+def test_delete_event_deletes(service, principal):
+    event_obj = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.delete_event("Termine", "event-1")
+
+    event_obj.delete.assert_called_once_with()
+
+
+# --- list_events ---
+
+
+def test_list_events_without_bounds_lists_all(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.events.return_value = [_make_event_obj()]
+    principal.calendars.return_value = [event_cal]
+
+    result = service.list_events()
+
+    event_cal.events.assert_called_once_with()
+    assert len(result) == 1
+    assert result[0]["kalender"] == "Termine"
+
+
+def test_list_events_with_bounds_uses_time_range_search(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    service.list_events(von="2026-07-01", bis="2026-07-31")
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    # date-only `bis` is inclusive: the exclusive filter end is the next day.
+    assert kwargs["end"] == datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert kwargs["event"] is True
+    assert kwargs["expand"] is False
+
+
+def test_list_events_expand_requires_both_bounds(service):
+    with pytest.raises(InvalidEventDataError, match="von and bis"):
+        service.list_events(von="2026-07-01", expand=True)
+
+
+def test_list_events_unknown_calendar_raises(service, principal):
+    principal.calendars.return_value = []
+
+    with pytest.raises(CalendarNotFoundError):
+        service.list_events(calendar_names=["Nonexistent"])
+
+
+def test_list_events_filters_by_suchtext_across_calendars(service, principal):
+    cal1 = _make_calendar("Arbeit", "https://cloud.example.com/dav/a/", components=["VEVENT"])
+    cal2 = _make_calendar("Privat", "https://cloud.example.com/dav/p/", components=["VEVENT"])
+    cal1.events.return_value = [_make_event_obj(_make_vevent("e1", "Zahnarzt"))]
+    cal2.events.return_value = [_make_event_obj(_make_vevent("e2", "Kino"))]
+    principal.calendars.return_value = [cal1, cal2]
+
+    result = service.list_events(suchtext="zahnarzt")
+
+    assert [e["uid"] for e in result] == ["e1"]
+
+
+# --- task <-> event linking ---
+
+
+def test_link_task_to_event_rejects_unknown_relation(service):
+    with pytest.raises(InvalidEventDataError, match="beziehung"):
+        service.link_task_to_event("Privat", "t1", "Termine", "e1", beziehung="egal")
+
+
+def test_link_task_to_event_writes_relation_on_event(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    component = _make_vevent()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.link_task_to_event("Privat", "task-9", "Termine", "event-1", beziehung="zeitblock")
+
+    todo_cal.get_todo_by_uid.assert_called_once_with("task-9")
+    parsed = event_mapping.parse_vevent(component)
+    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-9", "beziehung": "uebergeordnet"}]
+    event_obj.save.assert_called_once_with()
+
+
+def test_link_task_to_event_missing_task_raises_before_touching_event(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.side_effect = caldav_error.NotFoundError("nope")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    with pytest.raises(TaskNotFoundError):
+        service.link_task_to_event("Privat", "missing", "Termine", "event-1")
+    event_cal.event_by_uid.assert_not_called()
+
+
+# --- create_event_from_task ---
+
+
+def _todo_obj(uid: str = "task-1", **fields) -> MagicMock:
+    todo = Todo()
+    todo.add("uid", uid)
+    mapping.apply_task_fields(todo, mapping.TaskFields(**fields))
+    obj = MagicMock()
+    obj.icalendar_component = todo
+    return obj
+
+
+def test_create_event_from_task_uses_due_datetime(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(
+        titel="Steuer", faellig_datum="2026-07-20T14:00:00", notizen="Belege", ort="Zuhause"
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    uid = service.create_event_from_task("Privat", "task-1", "Termine", dauer_minuten=30)
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "SUMMARY:Steuer" in ical_text
+    assert "DTSTART:20260720T140000Z" in ical_text
+    assert "DTEND:20260720T143000Z" in ical_text
+    assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
+    assert uid
+
+
+def test_create_event_from_task_all_day_due_date(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer", faellig_datum="2026-07-20")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task("Privat", "task-1", "Termine")
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "DTSTART;VALUE=DATE:20260720" in kwargs["ical"]
+
+
+def test_create_event_from_task_without_due_or_start_raises(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    principal.calendars.return_value = [todo_cal]
+
+    with pytest.raises(InvalidEventDataError, match="faellig_datum"):
+        service.create_event_from_task("Privat", "task-1", "Termine")
+
+
+def test_create_event_from_task_rejects_nonpositive_duration(service):
+    with pytest.raises(InvalidEventDataError, match="dauer_minuten"):
+        service.create_event_from_task("Privat", "task-1", "Termine", dauer_minuten=0)
+
+
+# --- get_agenda ---
+
+
+def test_get_agenda_requires_date_only(service):
+    with pytest.raises(InvalidEventDataError, match="date-only"):
+        service.get_agenda("2026-07-20T14:00:00")
+
+
+def test_get_agenda_combines_events_and_due_tasks(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [_make_event_obj()]
+    todo = Todo()
+    todo.add("uid", "task-1")
+    todo.add("summary", "Steuer")
+    todo.add("due", datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc))
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = [todo_obj]
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert result["datum"] == "2026-07-20"
+    assert [e["uid"] for e in result["termine"]] == ["event-1"]
+    assert [t["uid"] for t in result["aufgaben"]] == ["task-1"]
+    assert result["aufgaben"][0]["liste"] == "Privat"
+    # Events were queried with expand=True over exactly that day.
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["expand"] is True
+    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    assert kwargs["end"] == datetime(2026, 7, 21, tzinfo=timezone.utc)
+
+
+def test_get_agenda_excludes_tasks_due_other_days(service, principal):
+    todo = Todo()
+    todo.add("uid", "task-1")
+    todo.add("summary", "Steuer")
+    todo.add("due", datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc))
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = [todo_obj]
+    principal.calendars.return_value = [todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert result["termine"] == []
+    assert result["aufgaben"] == []
+
+
+# --- occupied collection ids are dodged (Nextcloud trashbin) ---
+
+
+def test_create_task_list_retries_with_suffixed_id_when_slug_occupied(service, principal):
+    """A trashbin remnant occupying the slug URI must not block re-creation."""
+    principal.calendars.return_value = []
+    new_calendar = _make_calendar("Groceries")
+    principal.make_calendar.side_effect = [
+        caldav_error.MkcolError("405 Method Not Allowed"),
+        new_calendar,
+    ]
+
+    result = service.create_task_list("Groceries")
+
+    assert result["name"] == "Groceries"
+    assert principal.make_calendar.call_count == 2
+    _, kwargs = principal.make_calendar.call_args
+    assert kwargs["cal_id"] == "groceries-2"
+
+
+def test_create_calendar_retries_with_suffixed_id_when_slug_occupied(service, principal):
+    principal.calendars.return_value = []
+    new_calendar = _make_calendar("Termine", components=["VEVENT"])
+    principal.make_calendar.side_effect = [
+        caldav_error.MkcalendarError("409 Conflict"),
+        caldav_error.MkcalendarError("409 Conflict"),
+        new_calendar,
+    ]
+
+    result = service.create_calendar("Termine")
+
+    assert result["name"] == "Termine"
+    _, kwargs = principal.make_calendar.call_args
+    assert kwargs["cal_id"] == "termine-3"
+
+
+def test_create_task_list_gives_up_when_all_candidate_ids_occupied(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
+
+    with pytest.raises(TaskListAlreadyExistsError, match="collection id"):
+        service.create_task_list("Groceries")
+
+
+def test_translate_rate_limit_error_names_waiting_as_fix():
+    translated = _translate(
+        caldav_error.RateLimitError("RateLimitError at 'https://x/', reason ...")
+    )
+    assert isinstance(translated, TaskMcpError)
+    assert "rate-limit" in str(translated).lower() or "rate limit" in str(translated).lower()
+    assert "retry" in str(translated).lower()
+    # The raw URL/exception text must not leak into the client-facing message.
+    assert "https://x/" not in str(translated)
