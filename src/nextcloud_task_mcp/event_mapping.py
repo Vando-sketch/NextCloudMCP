@@ -29,9 +29,19 @@ _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
 # entries returned by `parse_vevent`. A RELATED-TO property without an
 # explicit RELTYPE parameter means PARENT per RFC 5545 (handled where the
 # parameter is read, in `_extract_related` and `add_relation`).
+#
+# On *events*, PARENT/CHILD carry the task-link semantics of
+# `link_task_to_event` (server.py) rather than a generic subtask hierarchy -
+# a RELATED-TO is only ever written on a VEVENT by that tool (or
+# `verknuepfte_aufgabe`/`create_event_from_task`, both "zeitblock"), never by
+# a task-side operation. So the labels here reuse `link_task_to_event`'s own
+# `beziehung` vocabulary ("zeitblock"/"voraussetzung") instead of the
+# generic "uebergeordnet"/"untergeordnet" used on the VTODO side
+# (mapping.py's `uebergeordnete_aufgabe`) - a link written as "zeitblock"
+# must read back as "zeitblock", not a different word for the same relation.
 RELTYPE_LABELS: dict[str, str] = {
-    "PARENT": "uebergeordnet",
-    "CHILD": "untergeordnet",
+    "PARENT": "zeitblock",
+    "CHILD": "voraussetzung",
     "SIBLING": "gleichrangig",
 }
 

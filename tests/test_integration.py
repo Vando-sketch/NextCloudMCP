@@ -228,7 +228,7 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
         assert event["titel"] == "Verknüpfungstest-Aufgabe"
         assert event["start"] == "2026-09-03T16:00:00+00:00"
         assert event["ende"] == "2026-09-03T16:45:00+00:00"
-        assert {"uid": task_uid, "beziehung": "uebergeordnet"} in event["verknuepfte_aufgaben"]
+        assert {"uid": task_uid, "beziehung": "zeitblock"} in event["verknuepfte_aufgaben"]
 
         # Explicit linking with the other relation.
         second_uid = live_service.create_event(
@@ -243,7 +243,7 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
             test_list_name, task_uid, test_calendar, second_uid, beziehung="voraussetzung"
         )
         linked = live_service.get_event(test_calendar, second_uid)
-        assert {"uid": task_uid, "beziehung": "untergeordnet"} in linked["verknuepfte_aufgaben"]
+        assert {"uid": task_uid, "beziehung": "voraussetzung"} in linked["verknuepfte_aufgaben"]
     finally:
         live_service.delete_task(test_list_name, task_uid)
 
