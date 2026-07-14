@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
-from icalendar import Event, Todo
+from icalendar import Event, FreeBusy, Todo
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
 from nextcloud_task_mcp import event_mapping, mapping
@@ -1491,6 +1491,328 @@ def test_get_agenda_excludes_tasks_due_other_days(service, principal):
 
     assert result["termine"] == []
     assert result["aufgaben"] == []
+
+
+# ======================================================================
+# Attendees / organizer discovery (Part A)
+# ======================================================================
+
+
+def test_create_event_with_teilnehmer_sets_organizer_and_attendee(service, principal):
+    principal.get_vcal_address.return_value = "mailto:me@example.com"
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com", "name": "Alice"}],
+        ),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "ORGANIZER:mailto:me@example.com" in ical_text
+    assert "ATTENDEE" in ical_text
+    assert "mailto:a@example.com" in ical_text
+
+
+def test_create_event_without_teilnehmer_does_not_discover_own_address(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine", event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00")
+    )
+
+    principal.get_vcal_address.assert_not_called()
+    principal.calendar_user_address_set.assert_not_called()
+
+
+def test_own_organizer_address_falls_back_to_calendar_user_address_set(service, principal):
+    principal.get_vcal_address.side_effect = RuntimeError("not supported")
+    principal.calendar_user_address_set.return_value = ["mailto:fallback@example.com"]
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com"}],
+        ),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "ORGANIZER:mailto:fallback@example.com" in kwargs["ical"]
+
+
+def test_own_organizer_address_falls_back_to_username_when_everything_fails(
+    mock_dav_client, principal
+):
+    service = CalDavService(url="https://cloud.example.com/dav/", username="alice", password="p")
+    principal.get_vcal_address.side_effect = RuntimeError("nope")
+    principal.calendar_user_address_set.side_effect = RuntimeError("nope")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com"}],
+        ),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "ORGANIZER:mailto:alice" in kwargs["ical"]
+
+
+def test_own_organizer_address_is_cached_across_calls(service, principal):
+    principal.get_vcal_address.return_value = "mailto:me@example.com"
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="A", start="2026-07-20T14:00:00", teilnehmer=[{"email": "a@example.com"}]
+        ),
+    )
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="B", start="2026-07-21T14:00:00", teilnehmer=[{"email": "b@example.com"}]
+        ),
+    )
+
+    assert principal.get_vcal_address.call_count == 1
+
+
+def test_update_event_with_teilnehmer_sets_organizer_when_absent(service, principal):
+    principal.get_vcal_address.return_value = "mailto:me@example.com"
+    component = _make_vevent()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.update_event(
+        "Termine",
+        "event-1",
+        event_mapping.EventFields(teilnehmer=[{"email": "a@example.com"}]),
+    )
+
+    assert str(component["organizer"]) == "mailto:me@example.com"
+    event_obj.save.assert_called_once_with()
+
+
+# ======================================================================
+# respond_to_event
+# ======================================================================
+
+
+def _vevent_with_attendee(
+    uid: str = "event-1", email: str = "me@example.com", partstat: str = "NEEDS-ACTION"
+) -> Event:
+    event = _make_vevent(uid)
+    event.add("attendee", f"mailto:{email}", parameters={"PARTSTAT": partstat})
+    return event
+
+
+def test_respond_to_event_sets_partstat_and_saves(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    component = _vevent_with_attendee()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.respond_to_event("Termine", "event-1", "zugesagt")
+
+    parsed = event_mapping.parse_vevent(component)
+    assert parsed["teilnehmer"][0]["status"] == "zugesagt"
+    event_obj.save.assert_called_once_with()
+
+
+def test_respond_to_event_writes_comment(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    component = _vevent_with_attendee()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.respond_to_event("Termine", "event-1", "abgesagt", kommentar="Leider nicht")
+
+    assert str(component.get("comment")) == "Leider nicht"
+
+
+def test_respond_to_event_not_an_attendee_raises(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    component = _vevent_with_attendee(email="other@example.com")
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(InvalidEventDataError, match="not listed as an attendee"):
+        service.respond_to_event("Termine", "event-1", "zugesagt")
+
+    event_obj.save.assert_not_called()
+
+
+def test_respond_to_event_unknown_antwort_rejected(service):
+    with pytest.raises(InvalidEventDataError, match="antwort"):
+        service.respond_to_event("Termine", "event-1", "vielleicht")
+
+
+def test_respond_to_event_event_not_found(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = caldav_error.NotFoundError("nope")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(EventNotFoundError):
+        service.respond_to_event("Termine", "missing", "zugesagt")
+
+
+# ======================================================================
+# get_free_busy (Part B)
+# ======================================================================
+
+
+def _make_freebusy_obj(component) -> MagicMock:
+    obj = MagicMock()
+    obj.icalendar_component = component
+    return obj
+
+
+def test_get_free_busy_own_availability_aggregates_and_merges(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    busy_event = _make_vevent("event-1")
+    busy_event.add("dtend", datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc))
+    cancelled_event = _make_vevent("event-2")
+    cancelled_event.add("status", "CANCELLED")
+    event_cal.search.return_value = [
+        _make_event_obj(busy_event),
+        _make_event_obj(cancelled_event),
+    ]
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21")
+
+    assert result["benutzer"] is None
+    assert result["belegt"] == [
+        {"von": "2026-07-20T14:00:00+00:00", "bis": "2026-07-20T15:00:00+00:00"}
+    ]
+
+
+def test_get_free_busy_own_availability_queries_with_bounds(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    service.get_free_busy("2026-07-20", "2026-07-21")
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    # date-only `bis` is inclusive of the whole day, so the exclusive filter
+    # end is the start of the *next* day (same convention as list_events).
+    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert kwargs["event"] is True
+
+
+def test_get_free_busy_returns_normalized_bounds(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21")
+
+    assert result["von"] == "2026-07-20T00:00:00+00:00"
+    assert result["bis"] == "2026-07-22T00:00:00+00:00"
+
+
+def test_get_free_busy_own_availability_translates_generic_exception(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21")
+
+
+def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, principal):
+    vfb = FreeBusy()
+    vfb.add(
+        "freebusy",
+        [
+            (
+                datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+                datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+            )
+        ],
+        parameters={"FBTYPE": "BUSY"},
+    )
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[0] == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert args[2] == ["mailto:bob@example.com"]
+    assert result["benutzer"] == "bob@example.com"
+    assert result["belegt"] == [
+        {"von": "2026-07-20T09:00:00+00:00", "bis": "2026-07-20T10:00:00+00:00"}
+    ]
+
+
+def test_get_free_busy_for_other_user_accepts_mailto_prefixed_benutzer(service, principal):
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    service.get_free_busy("2026-07-20", "2026-07-21", benutzer="mailto:bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[2] == ["mailto:bob@example.com"]
+
+
+def test_get_free_busy_for_other_user_bare_key_response(service, principal):
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"bob@example.com": _make_freebusy_obj(vfb)}
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    assert result["belegt"] == []
+
+
+def test_get_free_busy_for_other_user_error_response_raises_clean_error(service, principal):
+    principal.freebusy_request.return_value = {
+        "errors": {"mailto:bob@example.com": "3.7;Invalid Calendar User"}
+    }
+
+    with pytest.raises(TaskMcpError, match="bob@example.com"):
+        service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_empty_response_raises(service, principal):
+    principal.freebusy_request.return_value = {}
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_translates_generic_exception(service, principal):
+    principal.freebusy_request.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
 
 
 # --- occupied collection ids are dodged (Nextcloud trashbin) ---

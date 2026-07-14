@@ -445,7 +445,9 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             beziehung parameter - "zeitblock"/"voraussetzung" - plus
             "gleichrangig" or a raw lowercased RELTYPE for links written by
             other CalDAV clients), wiederholung_von, kalender (the calendar's
-            display name).
+            display name), organisator ({"email", "name"} or None), teilnehmer
+            (list of {"email", "name", "status", "rolle", "rsvp"}; "status" is
+            "ausstehend"/"zugesagt"/"abgesagt"/"vorläufig"/"delegiert").
         """
         return await _call(
             caldav_service.list_events,
@@ -487,6 +489,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         erinnerungen: list[str] | None = None,
         url: str | None = None,
         verknuepfte_aufgabe: str | None = None,
+        teilnehmer: list[dict[str, Any]] | None = None,
     ) -> dict[str, str]:
         """Create a new calendar event.
 
@@ -517,6 +520,16 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
                 (the "zeitblock" semantics of link_task_to_event; reading the
                 event back via list_events/get_event surfaces this as a
                 verknuepfte_aufgaben entry with beziehung "zeitblock").
+            teilnehmer: Optional list of attendees -> ATTENDEE. Each entry:
+                {"email": required, "name": optional, "rolle": optional
+                "leitung"/"erforderlich"/"optional"/"keine-teilnahme" (default
+                "erforderlich"), "rsvp": optional bool (default True)}. The
+                first time attendees are added to an event with none yet,
+                ORGANIZER is set to your own account's address automatically.
+                IMPORTANT: Nextcloud's CalDAV server does server-side
+                scheduling - saving an event with ORGANIZER+ATTENDEE sends
+                iMIP invitation mails automatically; this tool does not send
+                any mail itself.
 
         Returns:
             {"uid": the new event's UID}.
@@ -535,6 +548,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             erinnerungen=erinnerungen,
             url=url,
             verknuepfte_aufgabe=verknuepfte_aufgabe,
+            teilnehmer=teilnehmer,
         )
         new_uid = await _call(caldav_service.create_event, kalender_name, fields)
         return {"uid": new_uid}
@@ -556,6 +570,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         erinnerungen: list[str] | None = None,
         url: str | None = None,
         verknuepfte_aufgabe: str | None = None,
+        teilnehmer: list[dict[str, Any]] | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing event. Only fields that are explicitly given are changed.
@@ -567,13 +582,23 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
                 field left as None is left unchanged. To move a single
                 occurrence of a recurring event, add its original date to
                 ausnahme_daten and create a separate replacement event.
+            teilnehmer: Optional, same shape as in create_event. Setting this
+                REPLACES the event's entire attendee list (it is not an
+                append). As in create_event, ORGANIZER is set to your own
+                account's address the first time attendees are added to an
+                event that has none yet; Nextcloud sends iMIP invitation
+                mails server-side once the event is saved, not this tool. To
+                respond to an event you were invited to (set your own RSVP
+                status), use respond_to_event instead of this tool.
             felder_leeren: Optional list of field names to clear (remove the
                 property entirely). Accepted values: "ende", "ort",
                 "beschreibung", "tags", "status", "sichtbarkeit",
                 "wiederholung", "ausnahme_daten", "erinnerungen", "url",
-                "verknuepfte_aufgabe". "titel" and "start" cannot be cleared.
-                Naming an unknown field, or naming a field that is also given
-                a new value in the same call, is an error.
+                "verknuepfte_aufgabe", "teilnehmer" (clearing "teilnehmer"
+                removes every attendee and, if none remain, ORGANIZER too).
+                "titel" and "start" cannot be cleared. Naming an unknown
+                field, or naming a field that is also given a new value in
+                the same call, is an error.
 
         Returns:
             {"uid": event_uid} on success.
@@ -592,6 +617,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             erinnerungen=erinnerungen,
             url=url,
             verknuepfte_aufgabe=verknuepfte_aufgabe,
+            teilnehmer=teilnehmer,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_event, kalender_name, event_uid, fields)
@@ -610,6 +636,36 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         """
         await _call(caldav_service.delete_event, kalender_name, event_uid)
         return {"uid": event_uid}
+
+    @mcp.tool
+    async def respond_to_event(
+        kalender_name: str,
+        event_uid: str,
+        antwort: str,
+        kommentar: str | None = None,
+    ) -> dict[str, str]:
+        """Reply to a calendar invitation - set your own RSVP status on an event.
+
+        Finds your own ATTENDEE entry on the event by matching it against
+        your account's CalDAV calendar-user-addresses, and sets its PARTSTAT.
+        Fails with a clear error if you are not listed as an attendee of this
+        event at all. Saves the event afterwards; Nextcloud's CalDAV server
+        propagates the reply to the organizer as an iMIP/iTIP REPLY mail
+        automatically - this tool does not send any mail itself.
+
+        Args:
+            kalender_name: Display name of the calendar containing the event
+                (typically the calendar the invitation landed in).
+            event_uid: UID of the event to respond to.
+            antwort: One of "zugesagt" (accept), "abgesagt" (decline),
+                "vorläufig" (tentative) -> ATTENDEE PARTSTAT.
+            kommentar: Optional comment to attach to the reply -> COMMENT.
+
+        Returns:
+            {"uid": event_uid, "antwort": antwort} on success.
+        """
+        await _call(caldav_service.respond_to_event, kalender_name, event_uid, antwort, kommentar)
+        return {"uid": event_uid, "antwort": antwort}
 
     @mcp.tool
     async def link_task_to_event(
@@ -749,6 +805,39 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             calendar_names=kalender_namen,
             list_names=listen_namen,
         )
+
+    @mcp.tool
+    async def get_free_busy(
+        von: str,
+        bis: str,
+        benutzer: str | None = None,
+    ) -> dict[str, Any]:
+        """Get busy time intervals in a date/time range, for yourself or another user.
+
+        Args:
+            von: ISO 8601 start of the range. Naive datetimes are interpreted
+                as UTC; a date-only value means the start of that day.
+            bis: ISO 8601 end of the range. A date-only value includes that
+                entire day.
+            benutzer: Optional Nextcloud user id or email of another account
+                to query. When omitted (default), returns your own
+                availability, computed by aggregating your own event
+                calendars. When given, this sends a CalDAV free-busy
+                scheduling request to the server for that user - the server
+                resolves `benutzer`, not this tool; a user with no visible
+                scheduling info (unknown to the server, or with scheduling
+                disabled) produces an error rather than an empty result, so
+                it isn't mistaken for "fully free".
+
+        Returns:
+            {"von": range start, "bis": range end, "benutzer": benutzer,
+            "belegt": merged, sorted busy intervals as a list of
+            {"von": iso, "bis": iso} dicts}. Cancelled and "transparent"
+            (does-not-block-time) events are excluded from your own
+            availability; overlapping/back-to-back busy blocks are merged
+            into one interval.
+        """
+        return await _call(caldav_service.get_free_busy, von, bis, benutzer)
 
     return mcp
 
