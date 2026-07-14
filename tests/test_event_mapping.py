@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from icalendar import Event
+from icalendar.prop import vDDDTypes
 
 from nextcloud_task_mcp import event_mapping
 from nextcloud_task_mcp.errors import InvalidEventDataError
@@ -16,6 +17,12 @@ def _new_event(uid: str = "event-1") -> Event:
     event = Event()
     event.add("uid", uid)
     return event
+
+
+def _dt(prop: object) -> object:
+    """Narrow an icalendar property (typed as a wide union) to its date/time payload."""
+    assert isinstance(prop, vDDDTypes)
+    return prop.dt
 
 
 def _apply(event, **kwargs) -> None:
@@ -71,7 +78,7 @@ def test_z_suffix_datetime_is_utc():
 def test_all_day_single_day_round_trip():
     event = _new_event()
     _apply(event, titel="Feiertag", start="2026-08-01", ende="2026-08-01")
-    assert event["dtend"].dt == date(2026, 8, 2)  # stored exclusive
+    assert _dt(event["dtend"]) == date(2026, 8, 2)  # stored exclusive
     parsed = event_mapping.parse_vevent(event)
     assert parsed["start"] == "2026-08-01"
     assert parsed["ende"] == "2026-08-01"  # returned inclusive
@@ -81,7 +88,7 @@ def test_all_day_single_day_round_trip():
 def test_all_day_multi_day_round_trip():
     event = _new_event()
     _apply(event, titel="Urlaub", start="2026-08-01", ende="2026-08-03")
-    assert event["dtend"].dt == date(2026, 8, 4)
+    assert _dt(event["dtend"]) == date(2026, 8, 4)
     parsed = event_mapping.parse_vevent(event)
     assert parsed["ende"] == "2026-08-03"
 
@@ -173,7 +180,7 @@ def test_relative_reminder_related_to_start():
     alarms = [c for c in event.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
     trigger = alarms[0]["trigger"]
-    assert trigger.dt == timedelta(minutes=-30)
+    assert _dt(trigger) == timedelta(minutes=-30)
     assert trigger.params["RELATED"] == "START"
 
 
@@ -181,7 +188,7 @@ def test_absolute_reminder():
     event = _new_event()
     _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["2026-07-20T08:00:00Z"])
     alarms = [c for c in event.subcomponents if c.name == "VALARM"]
-    assert alarms[0]["trigger"].dt == datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+    assert _dt(alarms[0]["trigger"]) == datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 
 
 def test_reminders_replace_instead_of_appending():
