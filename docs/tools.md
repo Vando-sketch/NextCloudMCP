@@ -581,6 +581,45 @@ with an added `"liste"` key naming its task list.
 
 ---
 
+## `get_free_busy(von, bis, benutzer=None)`
+
+Busy time intervals in `[von, bis]`, for yourself or another Nextcloud user.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `von` | string (ISO 8601) | yes | Range start; date-only = start of that day |
+| `bis` | string (ISO 8601) | yes | Range end; date-only includes that whole day |
+| `benutzer` | string | no | Nextcloud user id or email of another account; `null` = your own availability |
+
+With `benutzer` omitted, busy blocks are computed by aggregating your own
+event calendars: non-cancelled (`STATUS` ≠ `CANCELLED`), non-transparent
+(`TRANSP` ≠ `TRANSPARENT`) events in range each contribute a busy interval,
+which are then merged (overlapping and back-to-back blocks become one) and
+sorted.
+
+With `benutzer` set, this sends a CalDAV `RFC 6638` free-busy scheduling
+request to the Nextcloud server for that user — **the server resolves
+`benutzer`**, not this tool. If the server can't provide free/busy
+information for that user (unknown account, scheduling disabled, ...), the
+call fails with an error rather than silently returning an empty (looks
+"fully free") result.
+
+```json
+{
+  "von": "2026-07-20T00:00:00+00:00",
+  "bis": "2026-07-21T00:00:00+00:00",
+  "benutzer": null,
+  "belegt": [
+    {"von": "2026-07-20T14:00:00+00:00", "bis": "2026-07-20T15:00:00+00:00"}
+  ]
+}
+```
+
+`belegt` ("busy") is the merged, sorted list of busy intervals; empty if the
+user is free the whole range.
+
+---
+
 ## Errors
 
 All failures come back as short, single-line MCP tool errors, for example:
@@ -619,6 +658,8 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `Unknown rolle 'chef'. Expected one of: leitung, erforderlich, optional, keine-teilnahme.`
 - `Unknown antwort 'vielleicht'. Expected one of: zugesagt, abgesagt, vorläufig.`
 - `You are not listed as an attendee of this event, so there is nothing to respond to.`
+- `Nextcloud could not provide free/busy information for 'bob@example.com' (the user may
+  be unknown, or scheduling may be disabled on the server).`
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).

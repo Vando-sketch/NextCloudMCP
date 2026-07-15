@@ -806,6 +806,39 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             list_names=listen_namen,
         )
 
+    @mcp.tool
+    async def get_free_busy(
+        von: str,
+        bis: str,
+        benutzer: str | None = None,
+    ) -> dict[str, Any]:
+        """Get busy time intervals in a date/time range, for yourself or another user.
+
+        Args:
+            von: ISO 8601 start of the range. Naive datetimes are interpreted
+                as UTC; a date-only value means the start of that day.
+            bis: ISO 8601 end of the range. A date-only value includes that
+                entire day.
+            benutzer: Optional Nextcloud user id or email of another account
+                to query. When omitted (default), returns your own
+                availability, computed by aggregating your own event
+                calendars. When given, this sends a CalDAV free-busy
+                scheduling request to the server for that user - the server
+                resolves `benutzer`, not this tool; a user with no visible
+                scheduling info (unknown to the server, or with scheduling
+                disabled) produces an error rather than an empty result, so
+                it isn't mistaken for "fully free".
+
+        Returns:
+            {"von": range start, "bis": range end, "benutzer": benutzer,
+            "belegt": merged, sorted busy intervals as a list of
+            {"von": iso, "bis": iso} dicts}. Cancelled and "transparent"
+            (does-not-block-time) events are excluded from your own
+            availability; overlapping/back-to-back busy blocks are merged
+            into one interval.
+        """
+        return await _call(caldav_service.get_free_busy, von, bis, benutzer)
+
     return mcp
 
 

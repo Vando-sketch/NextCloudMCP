@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from icalendar import Event
+from icalendar import Event, FreeBusy
 from icalendar.prop import vDDDTypes
 
 from nextcloud_task_mcp import event_mapping
@@ -633,3 +633,188 @@ def test_filter_events_limit_returns_earliest():
 def test_filter_events_limit_must_be_positive():
     with pytest.raises(InvalidEventDataError, match="limit"):
         event_mapping.filter_events([], limit=0)
+
+
+# --- free-busy: event_busy_interval ---
+
+
+def test_event_busy_interval_timed_event():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00", ende="2026-07-20T15:00:00")
+    interval = event_mapping.event_busy_interval(event)
+    assert interval == (
+        datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_event_busy_interval_all_day_event_spans_full_utc_day():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-08-01", ende="2026-08-02")
+    interval = event_mapping.event_busy_interval(event)
+    assert interval == (
+        datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_event_busy_interval_cancelled_is_not_busy():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00", status="abgesagt")
+    assert event_mapping.event_busy_interval(event) is None
+
+
+def test_event_busy_interval_transparent_is_not_busy():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    event.add("transp", "TRANSPARENT")
+    assert event_mapping.event_busy_interval(event) is None
+
+
+def test_event_busy_interval_opaque_is_busy():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    event.add("transp", "OPAQUE")
+    assert event_mapping.event_busy_interval(event) is not None
+
+
+def test_event_busy_interval_no_dtstart_is_none():
+    event = _new_event()
+    assert event_mapping.event_busy_interval(event) is None
+
+
+def test_event_busy_interval_uses_duration_when_no_dtend():
+    event = _new_event()
+    event.add("dtstart", datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc))
+    event.add("duration", timedelta(hours=2))
+    interval = event_mapping.event_busy_interval(event)
+    assert interval == (
+        datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 16, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_event_busy_interval_without_end_is_zero_length():
+    event = _new_event()
+    event.add("dtstart", datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc))
+    interval = event_mapping.event_busy_interval(event)
+    assert interval == (
+        datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+    )
+
+
+# --- free-busy: merge_busy_intervals ---
+
+
+def test_merge_busy_intervals_merges_overlapping():
+    a = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    b = datetime(2026, 7, 20, 10, 30, tzinfo=timezone.utc)
+    c = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    d = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+    result = event_mapping.merge_busy_intervals([(a, b), (c, d)])
+    assert result == [(a, d)]
+
+
+def test_merge_busy_intervals_merges_touching():
+    a = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    b = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    c = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    d = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+    result = event_mapping.merge_busy_intervals([(a, b), (c, d)])
+    assert result == [(a, d)]
+
+
+def test_merge_busy_intervals_keeps_separate_intervals_apart():
+    a = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    b = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    c = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+    d = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    result = event_mapping.merge_busy_intervals([(a, b), (c, d)])
+    assert result == [(a, b), (c, d)]
+
+
+def test_merge_busy_intervals_sorts_unordered_input():
+    a = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    b = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    c = datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc)
+    d = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+    result = event_mapping.merge_busy_intervals([(c, d), (a, b)])
+    assert result == [(a, b), (c, d)]
+
+
+def test_merge_busy_intervals_drops_zero_length():
+    a = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    result = event_mapping.merge_busy_intervals([(a, a)])
+    assert result == []
+
+
+def test_merge_busy_intervals_empty_input():
+    assert event_mapping.merge_busy_intervals([]) == []
+
+
+def test_merge_busy_intervals_naive_datetimes_treated_as_utc():
+    a = datetime(2026, 7, 20, 9, 0)
+    b = datetime(2026, 7, 20, 10, 0)
+    result = event_mapping.merge_busy_intervals([(a, b)])
+    assert result == [
+        (
+            datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+        )
+    ]
+
+
+# --- free-busy: extract_freebusy_periods ---
+
+
+def _add_freebusy(vfb: FreeBusy, start: datetime, end: datetime, fbtype: str) -> None:
+    vfb.add("freebusy", [(start, end)], parameters={"FBTYPE": fbtype})
+
+
+def test_extract_freebusy_periods_reads_busy_period():
+    vfb = FreeBusy()
+    start = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
+    _add_freebusy(vfb, start, end, "BUSY")
+
+    assert event_mapping.extract_freebusy_periods(vfb) == [(start, end)]
+
+
+def test_extract_freebusy_periods_excludes_free():
+    vfb = FreeBusy()
+    busy_start = datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc)
+    _add_freebusy(vfb, busy_start, datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc), "BUSY")
+    _add_freebusy(
+        vfb,
+        datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc),
+        "FREE",
+    )
+
+    periods = event_mapping.extract_freebusy_periods(vfb)
+    assert len(periods) == 1
+    assert periods[0][0] == busy_start
+
+
+def test_extract_freebusy_periods_includes_busy_tentative_and_unavailable():
+    vfb = FreeBusy()
+    _add_freebusy(
+        vfb,
+        datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+        "BUSY-TENTATIVE",
+    )
+    _add_freebusy(
+        vfb,
+        datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+        "BUSY-UNAVAILABLE",
+    )
+
+    assert len(event_mapping.extract_freebusy_periods(vfb)) == 2
+
+
+def test_extract_freebusy_periods_no_freebusy_property_is_empty():
+    vfb = FreeBusy()
+    assert event_mapping.extract_freebusy_periods(vfb) == []

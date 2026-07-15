@@ -1387,3 +1387,114 @@ class CalDavService:
                     aufgaben.append(task)
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
+
+    # ------------------------------------------------------------------
+    # Free-busy
+    # ------------------------------------------------------------------
+
+    def get_free_busy(self, von: str, bis: str, benutzer: str | None = None) -> dict[str, Any]:
+        """Return merged busy intervals in [von, bis] for the caller, or another user.
+
+        With `benutzer=None`, busy blocks are computed from every VEVENT
+        calendar the caller can see: events in range are fetched the same way
+        as `list_events` (a server-side CalDAV time-range REPORT), then
+        non-cancelled, non-transparent ones contribute a busy interval (see
+        `event_mapping.event_busy_interval`), merged and sorted (see
+        `event_mapping.merge_busy_intervals`).
+
+        With `benutzer` set, a CalDAV RFC 6638 free-busy scheduling request is
+        sent to the server (`principal.freebusy_request`, POSTing a VFREEBUSY
+        to the schedule-outbox) asking about that user - the server resolves
+        `benutzer` against its own known accounts, not this client. If the
+        server rejects the request (unknown user, scheduling disabled, ...)
+        this raises a `TaskMcpError` with a clean, actionable message.
+        """
+        start_bound = self._range_bound(von, exclusive_end=False)
+        end_bound = self._range_bound(bis, exclusive_end=True)
+        if start_bound is None or end_bound is None:
+            raise InvalidEventDataError("von and bis are required for get_free_busy.")
+
+        with self._lock:
+            if benutzer is None:
+                merged = self._own_free_busy(start_bound, end_bound)
+            else:
+                merged = self._free_busy_for_user(benutzer, start_bound, end_bound)
+
+        return {
+            "von": start_bound.isoformat(),
+            "bis": end_bound.isoformat(),
+            "benutzer": benutzer,
+            "belegt": [{"von": start.isoformat(), "bis": end.isoformat()} for start, end in merged],
+        }
+
+    def _own_free_busy(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        targets = self._event_calendars(None)
+        intervals: list[tuple[datetime, datetime]] = []
+        for name, target_calendar in targets:
+            try:
+                # `_event_calendars(None)` just freshly listed everything, so
+                # (like list_events's all-calendars branch) query the object
+                # directly rather than going through the cache-retry path.
+                objs = target_calendar.search(start=start, end=end, event=True, expand=False)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise CalendarNotFoundError(f"Calendar '{name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            for obj in objs:
+                interval = event_mapping.event_busy_interval(obj.icalendar_component)
+                if interval is not None:
+                    intervals.append(interval)
+
+        return event_mapping.merge_busy_intervals(intervals)
+
+    def _free_busy_for_user(
+        self, benutzer: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        principal = self._get_principal()
+        is_mailto = benutzer.strip().lower().startswith("mailto:")
+        address = benutzer if is_mailto else f"mailto:{benutzer}"
+        bare = address[len("mailto:") :]
+
+        try:
+            response = principal.freebusy_request(start, end, [address])
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
+
+        if not isinstance(response, dict):
+            raise TaskMcpError(
+                f"Nextcloud returned an unexpected free/busy response for '{benutzer}'."
+            )
+
+        errors = response.get("errors") or {}
+        entry = response.get(address, response.get(bare))
+        if entry is None:
+            # A single-attendee request should get back at most one non-error
+            # key; if the server echoed the recipient back in some other form
+            # (case, trailing slash, ...) this still finds it without having
+            # to guess every possible normalization.
+            other_keys = [key for key in response if key != "errors"]
+            if len(other_keys) == 1:
+                entry = response[other_keys[0]]
+
+        if entry is None:
+            detail = errors.get(address) or errors.get(bare) or next(iter(errors.values()), None)
+            message = (
+                f"Nextcloud could not provide free/busy information for '{benutzer}' "
+                "(the user may be unknown, or scheduling may be disabled on the server)."
+            )
+            if detail:
+                message += f" Server status: {detail}"
+            raise TaskMcpError(message)
+
+        try:
+            component = entry.icalendar_component
+        except Exception as exc:
+            raise _translate(exc) from exc
+
+        periods = event_mapping.extract_freebusy_periods(component)
+        return event_mapping.merge_busy_intervals(periods)

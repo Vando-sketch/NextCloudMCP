@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
-from icalendar import Event, Todo
+from icalendar import Event, FreeBusy, Todo
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
 from nextcloud_task_mcp import event_mapping, mapping
@@ -1679,3 +1679,192 @@ def test_respond_to_event_event_not_found(service, principal):
 
     with pytest.raises(EventNotFoundError):
         service.respond_to_event("Termine", "missing", "zugesagt")
+
+
+# ======================================================================
+# get_free_busy (Part B)
+# ======================================================================
+
+
+def _make_freebusy_obj(component) -> MagicMock:
+    obj = MagicMock()
+    obj.icalendar_component = component
+    return obj
+
+
+def test_get_free_busy_own_availability_aggregates_and_merges(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    busy_event = _make_vevent("event-1")
+    busy_event.add("dtend", datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc))
+    cancelled_event = _make_vevent("event-2")
+    cancelled_event.add("status", "CANCELLED")
+    event_cal.search.return_value = [
+        _make_event_obj(busy_event),
+        _make_event_obj(cancelled_event),
+    ]
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21")
+
+    assert result["benutzer"] is None
+    assert result["belegt"] == [
+        {"von": "2026-07-20T14:00:00+00:00", "bis": "2026-07-20T15:00:00+00:00"}
+    ]
+
+
+def test_get_free_busy_own_availability_queries_with_bounds(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    service.get_free_busy("2026-07-20", "2026-07-21")
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    # date-only `bis` is inclusive of the whole day, so the exclusive filter
+    # end is the start of the *next* day (same convention as list_events).
+    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert kwargs["event"] is True
+
+
+def test_get_free_busy_returns_normalized_bounds(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21")
+
+    assert result["von"] == "2026-07-20T00:00:00+00:00"
+    assert result["bis"] == "2026-07-22T00:00:00+00:00"
+
+
+def test_get_free_busy_own_availability_translates_generic_exception(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21")
+
+
+def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, principal):
+    vfb = FreeBusy()
+    vfb.add(
+        "freebusy",
+        [
+            (
+                datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+                datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+            )
+        ],
+        parameters={"FBTYPE": "BUSY"},
+    )
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[0] == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert args[2] == ["mailto:bob@example.com"]
+    assert result["benutzer"] == "bob@example.com"
+    assert result["belegt"] == [
+        {"von": "2026-07-20T09:00:00+00:00", "bis": "2026-07-20T10:00:00+00:00"}
+    ]
+
+
+def test_get_free_busy_for_other_user_accepts_mailto_prefixed_benutzer(service, principal):
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    service.get_free_busy("2026-07-20", "2026-07-21", benutzer="mailto:bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[2] == ["mailto:bob@example.com"]
+
+
+def test_get_free_busy_for_other_user_bare_key_response(service, principal):
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"bob@example.com": _make_freebusy_obj(vfb)}
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    assert result["belegt"] == []
+
+
+def test_get_free_busy_for_other_user_error_response_raises_clean_error(service, principal):
+    principal.freebusy_request.return_value = {
+        "errors": {"mailto:bob@example.com": "3.7;Invalid Calendar User"}
+    }
+
+    with pytest.raises(TaskMcpError, match="bob@example.com"):
+        service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_empty_response_raises(service, principal):
+    principal.freebusy_request.return_value = {}
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_translates_generic_exception(service, principal):
+    principal.freebusy_request.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+
+# --- occupied collection ids are dodged (Nextcloud trashbin) ---
+
+
+def test_create_task_list_retries_with_suffixed_id_when_slug_occupied(service, principal):
+    """A trashbin remnant occupying the slug URI must not block re-creation."""
+    principal.calendars.return_value = []
+    new_calendar = _make_calendar("Groceries")
+    principal.make_calendar.side_effect = [
+        caldav_error.MkcolError("405 Method Not Allowed"),
+        new_calendar,
+    ]
+
+    result = service.create_task_list("Groceries")
+
+    assert result["name"] == "Groceries"
+    assert principal.make_calendar.call_count == 2
+    _, kwargs = principal.make_calendar.call_args
+    assert kwargs["cal_id"] == "groceries-2"
+
+
+def test_create_calendar_retries_with_suffixed_id_when_slug_occupied(service, principal):
+    principal.calendars.return_value = []
+    new_calendar = _make_calendar("Termine", components=["VEVENT"])
+    principal.make_calendar.side_effect = [
+        caldav_error.MkcalendarError("409 Conflict"),
+        caldav_error.MkcalendarError("409 Conflict"),
+        new_calendar,
+    ]
+
+    result = service.create_calendar("Termine")
+
+    assert result["name"] == "Termine"
+    _, kwargs = principal.make_calendar.call_args
+    assert kwargs["cal_id"] == "termine-3"
+
+
+def test_create_task_list_gives_up_when_all_candidate_ids_occupied(service, principal):
+    principal.calendars.return_value = []
+    principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
+
+    with pytest.raises(TaskListAlreadyExistsError, match="collection id"):
+        service.create_task_list("Groceries")
+
+
+def test_translate_rate_limit_error_names_waiting_as_fix():
+    translated = _translate(
+        caldav_error.RateLimitError("RateLimitError at 'https://x/', reason ...")
+    )
+    assert isinstance(translated, TaskMcpError)
+    assert "rate-limit" in str(translated).lower() or "rate limit" in str(translated).lower()
+    assert "retry" in str(translated).lower()
+    # The raw URL/exception text must not leak into the client-facing message.
+    assert "https://x/" not in str(translated)
