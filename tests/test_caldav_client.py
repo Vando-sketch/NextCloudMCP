@@ -2173,10 +2173,14 @@ def test_list_trash_parses_items_including_deleted_at_and_type(service, dav_clie
         }
     ]
     args, _ = dav_client.request.call_args
-    url, method, _, headers = args
+    url, method, body, headers = args
     assert url == "https://cloud.example.com/dav/calendars/u/trashbin/objects/"
-    assert method == "PROPFIND"
+    # A calendar-query REPORT, not PROPFIND: Nextcloud answers a Depth-1
+    # PROPFIND on trashbin/objects/ with 501 Not Implemented (issue #13).
+    assert method == "REPORT"
     assert headers["Depth"] == "1"
+    assert "calendar-query" in body
+    assert 'comp-filter name="VCALENDAR"' in body
 
 
 def test_list_trash_missing_props_default_to_none(service, dav_client):

@@ -241,17 +241,27 @@ def _invite_propfind_body() -> str:
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
 
 
-def _trashbin_propfind_body() -> str:
-    """Build a PROPFIND body for listing trashbin objects (Nextcloud's
-    calendar-trashbin plugin, namespace `http://nextcloud.com/ns`)."""
+def _trashbin_report_body() -> str:
+    """Build a `CALDAV:calendar-query` REPORT body for listing trashbin
+    objects (Nextcloud's calendar-trashbin plugin, namespace
+    `http://nextcloud.com/ns`).
+
+    A REPORT, not a PROPFIND: Nextcloud's `DeletedCalendarObjectsCollection`
+    doesn't implement child listing, so a Depth-1 PROPFIND on `objects/` is
+    answered with 501 Not Implemented - the collection only exposes its
+    contents through calendar-query (issue #13).
+    """
     root = etree.Element(
-        _clark(_DAV_NS, "propfind"), nsmap={"d": _DAV_NS, "c": _CALDAV_NS, "nc": _NC_NS}
+        _clark(_CALDAV_NS, "calendar-query"),
+        nsmap={"d": _DAV_NS, "c": _CALDAV_NS, "nc": _NC_NS},
     )
     prop = etree.SubElement(root, _clark(_DAV_NS, "prop"))
     etree.SubElement(prop, _clark(_DAV_NS, "displayname"))
     etree.SubElement(prop, _clark(_CALDAV_NS, "calendar-data"))
     etree.SubElement(prop, _clark(_NC_NS, "deleted-at"))
     etree.SubElement(prop, _clark(_NC_NS, "calendar-uri"))
+    filter_el = etree.SubElement(root, _clark(_CALDAV_NS, "filter"))
+    etree.SubElement(filter_el, _clark(_CALDAV_NS, "comp-filter"), name="VCALENDAR")
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
 
 
@@ -1911,16 +1921,17 @@ class CalDavService:
     def list_trash(self) -> list[dict[str, Any]]:
         """List deleted calendar objects (tasks/events) in Nextcloud's trash bin.
 
-        Reads Nextcloud's calendar-trashbin plugin (PROPFIND, Depth 1, on
-        `.../trashbin/objects/`) - a non-Nextcloud CalDAV server has no such
+        Reads Nextcloud's calendar-trashbin plugin via a `calendar-query`
+        REPORT on `.../trashbin/objects/` (see `_trashbin_report_body` for
+        why not PROPFIND) - a non-Nextcloud CalDAV server has no such
         collection, which is reported as a clean "not available" error
         rather than a raw 404/405.
         """
         with self._lock:
             response = self._dav_request(
                 self._trashbin_objects_url(),
-                "PROPFIND",
-                _trashbin_propfind_body(),
+                "REPORT",
+                _trashbin_report_body(),
                 {"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
                 forbidden_message="Nextcloud denied access to the trash bin (permission denied).",
             )
