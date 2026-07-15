@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, TypeVar
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from caldav.collection import Calendar as DAVCalendar
 from caldav.collection import Principal as DAVPrincipal
@@ -173,6 +173,9 @@ _DAV_NS = "DAV:"
 _OC_NS = "http://owncloud.org/ns"
 _NC_NS = "http://nextcloud.com/ns"
 _CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
+# Apple's calendar extension namespace, used only for the (cosmetic)
+# calendar-color property Nextcloud stores under it.
+_ICAL_NS = "http://apple.com/ns/ical/"
 
 # Maps the {oc}invite-* child element found on an {oc}user share entry to
 # the German status vocabulary this server returns. Nextcloud's own server
@@ -278,6 +281,64 @@ def _trashbin_report_body() -> str:
     filter_el = etree.SubElement(root, _clark(_CALDAV_NS, "filter"))
     etree.SubElement(filter_el, _clark(_CALDAV_NS, "comp-filter"), name="VCALENDAR")
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
+
+
+def _collection_props_propfind_body() -> str:
+    """PROPFIND body requesting the per-collection properties this bridge
+    caches (resource type, display name, supported component set, color) for
+    every calendar in one Depth-1 request over the calendar-home-set.
+
+    caldav's own Depth-1 listing (`CALENDAR_LIST_PROPS`) already fetches this
+    exact set but discards everything except the display name when it rebuilds
+    its `Calendar` objects, so `get_supported_components()` and the
+    calendar-color `get_properties()` each re-issue a PROPFIND *per calendar* -
+    an O(N) round-trip cascade on every listing. Reading it once here and
+    looking values up by href (see `_fetch_collection_meta`) collapses that
+    back to a single request.
+    """
+    root = etree.Element(
+        _clark(_DAV_NS, "propfind"),
+        nsmap={"d": _DAV_NS, "c": _CALDAV_NS, "ical": _ICAL_NS},
+    )
+    prop = etree.SubElement(root, _clark(_DAV_NS, "prop"))
+    etree.SubElement(prop, _clark(_DAV_NS, "resourcetype"))
+    etree.SubElement(prop, _clark(_DAV_NS, "displayname"))
+    etree.SubElement(prop, _clark(_CALDAV_NS, "supported-calendar-component-set"))
+    etree.SubElement(prop, _clark(_ICAL_NS, "calendar-color"))
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
+
+
+def _normalize_collection_href(href: str) -> str:
+    """Path-only, unquoted, trailing-slash form of a collection href.
+
+    Lets an href from a raw multistatus response (`/remote.php/dav/...`) and a
+    caldav `Calendar.url` (a full `https://.../` URL) compare equal regardless
+    of absolute-vs-relative form or percent-encoding, so metadata parsed from
+    the batch PROPFIND can be looked up by a calendar object's URL.
+    """
+    path = urlsplit(href).path or href
+    path = unquote(path).strip()
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def _parse_supported_components(prop_el: Any) -> set[str]:
+    """Extract component names from a `supported-calendar-component-set`
+    element (its `<C:comp name="VEVENT"/>` children).
+
+    An empty set means the server advertised none, which per RFC 4791 §5.2.3
+    means "supports all components" - callers treat it as fail-open.
+    """
+    components: set[str] = set()
+    if prop_el is None:
+        return components
+    for child in prop_el:
+        if _local_name(child.tag) == "comp":
+            name = child.get("name")
+            if name:
+                components.add(name)
+    return components
 
 
 def _iter_multistatus_responses(
@@ -400,6 +461,14 @@ class CalDavService:
             username=username,
             password=password,
             timeout=timeout,
+            # Send Basic credentials pre-emptively instead of waiting for the
+            # first request to bounce off a 401 and re-issuing it with auth.
+            # Without `auth_type`, caldav starts with no auth object and only
+            # builds one from the 401 challenge, so the very first request of
+            # the process pays an extra round-trip; Nextcloud accepts Basic, so
+            # naming it up front skips that (caldav's own docs recommend this
+            # to reduce request count). One-time, not per-call.
+            auth_type="basic",
             # A5: without this, caldav 3.2.1 raises RateLimitError immediately
             # on a 429/503 response instead of backing off - a transient,
             # server-side "slow down" turns into a hard failure for every
@@ -442,6 +511,24 @@ class CalDavService:
         # call that adds attendees. Guarded by `_lock`.
         self._own_organizer_address: str | None = None
         self._own_calendar_user_addresses: list[str] | None = None
+        # Per-collection metadata (supported component set + color) keyed by
+        # normalized collection href, fetched in ONE Depth-1 PROPFIND over the
+        # calendar-home-set (`_fetch_collection_meta`) and cached for the
+        # process lifetime. This replaces caldav's per-calendar
+        # `get_supported_components()` / calendar-color `get_properties()`
+        # calls, which each cost a full PROPFIND - an O(N) round-trip cascade
+        # on every listing and every cold name resolution, which was the
+        # dominant source of per-tool-call latency. Invalidated whenever the
+        # set of collections (or a color) changes below. Guarded by `_lock`.
+        self._collection_meta: dict[str, dict[str, Any]] | None = None
+        # The resolved `principal.calendars()` list, cached per process. caldav
+        # re-runs home-set discovery *and* the calendar-list PROPFIND (2
+        # round-trips) on every `.calendars()` call and never reuses them, so
+        # every listing/resolution paid them afresh; `get_agenda` alone does it
+        # several times. Cached here and invalidated together with the metadata
+        # above whenever a collection is created/deleted/renamed (or a cached
+        # collection turns out stale mid-request). Guarded by `_lock`.
+        self._collections: list[DAVCalendar] | None = None
 
     def _get_principal(self) -> DAVPrincipal:
         with self._lock:
@@ -512,21 +599,120 @@ class CalDavService:
         # is at least something to compare ATTENDEEs against.
         return [self._get_own_organizer_address()]
 
-    @staticmethod
-    def _supports_component(calendar: DAVCalendar, component: str) -> bool:
+    def _home_set_url(self) -> Any:
+        """The calendar-home-set collection URL (`.../calendars/<user>/`).
+
+        Derived from the DAV root the same way the trashbin URLs are - a
+        Nextcloud path assumption this whole module already relies on - so
+        learning it costs no extra principal/home-set discovery round-trip.
+        """
+        return self._client.url.join(f"calendars/{self._username}/")
+
+    def _get_collection_meta(self) -> dict[str, dict[str, Any]]:
+        """The cached per-collection metadata map, fetching it on first use."""
+        with self._lock:
+            if self._collection_meta is None:
+                self._collection_meta = self._fetch_collection_meta()
+            return self._collection_meta
+
+    def _fetch_collection_meta(self) -> dict[str, dict[str, Any]]:
+        """One Depth-1 PROPFIND over the calendar-home-set, parsed into
+        `{normalized href: {"components": set, "color": str|None}}`.
+
+        Best-effort: any failure (non-Nextcloud layout, transient error,
+        unparseable response) yields an empty map rather than raising, so
+        callers fall back to the per-calendar lookup and correctness is
+        preserved - only the batching speed-up is lost for that call.
+        """
+        meta: dict[str, dict[str, Any]] = {}
+        try:
+            response = self._client.request(
+                str(self._home_set_url()),
+                "PROPFIND",
+                _collection_props_propfind_body(),
+                {"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+            )
+            for href, props in _iter_multistatus_responses(response.tree):
+                color_el = props.get(_clark(_ICAL_NS, "calendar-color"))
+                meta[_normalize_collection_href(href)] = {
+                    "components": _parse_supported_components(
+                        props.get(_clark(_CALDAV_NS, "supported-calendar-component-set"))
+                    ),
+                    "color": (
+                        color_el.text.strip() if color_el is not None and color_el.text else None
+                    ),
+                }
+        except Exception:
+            logger.debug("Batched collection-metadata PROPFIND failed", exc_info=True)
+            return {}
+        return meta
+
+    def _list_collections(self, *, fresh: bool = False) -> list[DAVCalendar]:
+        """The account's collections (`principal.calendars()`), cached per process.
+
+        Every caller used to invoke `principal.calendars()` directly, which
+        caldav answers with two PROPFINDs (calendar-home-set discovery + the
+        Depth-1 listing) that it never caches - so every listing and every
+        cold name resolution repaid them. The resolved list is stable for the
+        life of a `CalDavService` except when a collection is created/deleted/
+        renamed here (all of which invalidate the cache) or a cached
+        collection turns out stale mid-request (`_with_collection` invalidates,
+        so the retry's resolution re-fetches), so it is safe to reuse.
+        `fresh=True` forces a re-fetch for the create/rename/update conflict
+        checks, which must not decide "available" from a stale list. Guarded by
+        `_lock`.
+        """
+        with self._lock:
+            if fresh or self._collections is None:
+                try:
+                    self._collections = list(self._get_principal().calendars())
+                except TaskMcpError:
+                    raise
+                except Exception as exc:
+                    raise _translate(exc) from exc
+            return self._collections
+
+    def _invalidate_collection_caches(self) -> None:
+        """Drop the cached collection list and metadata after the collection
+        set (or a color) changes, so the next lookup re-fetches. Call under
+        `_lock`."""
+        self._collections = None
+        self._collection_meta = None
+
+    def _collection_meta_for(self, calendar: DAVCalendar) -> dict[str, Any] | None:
+        return self._get_collection_meta().get(_normalize_collection_href(str(calendar.url)))
+
+    def _supported_components(self, calendar: DAVCalendar) -> set[str]:
+        """`calendar`'s advertised component set, from the batched metadata.
+
+        Falls back to caldav's per-calendar `get_supported_components()` only
+        when the calendar isn't in the batch (e.g. the home-set PROPFIND
+        failed, or a subscription collection lives outside it), so the fast
+        path costs no request while unusual layouts still resolve correctly.
+        An empty set (nothing advertised, or the fallback failed) means
+        "supports everything" to callers.
+        """
+        meta = self._collection_meta_for(calendar)
+        if meta is not None:
+            return meta["components"]
+        try:
+            return set(calendar.get_supported_components())
+        except Exception:
+            return set()
+
+    def _supports_component(self, calendar: DAVCalendar, component: str) -> bool:
         """True if `calendar` supports `component` ("VTODO"/"VEVENT"), or can't tell.
 
         Nextcloud advertises `supported-calendar-component-set` on every
-        calendar, but a collection that doesn't (or whose PROPFIND fails,
-        e.g. an external webcal subscription with flaky props) is treated as
+        calendar, but a collection that doesn't (or whose lookup fails, e.g.
+        an external webcal subscription with flaky props) is treated as
         supporting everything - failing open here only means a name shows up
         in one listing too many, while failing closed would make an entire
-        calendar silently unreachable.
+        calendar silently unreachable. The component set is read from the
+        batched, cached metadata (see `_supported_components`) rather than a
+        per-calendar PROPFIND.
         """
-        try:
-            components = calendar.get_supported_components()
-        except Exception:
-            return True
+        components = self._supported_components(calendar)
         return not components or component in components
 
     @staticmethod
@@ -550,12 +736,7 @@ class CalDavService:
         genuinely ambiguous, so callers are told to rename rather than have
         the server silently pick one (A3).
         """
-        try:
-            calendars = self._get_principal().calendars()
-        except TaskMcpError:
-            raise
-        except Exception as exc:
-            raise _translate(exc) from exc
+        calendars = self._list_collections()
 
         matches = [
             c
@@ -602,6 +783,11 @@ class CalDavService:
             return fn(calendar)
         except caldav_error.NotFoundError:
             self._calendar_cache.pop((component, name), None)
+            # The collection list itself may be stale (the collection was
+            # deleted/renamed server-side), so drop it too - re-resolution
+            # must go back to the server for a fresh listing, not reuse the
+            # cached one that still lists the vanished collection.
+            self._invalidate_collection_caches()
             calendar = self._resolve_and_cache(name, component)
             return fn(calendar)
 
@@ -677,12 +863,7 @@ class CalDavService:
         counterpart.
         """
         with self._lock:
-            try:
-                calendars = self._get_principal().calendars()
-            except TaskMcpError:
-                raise
-            except Exception as exc:
-                raise _translate(exc) from exc
+            calendars = self._list_collections()
 
             calendars = [c for c in calendars if self._supports_component(c, "VTODO")]
             names = [calendar.get_display_name() or str(calendar.url) for calendar in calendars]
@@ -728,13 +909,10 @@ class CalDavService:
         slug = _slugify(display_name)
 
         with self._lock:
-            try:
-                principal = self._get_principal()
-                existing = principal.calendars()
-            except TaskMcpError:
-                raise
-            except Exception as exc:
-                raise _translate(exc) from exc
+            # Fresh list for the conflict check - a stale cache must not let a
+            # name that already exists slip through as "available".
+            existing = self._list_collections(fresh=True)
+            principal = self._get_principal()
 
             if any(
                 calendar.get_display_name() == display_name
@@ -755,6 +933,7 @@ class CalDavService:
             )
 
             self._calendar_cache[("VTODO", display_name)] = calendar
+            self._invalidate_collection_caches()
             return {"name": display_name, "url": str(calendar.url)}
 
     def _make_collection(
@@ -833,6 +1012,7 @@ class CalDavService:
             # with this name resolves fresh instead of reusing a deleted
             # calendar's (now-invalid) object.
             self._calendar_cache.pop(("VTODO", list_name), None)
+            self._invalidate_collection_caches()
 
     def rename_task_list(self, list_name: str, new_display_name: str) -> dict[str, str]:
         """Rename a Nextcloud task list (change its CalDAV displayname property).
@@ -859,13 +1039,7 @@ class CalDavService:
             raise InvalidTaskDataError("new_display_name is required to rename a task list.")
 
         with self._lock:
-            try:
-                principal = self._get_principal()
-                existing = principal.calendars()
-            except TaskMcpError:
-                raise
-            except Exception as exc:
-                raise _translate(exc) from exc
+            existing = self._list_collections(fresh=True)
 
             matches = [
                 c
@@ -897,6 +1071,10 @@ class CalDavService:
 
             self._calendar_cache.pop(("VTODO", list_name), None)
             self._calendar_cache[("VTODO", new_display_name)] = calendar
+            # The cached collection list holds this object with its now-stale
+            # display name, so drop it (component/color metadata is keyed by
+            # href and unaffected, but is cleared together for simplicity).
+            self._invalidate_collection_caches()
             return {"name": new_display_name, "url": str(calendar.url)}
 
     def list_tasks(
@@ -1066,12 +1244,7 @@ class CalDavService:
         if calendar_names is not None:
             return [(name, self._get_collection(name, "VEVENT")) for name in calendar_names]
 
-        try:
-            calendars = self._get_principal().calendars()
-        except TaskMcpError:
-            raise
-        except Exception as exc:
-            raise _translate(exc) from exc
+        calendars = self._list_collections()
         result: list[tuple[str, DAVCalendar]] = []
         for calendar in calendars:
             if not self._supports_component(calendar, "VEVENT"):
@@ -1088,37 +1261,36 @@ class CalDavService:
         so a mixed VEVENT+VTODO collection is recognizable as both.
         """
         with self._lock:
-            try:
-                calendars = self._get_principal().calendars()
-            except TaskMcpError:
-                raise
-            except Exception as exc:
-                raise _translate(exc) from exc
+            calendars = self._list_collections()
 
             result: list[dict[str, Any]] = []
             for calendar in calendars:
-                try:
-                    components = list(calendar.get_supported_components())
-                except Exception:
-                    components = []
+                components = self._supported_components(calendar)
                 if components and "VEVENT" not in components:
                     continue
                 name = calendar.get_display_name() or str(calendar.url)
-                # The color property is cosmetic; a calendar whose PROPFIND
-                # for it fails should still be listed rather than error out.
+                # Component set and color both come from the batched metadata
+                # (one PROPFIND for the whole home-set). Only a calendar
+                # missing from that batch falls back to a per-calendar
+                # color PROPFIND; the color is cosmetic, so a failure there
+                # just yields no color rather than erroring out.
                 farbe: str | None
-                try:
-                    props = calendar.get_properties([ical_elements.CalendarColor()])
-                    raw = props.get(ical_elements.CalendarColor.tag)
-                    farbe = str(raw) if raw else None
-                except Exception:
-                    farbe = None
+                meta = self._collection_meta_for(calendar)
+                if meta is not None:
+                    farbe = meta["color"]
+                else:
+                    try:
+                        props = calendar.get_properties([ical_elements.CalendarColor()])
+                        raw = props.get(ical_elements.CalendarColor.tag)
+                        farbe = str(raw) if raw else None
+                    except Exception:
+                        farbe = None
                 result.append(
                     {
                         "name": name,
                         "url": str(calendar.url),
                         "farbe": farbe,
-                        "komponenten": [str(c) for c in components],
+                        "komponenten": sorted(components),
                     }
                 )
                 if sum(1 for entry in result if entry["name"] == name) == 1:
@@ -1150,13 +1322,8 @@ class CalDavService:
         slug = _slugify(display_name)
 
         with self._lock:
-            try:
-                principal = self._get_principal()
-                existing = principal.calendars()
-            except TaskMcpError:
-                raise
-            except Exception as exc:
-                raise _translate(exc) from exc
+            existing = self._list_collections(fresh=True)
+            principal = self._get_principal()
 
             if any(
                 calendar.get_display_name() == display_name
@@ -1183,6 +1350,7 @@ class CalDavService:
                     raise _translate(exc) from exc
 
             self._calendar_cache[("VEVENT", display_name)] = calendar
+            self._invalidate_collection_caches()
             return {"name": display_name, "url": str(calendar.url), "farbe": farbe}
 
     def delete_calendar(self, calendar_name: str) -> None:
@@ -1206,6 +1374,7 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
             self._calendar_cache.pop(("VEVENT", calendar_name), None)
+            self._invalidate_collection_caches()
 
     def update_calendar(
         self,
@@ -1230,12 +1399,7 @@ class CalDavService:
             )
 
         with self._lock:
-            try:
-                existing = self._get_principal().calendars()
-            except TaskMcpError:
-                raise
-            except Exception as exc:
-                raise _translate(exc) from exc
+            existing = self._list_collections(fresh=True)
 
             matches = [
                 c
@@ -1278,6 +1442,8 @@ class CalDavService:
             final_name = new_display_name if new_display_name is not None else calendar_name
             self._calendar_cache.pop(("VEVENT", calendar_name), None)
             self._calendar_cache[("VEVENT", final_name)] = calendar
+            # A color change is reflected in the cached metadata, so drop it.
+            self._invalidate_collection_caches()
             return {"name": final_name, "url": str(calendar.url), "farbe": farbe}
 
     def list_events(

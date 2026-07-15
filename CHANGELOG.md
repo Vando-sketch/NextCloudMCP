@@ -43,6 +43,33 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Fixed
 
+- **Every tool call was slow (3-10 s, even simple reads): a per-call cascade of
+  sequential CalDAV round-trips is now cached down to a handful.** Two
+  compounding causes, both measured live against a real Nextcloud (6
+  collections):
+  - *Discarded-then-refetched properties.* For each collection,
+    `_supports_component` went through caldav's `get_supported_components()`,
+    and `list_calendars` additionally through a per-calendar color
+    `get_properties()` - each its own PROPFIND, even though the calendar
+    listing already returned both. So a listing cost `2 + N` (`list_task_lists`)
+    or `2 + 2·N` (`list_calendars`) PROPFINDs. The
+    `supported-calendar-component-set` and color are now read **once** via a
+    single Depth-1 PROPFIND over the calendar-home-set and looked up per
+    calendar with no further round-trips (a collection absent from that batch,
+    e.g. an external subscription, still falls back to the per-calendar lookup).
+  - *Never-cached calendar list.* Every listing and cold name resolution
+    called `principal.calendars()`, which caldav answers with two PROPFINDs it
+    never reuses; `get_agenda` did it several times. The resolved list is now
+    cached for the process lifetime.
+  Both caches are invalidated together whenever a collection is
+  created/deleted/renamed or a color changes (and when a cached collection
+  turns out stale mid-request). Basic credentials are also sent pre-emptively
+  (`auth_type="basic"`), dropping the one-time 401-negotiation round-trip.
+  Net effect (measured, 6 collections): `list_task_lists`/`list_calendars`
+  **14/20 HTTP requests → 0** once warm (fully cached); `list_events` over all
+  calendars `20 → 6` (just the real per-calendar data REPORTs); `get_agenda`
+  `52 → 24`. The remaining requests are unavoidable CalDAV data queries (one
+  REPORT per calendar), no longer per-call discovery overhead.
 - **`list_trash` no longer fails with HTTP 501 against real Nextcloud**
   (#13). Nextcloud's `DeletedCalendarObjectsCollection` doesn't support
   listing children via PROPFIND - a Depth-1 PROPFIND on
