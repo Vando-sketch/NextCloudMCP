@@ -166,6 +166,7 @@ class CalDavService:
             rate_limit_default_sleep=5,
             rate_limit_max_sleep=60,
         )
+        self._username = username
         self._principal: DAVPrincipal | None = None
         # A1 moves CalDavService calls onto worker threads (via
         # anyio.to_thread.run_sync in server.py) so they no longer block the
@@ -186,6 +187,13 @@ class CalDavService:
         # name may legitimately exist once per kind. Guarded by `_lock`, like
         # everything else that touches CalDAV state.
         self._calendar_cache: dict[tuple[str, str], DAVCalendar] = {}
+        # Lazily discovered and cached like the calendar cache above (A3's
+        # reasoning applies equally here): the caller's own address(es) don't
+        # change during the lifetime of one CalDavService, so there is no
+        # reason to re-run the principal PROPFIND(s) on every create_event
+        # call that adds attendees. Guarded by `_lock`.
+        self._own_organizer_address: str | None = None
+        self._own_calendar_user_addresses: list[str] | None = None
 
     def _get_principal(self) -> DAVPrincipal:
         with self._lock:
@@ -195,6 +203,66 @@ class CalDavService:
                 except Exception as exc:
                     raise _translate(exc) from exc
             return self._principal
+
+    def _get_own_organizer_address(self) -> str:
+        """The caller's own "mailto:..." address, used to fill in ORGANIZER
+        the first time attendees are added to an event (see
+        `event_mapping.apply_event_fields`'s `own_organizer` parameter).
+        """
+        with self._lock:
+            if self._own_organizer_address is None:
+                self._own_organizer_address = self._discover_own_organizer_address()
+            return self._own_organizer_address
+
+    def _discover_own_organizer_address(self) -> str:
+        """Best-effort discovery of the caller's own scheduling address.
+
+        Tries `principal.get_vcal_address()` first (the caldav library's own
+        helper for this, built on calendar-user-address-set), then falls back
+        to the mailto entries of `principal.calendar_user_address_set()`
+        directly. Both are RFC 6638 properties that a CalDAV server may not
+        expose (or may expose empty) - if neither yields anything, this falls
+        back to a `mailto:<username>` guess rather than failing outright,
+        since the caller's own username is at least a plausible address on
+        most Nextcloud instances (username == email is common), and an event
+        can still be created without a perfect ORGANIZER.
+        """
+        principal = self._get_principal()
+        try:
+            address = str(principal.get_vcal_address()).strip()
+            if address:
+                return address
+        except Exception:
+            logger.debug("principal.get_vcal_address() unavailable", exc_info=True)
+        try:
+            for addr in principal.calendar_user_address_set() or []:
+                if addr and str(addr).strip().lower().startswith("mailto:"):
+                    return str(addr).strip()
+        except Exception:
+            logger.debug("principal.calendar_user_address_set() unavailable", exc_info=True)
+        return f"mailto:{self._username}"
+
+    def _get_own_calendar_user_addresses(self) -> list[str]:
+        """Every CalDAV calendar-user-address of the caller (RFC 6638), used by
+        `respond_to_event` to find "my" ATTENDEE entry on an event.
+        """
+        with self._lock:
+            if self._own_calendar_user_addresses is None:
+                self._own_calendar_user_addresses = self._discover_own_calendar_user_addresses()
+            return self._own_calendar_user_addresses
+
+    def _discover_own_calendar_user_addresses(self) -> list[str]:
+        principal = self._get_principal()
+        try:
+            addresses = [str(a).strip() for a in (principal.calendar_user_address_set() or []) if a]
+            if addresses:
+                return addresses
+        except Exception:
+            logger.debug("principal.calendar_user_address_set() unavailable", exc_info=True)
+        # No usable address set from the server - the single best-effort
+        # organizer address (which has its own mailto:<username> fallback)
+        # is at least something to compare ATTENDEEs against.
+        return [self._get_own_organizer_address()]
 
     @staticmethod
     def _supports_component(calendar: DAVCalendar, component: str) -> bool:
@@ -995,17 +1063,25 @@ class CalDavService:
             return parsed
 
     def create_event(self, calendar_name: str, fields: event_mapping.EventFields) -> str:
-        """Create a new event in the given calendar and return its UID."""
+        """Create a new event in the given calendar and return its UID.
+
+        If `fields.teilnehmer` adds attendees, ORGANIZER is set to the
+        caller's own address (discovered lazily, see
+        `_get_own_organizer_address`) - Nextcloud's CalDAV server then does
+        server-side scheduling (iMIP invitation mails) once the event is
+        saved with both ORGANIZER and ATTENDEEs present.
+        """
         if fields.titel is None:
             raise InvalidEventDataError("titel is required to create an event.")
         if fields.start is None:
             raise InvalidEventDataError("start is required to create an event.")
         with self._lock:
+            own_organizer = self._get_own_organizer_address() if fields.teilnehmer else None
             new_uid = str(uuid.uuid4())
             event = Event()
             event.add("uid", new_uid)
             event.add("dtstamp", datetime.now(timezone.utc))
-            event_mapping.apply_event_fields(event, fields)
+            event_mapping.apply_event_fields(event, fields, own_organizer=own_organizer)
 
             vcal = Calendar()
             vcal.add("prodid", "-//nextcloud-task-mcp//EN")
@@ -1029,12 +1105,58 @@ class CalDavService:
     def update_event(
         self, calendar_name: str, event_uid: str, fields: event_mapping.EventFields
     ) -> None:
-        """Update only the given (non-None) fields of an existing event."""
+        """Update only the given (non-None) fields of an existing event.
+
+        Same ORGANIZER-on-first-attendee and server-side-scheduling behavior
+        as `create_event` when `fields.teilnehmer` sets attendees.
+        """
         with self._lock:
+            own_organizer = self._get_own_organizer_address() if fields.teilnehmer else None
 
             def op(calendar: DAVCalendar):
                 event_obj = calendar.event_by_uid(event_uid)
-                event_mapping.apply_event_fields(event_obj.icalendar_component, fields)
+                event_mapping.apply_event_fields(
+                    event_obj.icalendar_component, fields, own_organizer=own_organizer
+                )
+                event_obj.save()
+
+            try:
+                self._with_collection(calendar_name, "VEVENT", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise EventNotFoundError(f"Event '{event_uid}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+    def respond_to_event(
+        self,
+        calendar_name: str,
+        event_uid: str,
+        antwort: str,
+        kommentar: str | None = None,
+    ) -> None:
+        """Set the caller's own PARTSTAT on an event they were invited to (RSVP reply).
+
+        The own ATTENDEE entry is found by comparing the event's ATTENDEEs
+        against the caller's own CalDAV calendar-user-addresses (case-
+        insensitive, "mailto:" ignored on both sides) - see
+        `_get_own_calendar_user_addresses`. Raises `InvalidEventDataError` if
+        none match (the caller isn't an attendee of this event). Saves the
+        event afterwards; Nextcloud's CalDAV server then propagates the reply
+        to the organizer as an iMIP/iTIP REPLY, the same server-side
+        scheduling mechanism that sends the original invitations (see
+        create_event/update_event).
+        """
+        partstat = event_mapping.response_label_to_partstat(antwort)
+        with self._lock:
+            own_addresses = self._get_own_calendar_user_addresses()
+
+            def op(calendar: DAVCalendar):
+                event_obj = calendar.event_by_uid(event_uid)
+                event_mapping.apply_own_attendee_response(
+                    event_obj.icalendar_component, own_addresses, partstat, kommentar
+                )
                 event_obj.save()
 
             try:

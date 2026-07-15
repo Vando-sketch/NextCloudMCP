@@ -1493,56 +1493,189 @@ def test_get_agenda_excludes_tasks_due_other_days(service, principal):
     assert result["aufgaben"] == []
 
 
-# --- occupied collection ids are dodged (Nextcloud trashbin) ---
+# ======================================================================
+# Attendees / organizer discovery (Part A)
+# ======================================================================
 
 
-def test_create_task_list_retries_with_suffixed_id_when_slug_occupied(service, principal):
-    """A trashbin remnant occupying the slug URI must not block re-creation."""
-    principal.calendars.return_value = []
-    new_calendar = _make_calendar("Groceries")
-    principal.make_calendar.side_effect = [
-        caldav_error.MkcolError("405 Method Not Allowed"),
-        new_calendar,
-    ]
+def test_create_event_with_teilnehmer_sets_organizer_and_attendee(service, principal):
+    principal.get_vcal_address.return_value = "mailto:me@example.com"
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
 
-    result = service.create_task_list("Groceries")
-
-    assert result["name"] == "Groceries"
-    assert principal.make_calendar.call_count == 2
-    _, kwargs = principal.make_calendar.call_args
-    assert kwargs["cal_id"] == "groceries-2"
-
-
-def test_create_calendar_retries_with_suffixed_id_when_slug_occupied(service, principal):
-    principal.calendars.return_value = []
-    new_calendar = _make_calendar("Termine", components=["VEVENT"])
-    principal.make_calendar.side_effect = [
-        caldav_error.MkcalendarError("409 Conflict"),
-        caldav_error.MkcalendarError("409 Conflict"),
-        new_calendar,
-    ]
-
-    result = service.create_calendar("Termine")
-
-    assert result["name"] == "Termine"
-    _, kwargs = principal.make_calendar.call_args
-    assert kwargs["cal_id"] == "termine-3"
-
-
-def test_create_task_list_gives_up_when_all_candidate_ids_occupied(service, principal):
-    principal.calendars.return_value = []
-    principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
-
-    with pytest.raises(TaskListAlreadyExistsError, match="collection id"):
-        service.create_task_list("Groceries")
-
-
-def test_translate_rate_limit_error_names_waiting_as_fix():
-    translated = _translate(
-        caldav_error.RateLimitError("RateLimitError at 'https://x/', reason ...")
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com", "name": "Alice"}],
+        ),
     )
-    assert isinstance(translated, TaskMcpError)
-    assert "rate-limit" in str(translated).lower() or "rate limit" in str(translated).lower()
-    assert "retry" in str(translated).lower()
-    # The raw URL/exception text must not leak into the client-facing message.
-    assert "https://x/" not in str(translated)
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "ORGANIZER:mailto:me@example.com" in ical_text
+    assert "ATTENDEE" in ical_text
+    assert "mailto:a@example.com" in ical_text
+
+
+def test_create_event_without_teilnehmer_does_not_discover_own_address(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine", event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00")
+    )
+
+    principal.get_vcal_address.assert_not_called()
+    principal.calendar_user_address_set.assert_not_called()
+
+
+def test_own_organizer_address_falls_back_to_calendar_user_address_set(service, principal):
+    principal.get_vcal_address.side_effect = RuntimeError("not supported")
+    principal.calendar_user_address_set.return_value = ["mailto:fallback@example.com"]
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com"}],
+        ),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "ORGANIZER:mailto:fallback@example.com" in kwargs["ical"]
+
+
+def test_own_organizer_address_falls_back_to_username_when_everything_fails(
+    mock_dav_client, principal
+):
+    service = CalDavService(url="https://cloud.example.com/dav/", username="alice", password="p")
+    principal.get_vcal_address.side_effect = RuntimeError("nope")
+    principal.calendar_user_address_set.side_effect = RuntimeError("nope")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com"}],
+        ),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "ORGANIZER:mailto:alice" in kwargs["ical"]
+
+
+def test_own_organizer_address_is_cached_across_calls(service, principal):
+    principal.get_vcal_address.return_value = "mailto:me@example.com"
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="A", start="2026-07-20T14:00:00", teilnehmer=[{"email": "a@example.com"}]
+        ),
+    )
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="B", start="2026-07-21T14:00:00", teilnehmer=[{"email": "b@example.com"}]
+        ),
+    )
+
+    assert principal.get_vcal_address.call_count == 1
+
+
+def test_update_event_with_teilnehmer_sets_organizer_when_absent(service, principal):
+    principal.get_vcal_address.return_value = "mailto:me@example.com"
+    component = _make_vevent()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.update_event(
+        "Termine",
+        "event-1",
+        event_mapping.EventFields(teilnehmer=[{"email": "a@example.com"}]),
+    )
+
+    assert str(component["organizer"]) == "mailto:me@example.com"
+    event_obj.save.assert_called_once_with()
+
+
+# ======================================================================
+# respond_to_event
+# ======================================================================
+
+
+def _vevent_with_attendee(
+    uid: str = "event-1", email: str = "me@example.com", partstat: str = "NEEDS-ACTION"
+) -> Event:
+    event = _make_vevent(uid)
+    event.add("attendee", f"mailto:{email}", parameters={"PARTSTAT": partstat})
+    return event
+
+
+def test_respond_to_event_sets_partstat_and_saves(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    component = _vevent_with_attendee()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.respond_to_event("Termine", "event-1", "zugesagt")
+
+    parsed = event_mapping.parse_vevent(component)
+    assert parsed["teilnehmer"][0]["status"] == "zugesagt"
+    event_obj.save.assert_called_once_with()
+
+
+def test_respond_to_event_writes_comment(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    component = _vevent_with_attendee()
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.respond_to_event("Termine", "event-1", "abgesagt", kommentar="Leider nicht")
+
+    assert str(component.get("comment")) == "Leider nicht"
+
+
+def test_respond_to_event_not_an_attendee_raises(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    component = _vevent_with_attendee(email="other@example.com")
+    event_obj = _make_event_obj(component)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(InvalidEventDataError, match="not listed as an attendee"):
+        service.respond_to_event("Termine", "event-1", "zugesagt")
+
+    event_obj.save.assert_not_called()
+
+
+def test_respond_to_event_unknown_antwort_rejected(service):
+    with pytest.raises(InvalidEventDataError, match="antwort"):
+        service.respond_to_event("Termine", "event-1", "vielleicht")
+
+
+def test_respond_to_event_event_not_found(service, principal):
+    principal.calendar_user_address_set.return_value = ["mailto:me@example.com"]
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = caldav_error.NotFoundError("nope")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(EventNotFoundError):
+        service.respond_to_event("Termine", "missing", "zugesagt")

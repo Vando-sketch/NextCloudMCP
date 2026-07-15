@@ -25,9 +25,9 @@ def _dt(prop: object) -> object:
     return prop.dt
 
 
-def _apply(event, **kwargs) -> None:
+def _apply(event, own_organizer=None, **kwargs) -> None:
     """Convenience wrapper: build an EventFields from kwargs and apply it."""
-    event_mapping.apply_event_fields(event, EventFields(**kwargs))
+    event_mapping.apply_event_fields(event, EventFields(**kwargs), own_organizer=own_organizer)
 
 
 def test_apply_and_parse_round_trip():
@@ -313,6 +313,249 @@ def test_related_to_child_reltype_parses_as_voraussetzung():
     event.add("related-to", "task-100", parameters={"RELTYPE": "CHILD"})
     parsed = event_mapping.parse_vevent(event)
     assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-100", "beziehung": "voraussetzung"}]
+
+
+# --- attendees / organizer (teilnehmer / organisator) ---
+
+
+def test_no_organizer_or_attendees_parses_as_empty():
+    event = _new_event()
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["organisator"] is None
+    assert parsed["teilnehmer"] == []
+
+
+def test_teilnehmer_round_trip_sets_organizer_and_attendees():
+    event = _new_event()
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        teilnehmer=[
+            {"email": "a@example.com", "name": "Alice"},
+            {"email": "b@example.com", "rolle": "optional", "rsvp": False},
+        ],
+        own_organizer="mailto:me@example.com",
+    )
+    parsed = event_mapping.parse_vevent(event)
+
+    assert parsed["organisator"] == {"email": "me@example.com", "name": None}
+    assert parsed["teilnehmer"] == [
+        {
+            "email": "a@example.com",
+            "name": "Alice",
+            "status": "ausstehend",
+            "rolle": "erforderlich",
+            "rsvp": True,
+        },
+        {
+            "email": "b@example.com",
+            "name": None,
+            "status": "ausstehend",
+            "rolle": "optional",
+            "rsvp": False,
+        },
+    ]
+
+
+def test_teilnehmer_without_own_organizer_leaves_organizer_unset():
+    """event_mapping makes no network calls; without an own_organizer supplied
+    (the pure-unit-test case), ORGANIZER is simply left unset rather than
+    guessed at."""
+    event = _new_event()
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        teilnehmer=[{"email": "a@example.com"}],
+    )
+    assert "organizer" not in event
+    assert event_mapping.parse_vevent(event)["organisator"] is None
+
+
+def test_teilnehmer_does_not_overwrite_existing_organizer():
+    event = _new_event()
+    event.add("organizer", "mailto:existing@example.com")
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        teilnehmer=[{"email": "a@example.com"}],
+        own_organizer="mailto:me@example.com",
+    )
+    assert event_mapping.parse_vevent(event)["organisator"] == {
+        "email": "existing@example.com",
+        "name": None,
+    }
+
+
+def test_teilnehmer_replaces_instead_of_appending():
+    event = _new_event()
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        teilnehmer=[{"email": "a@example.com"}],
+        own_organizer="mailto:me@example.com",
+    )
+    _apply(event, teilnehmer=[{"email": "b@example.com"}])
+    parsed = event_mapping.parse_vevent(event)
+    assert [t["email"] for t in parsed["teilnehmer"]] == ["b@example.com"]
+
+
+def test_teilnehmer_missing_email_rejected():
+    with pytest.raises(InvalidEventDataError, match="email"):
+        _apply(
+            _new_event(),
+            titel="T",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"name": "Alice"}],
+        )
+
+
+def test_teilnehmer_unknown_rolle_rejected():
+    with pytest.raises(InvalidEventDataError, match="rolle"):
+        _apply(
+            _new_event(),
+            titel="T",
+            start="2026-07-20T14:00:00",
+            teilnehmer=[{"email": "a@example.com", "rolle": "irgendwas"}],
+        )
+
+
+def test_teilnehmer_clear_removes_attendees_and_organizer():
+    event = _new_event()
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        teilnehmer=[{"email": "a@example.com"}],
+        own_organizer="mailto:me@example.com",
+    )
+    assert "attendee" in event
+    assert "organizer" in event
+
+    _apply(event, clear=("teilnehmer",))
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["teilnehmer"] == []
+    assert parsed["organisator"] is None
+    assert "attendee" not in event
+    assert "organizer" not in event
+
+
+def test_teilnehmer_clear_and_set_conflict_rejected():
+    with pytest.raises(InvalidEventDataError, match="both set and clear"):
+        _apply(
+            _new_event(),
+            teilnehmer=[{"email": "a@example.com"}],
+            clear=("teilnehmer",),
+        )
+
+
+@pytest.mark.parametrize(
+    ("ical_value", "label"),
+    [
+        ("NEEDS-ACTION", "ausstehend"),
+        ("ACCEPTED", "zugesagt"),
+        ("DECLINED", "abgesagt"),
+        ("TENTATIVE", "vorläufig"),
+        ("DELEGATED", "delegiert"),
+    ],
+)
+def test_partstat_label_mapping(ical_value, label):
+    assert event_mapping.ical_partstat_to_label(ical_value) == label
+
+
+def test_partstat_missing_defaults_to_ausstehend():
+    assert event_mapping.ical_partstat_to_label(None) == "ausstehend"
+
+
+def test_partstat_unknown_value_passes_through_lowercased():
+    assert event_mapping.ical_partstat_to_label("X-CUSTOM") == "x-custom"
+
+
+@pytest.mark.parametrize(
+    ("ical_value", "label"),
+    [
+        ("CHAIR", "leitung"),
+        ("REQ-PARTICIPANT", "erforderlich"),
+        ("OPT-PARTICIPANT", "optional"),
+        ("NON-PARTICIPANT", "keine-teilnahme"),
+    ],
+)
+def test_role_label_mapping(ical_value, label):
+    assert event_mapping.ical_role_to_label(ical_value) == label
+
+
+def test_role_missing_defaults_to_erforderlich():
+    assert event_mapping.ical_role_to_label(None) == "erforderlich"
+
+
+def test_role_unknown_value_passes_through_lowercased():
+    assert event_mapping.ical_role_to_label("X-WEIRD") == "x-weird"
+
+
+def test_response_label_to_partstat_valid_values():
+    assert event_mapping.response_label_to_partstat("zugesagt") == "ACCEPTED"
+    assert event_mapping.response_label_to_partstat("abgesagt") == "DECLINED"
+    assert event_mapping.response_label_to_partstat("vorläufig") == "TENTATIVE"
+
+
+def test_response_label_to_partstat_rejects_ausstehend():
+    """ausstehend/delegiert are valid PARTSTAT read-labels but not valid
+    respond_to_event replies - you can't RSVP with "no reply yet"."""
+    with pytest.raises(InvalidEventDataError, match="antwort"):
+        event_mapping.response_label_to_partstat("ausstehend")
+
+
+# --- respond_to_event's pure counterpart: apply_own_attendee_response ---
+
+
+def test_apply_own_attendee_response_sets_partstat():
+    event = _new_event()
+    event.add("attendee", "mailto:me@example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
+    event.add("attendee", "mailto:other@example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
+
+    event_mapping.apply_own_attendee_response(event, ["mailto:me@example.com"], "ACCEPTED")
+
+    parsed = event_mapping.parse_vevent(event)
+    statuses = {t["email"]: t["status"] for t in parsed["teilnehmer"]}
+    assert statuses == {"me@example.com": "zugesagt", "other@example.com": "ausstehend"}
+
+
+def test_apply_own_attendee_response_matches_case_insensitively_and_ignores_mailto():
+    event = _new_event()
+    event.add("attendee", "mailto:Me@Example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
+
+    event_mapping.apply_own_attendee_response(event, ["me@example.com"], "DECLINED")
+
+    assert event_mapping.parse_vevent(event)["teilnehmer"][0]["status"] == "abgesagt"
+
+
+def test_apply_own_attendee_response_writes_comment():
+    event = _new_event()
+    event.add("attendee", "mailto:me@example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
+
+    event_mapping.apply_own_attendee_response(
+        event, ["mailto:me@example.com"], "TENTATIVE", comment="Vielleicht"
+    )
+
+    assert str(event.get("comment")) == "Vielleicht"
+
+
+def test_apply_own_attendee_response_not_an_attendee_raises():
+    event = _new_event()
+    event.add("attendee", "mailto:other@example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
+
+    with pytest.raises(InvalidEventDataError, match="not listed as an attendee"):
+        event_mapping.apply_own_attendee_response(event, ["mailto:me@example.com"], "ACCEPTED")
+
+
+def test_apply_own_attendee_response_no_attendees_at_all_raises():
+    event = _new_event()
+
+    with pytest.raises(InvalidEventDataError, match="not listed as an attendee"):
+        event_mapping.apply_own_attendee_response(event, ["mailto:me@example.com"], "ACCEPTED")
 
 
 # --- parse edge cases ---
