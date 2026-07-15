@@ -19,6 +19,7 @@ Values for enum-like fields:
 | `antwort` (`respond_to_event`) | `"zugesagt"`, `"abgesagt"`, `"vorläufig"` |
 | `typ` (`share_calendar`/`list_calendar_shares`) | `"benutzer"`, `"gruppe"` |
 | `status` (`list_calendar_shares`) | `"akzeptiert"`, `"ausstehend"`, `"abgelehnt"`, `"ungueltig"`, `"geloescht"`, or a raw lowercased status the server reported |
+| `typ` (`list_trash`) | `"aufgabe"`, `"termin"`, or `null` |
 
 Dates are ISO 8601 strings. Two rules apply everywhere a date/datetime is
 accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
@@ -670,6 +671,48 @@ instead of being dropped.
 
 ---
 
+## Trash bin
+
+Nextcloud-specific `calendar-trashbin` DAV plugin — deleting a task or event
+(`delete_task`/`delete_event`, or deleting a whole list/calendar) moves it
+here rather than purging it immediately. There is deliberately no tool to
+empty the trash or permanently delete an item; only listing and restoring.
+
+### `list_trash()`
+
+No parameters. Returns every deleted task/event still in the trash bin:
+
+```json
+[
+  {
+    "id": "42.ics",
+    "titel": "Einkaufen",
+    "typ": "aufgabe",
+    "kalender": "personal",
+    "geloescht_am": "2026-07-10T12:00:00+00:00"
+  }
+]
+```
+
+`id` is opaque — pass it to `restore_from_trash` verbatim. `titel`/`typ` are
+derived from the deleted item's own data and are `null` if that can't be
+read; `kalender` is the original calendar's URI if the server reports it, or
+`null`. On a server without the trashbin plugin (non-Nextcloud), this fails
+with a clean "trash bin not available on this server" error.
+
+### `restore_from_trash(id)`
+
+Restores a deleted task/event to its original calendar.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | string | yes | Trash item id, from `list_trash`'s `"id"` field |
+
+Returns `{"id": ...}` on success. Fails with a clean error if `id` isn't
+currently in the trash bin (already restored, or never existed).
+
+---
+
 ## Errors
 
 All failures come back as short, single-line MCP tool errors, for example:
@@ -717,6 +760,9 @@ All failures come back as short, single-line MCP tool errors, for example:
   isn't a real Nextcloud user/group id.
 - `Nextcloud denied sharing 'Privat' with 'bob' (permission denied, or the sharing
   backend is disabled).`
+- `The trash bin is not available on this server.` — the server isn't Nextcloud, or
+  doesn't have the calendar-trashbin plugin.
+- `Trash item '42.ics' was not found in the trash bin.` — already restored, or a bad id.
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).

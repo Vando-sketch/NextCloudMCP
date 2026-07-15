@@ -2120,3 +2120,185 @@ def test_list_calendar_shares_unexpected_status_raises_clean_error(service, prin
 
     with pytest.raises(TaskMcpError, match="unexpected error"):
         service.list_calendar_shares("Privat")
+
+
+# ======================================================================
+# Trash bin (Nextcloud calendar-trashbin DAV plugin)
+# ======================================================================
+
+
+_TRASHED_TODO_ICS = (
+    "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VTODO\nUID:t1\nSUMMARY:Einkaufen\n"
+    "END:VTODO\nEND:VCALENDAR\n"
+)
+
+_TRASHBIN_XML = f"""<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/</d:href>
+    <d:propstat>
+      <d:prop/>
+      <d:status>HTTP/1.1 404 Not Found</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/42.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <nc:deleted-at>1752000000</nc:deleted-at>
+        <nc:calendar-uri>personal</nc:calendar-uri>
+        <c:calendar-data>{_TRASHED_TODO_ICS}</c:calendar-data>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+
+
+def test_list_trash_parses_items_including_deleted_at_and_type(service, dav_client):
+    dav_client.request.return_value = _dav_response(207, _TRASHBIN_XML)
+
+    result = service.list_trash()
+
+    assert result == [
+        {
+            "id": "42.ics",
+            "titel": "Einkaufen",
+            "typ": "aufgabe",
+            "kalender": "personal",
+            "geloescht_am": datetime.fromtimestamp(1752000000, tz=timezone.utc).isoformat(),
+        }
+    ]
+    args, _ = dav_client.request.call_args
+    url, method, _, headers = args
+    assert url == "https://cloud.example.com/dav/calendars/u/trashbin/objects/"
+    assert method == "PROPFIND"
+    assert headers["Depth"] == "1"
+
+
+def test_list_trash_missing_props_default_to_none(service, dav_client):
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/7.ics</d:href>
+    <d:propstat>
+      <d:prop/>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_trash()
+
+    assert result == [
+        {"id": "7.ics", "titel": None, "typ": None, "kalender": None, "geloescht_am": None}
+    ]
+
+
+def test_list_trash_falls_back_to_displayname_when_no_calendar_data(service, dav_client):
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/8.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>Einkaufen (trashed)</d:displayname>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_trash()
+
+    assert result[0]["titel"] == "Einkaufen (trashed)"
+    assert result[0]["typ"] is None
+
+
+def test_list_trash_deleted_at_accepts_iso8601_too(service, dav_client):
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/9.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <nc:deleted-at>2026-07-10T12:00:00+00:00</nc:deleted-at>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_trash()
+
+    assert result[0]["geloescht_am"] == "2026-07-10T12:00:00+00:00"
+
+
+def test_list_trash_not_available_translates_404_to_clean_error(service, dav_client):
+    dav_client.request.return_value = _dav_response(404)
+
+    with pytest.raises(TaskMcpError, match="not available on this server"):
+        service.list_trash()
+
+
+def test_list_trash_405_also_translates_to_not_available(service, dav_client):
+    dav_client.request.return_value = _dav_response(405)
+
+    with pytest.raises(TaskMcpError, match="not available on this server"):
+        service.list_trash()
+
+
+def test_list_trash_unexpected_status_raises_clean_error(service, dav_client):
+    dav_client.request.return_value = _dav_response(500)
+
+    with pytest.raises(TaskMcpError, match="unexpected error"):
+        service.list_trash()
+
+
+def test_restore_from_trash_moves_with_destination_header(service, dav_client):
+    dav_client.request.return_value = _dav_response(204)
+
+    result = service.restore_from_trash("42.ics")
+
+    assert result is None
+    args, _ = dav_client.request.call_args
+    url, method, _, headers = args
+    assert url == "https://cloud.example.com/dav/calendars/u/trashbin/objects/42.ics"
+    assert method == "MOVE"
+    assert (
+        headers["Destination"]
+        == "https://cloud.example.com/dav/calendars/u/trashbin/restore/42.ics"
+    )
+
+
+def test_restore_from_trash_not_found_raises_clean_error(service, dav_client):
+    dav_client.request.return_value = _dav_response(404)
+
+    with pytest.raises(TaskMcpError, match="was not found in the trash bin"):
+        service.restore_from_trash("999.ics")
+
+
+def test_restore_from_trash_not_available_translates_405(service, dav_client):
+    dav_client.request.return_value = _dav_response(405)
+
+    with pytest.raises(TaskMcpError, match="not available on this server"):
+        service.restore_from_trash("42.ics")
+
+
+def test_restore_from_trash_unexpected_status_raises_clean_error(service, dav_client):
+    dav_client.request.return_value = _dav_response(500)
+
+    with pytest.raises(TaskMcpError, match="HTTP 500"):
+        service.restore_from_trash("42.ics")
+
+
+def test_restore_from_trash_requires_id(service, dav_client):
+    with pytest.raises(TaskMcpError, match="id is required"):
+        service.restore_from_trash("")
