@@ -774,6 +774,24 @@ def test_translate_etag_mismatch_message_mentions_retry():
     assert "retry" in message or "re-fetch" in message
 
 
+def test_translate_authorization_error_403_is_not_reported_as_credentials():
+    # caldav collapses both 401 and 403 into AuthorizationError, but the HTTP
+    # reason phrase ("Forbidden" vs "Unauthorized") still survives on
+    # `.reason` and distinguishes them - a 403 (e.g. Nextcloud's "Calendar
+    # limit reached") must not be misreported as a bad-credentials problem.
+    result = _translate(caldav_error.AuthorizationError(url="irrelevant", reason="Forbidden"))
+    assert not isinstance(result, AuthenticationFailedError)
+    assert isinstance(result, TaskMcpError)
+    message = str(result).lower()
+    assert "rejected the caldav credentials" not in message
+    assert "forbidden" in message
+
+
+def test_translate_authorization_error_401_still_reports_credentials():
+    result = _translate(caldav_error.AuthorizationError(url="irrelevant", reason="Unauthorized"))
+    assert isinstance(result, AuthenticationFailedError)
+
+
 # --- Generic (non-TaskMcpError, non-NotFoundError) exceptions through every
 # --- public CalDavService method (E4 remainder: outer except-Exception
 # --- branches, and _resolve_calendar's own except-Exception branch). ---

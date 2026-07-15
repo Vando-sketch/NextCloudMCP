@@ -104,6 +104,21 @@ def _translate(exc: Exception) -> TaskMcpError:
     instead.
     """
     if isinstance(exc, caldav_error.AuthorizationError):
+        # caldav's own request layer collapses both HTTP 401 and 403 into this
+        # one exception class before any response body is available to us (see
+        # `DAVClient._sync_request`), so the server's specific `s:message`
+        # (e.g. "Calendar limit reached") can't be recovered here - only the
+        # HTTP reason phrase survives, in `.reason`. That phrase still reliably
+        # tells 403 (Forbidden - a permission/quota problem) apart from 401
+        # (Unauthorized - actually bad credentials), which is enough to stop
+        # a 403 from being misreported as a credentials failure.
+        if (exc.reason or "").strip().lower() == "forbidden":
+            return TaskMcpError(
+                "Nextcloud rejected the request as forbidden (HTTP 403). This is not "
+                "a credentials problem - the account lacks permission for this "
+                "operation, or a server-side limit (e.g. the calendar count limit) "
+                "was reached."
+            )
         return AuthenticationFailedError(
             "Nextcloud rejected the CalDAV credentials (check username/app password)."
         )
