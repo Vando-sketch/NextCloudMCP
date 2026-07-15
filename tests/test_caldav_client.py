@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
+from caldav.lib.url import URL
 from icalendar import Event, FreeBusy, Todo
+from lxml import etree
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
 from nextcloud_task_mcp import event_mapping, mapping
@@ -1868,3 +1871,252 @@ def test_translate_rate_limit_error_names_waiting_as_fix():
     assert "retry" in str(translated).lower()
     # The raw URL/exception text must not leak into the client-facing message.
     assert "https://x/" not in str(translated)
+
+
+# ======================================================================
+# Calendar sharing (Nextcloud DAV extension)
+# ======================================================================
+
+
+def _dav_response(status: int, xml: str | None = None) -> SimpleNamespace:
+    """A stand-in for `caldav.response.DAVResponse` - `_dav_request`'s callers
+    only ever look at `.status` and `.tree`."""
+    tree = etree.fromstring(xml.encode("utf-8")) if xml else None
+    return SimpleNamespace(status=status, tree=tree)
+
+
+@pytest.fixture
+def dav_client(service, mock_dav_client) -> MagicMock:
+    """`service._client` itself, with a real `.url` set (the mock's default
+    auto-generated attribute doesn't behave like a caldav URL object, but
+    `_trashbin_objects_url`/`_trashbin_restore_url` need `.join()` on it)."""
+    client = mock_dav_client.return_value
+    client.url = URL.objectify("https://cloud.example.com/dav/")
+    return client
+
+
+_INVITE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/privat/</d:href>
+    <d:propstat>
+      <d:prop>
+        <oc:invite>
+          <oc:user>
+            <d:href>principal:principals/users/bob</d:href>
+            <oc:common-name>Bob</oc:common-name>
+            <oc:invite-accepted/>
+            <oc:access><oc:read-write/></oc:access>
+          </oc:user>
+          <oc:user>
+            <d:href>principal:principals/groups/team</d:href>
+            <oc:invite-noresponse/>
+            <oc:access><oc:read/></oc:access>
+          </oc:user>
+          <oc:organizer>
+            <d:href>principal:principals/users/owner</d:href>
+          </oc:organizer>
+        </oc:invite>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+
+
+def test_share_calendar_posts_share_xml_with_read_write(service, principal, dav_client):
+    calendar = _make_calendar(
+        "Privat", "https://cloud.example.com/dav/privat/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(200)
+
+    result = service.share_calendar("Privat", "bob", schreibzugriff=True)
+
+    assert result == {"kalender_name": "Privat", "empfaenger": "bob", "schreibzugriff": True}
+    args, _ = dav_client.request.call_args
+    url, method, body, headers = args
+    assert url == "https://cloud.example.com/dav/privat/"
+    assert method == "POST"
+    assert headers["Content-Type"].startswith("application/xml")
+    tree = etree.fromstring(body.encode("utf-8"))
+    assert tree.find(".//{DAV:}href").text == "principal:principals/users/bob"
+    assert tree.find(".//{http://owncloud.org/ns}read-write") is not None
+    assert tree.find(".//{http://owncloud.org/ns}set") is not None
+
+
+def test_share_calendar_read_only_omits_read_write_element(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(200)
+
+    service.share_calendar("Privat", "bob")
+
+    args, _ = dav_client.request.call_args
+    tree = etree.fromstring(args[2].encode("utf-8"))
+    assert tree.find(".//{http://owncloud.org/ns}read-write") is None
+
+
+def test_share_calendar_group_uses_groups_principal_href(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(200)
+
+    service.share_calendar("Privat", "team", gruppe=True)
+
+    args, _ = dav_client.request.call_args
+    tree = etree.fromstring(args[2].encode("utf-8"))
+    assert tree.find(".//{DAV:}href").text == "principal:principals/groups/team"
+
+
+def test_share_calendar_resolves_task_lists_too(service, principal, dav_client):
+    calendar = _make_calendar("Aufgaben", components=["VTODO"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(200)
+
+    result = service.share_calendar("Aufgaben", "bob")
+
+    assert result["kalender_name"] == "Aufgaben"
+
+
+def test_share_calendar_requires_empfaenger(service, principal, dav_client):
+    with pytest.raises(TaskMcpError, match="empfaenger is required"):
+        service.share_calendar("Privat", "")
+
+
+def test_share_calendar_not_found_across_both_kinds(service, principal, dav_client):
+    principal.calendars.return_value = []
+
+    with pytest.raises(TaskMcpError, match="was not found"):
+        service.share_calendar("Ghost", "bob")
+
+
+def test_share_calendar_unknown_recipient_404_raises_clean_error(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(404)
+
+    with pytest.raises(TaskMcpError, match="could not find user/group 'ghost'"):
+        service.share_calendar("Privat", "ghost")
+
+
+def test_share_calendar_forbidden_raises_clean_permission_error(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.side_effect = caldav_error.AuthorizationError("403 Forbidden")
+
+    with pytest.raises(TaskMcpError, match="permission denied"):
+        service.share_calendar("Privat", "bob")
+
+
+def test_share_calendar_unexpected_status_raises_clean_error(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(500)
+
+    with pytest.raises(TaskMcpError, match="HTTP 500"):
+        service.share_calendar("Privat", "bob")
+
+
+def test_share_calendar_invalid_request_400_raises_clean_error(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(400)
+
+    with pytest.raises(TaskMcpError, match="invalid"):
+        service.share_calendar("Privat", "not a valid id!!")
+
+
+def test_unshare_calendar_posts_remove_xml(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(200)
+
+    service.unshare_calendar("Privat", "bob")
+
+    args, _ = dav_client.request.call_args
+    tree = etree.fromstring(args[2].encode("utf-8"))
+    assert tree.find(".//{http://owncloud.org/ns}remove") is not None
+    assert tree.find(".//{DAV:}href").text == "principal:principals/users/bob"
+    # A remove element carries no access/summary children.
+    assert tree.find(".//{http://owncloud.org/ns}read-write") is None
+
+
+def test_unshare_calendar_requires_empfaenger(service, principal, dav_client):
+    with pytest.raises(TaskMcpError, match="empfaenger is required"):
+        service.unshare_calendar("Privat", "")
+
+
+def test_list_calendar_shares_parses_users_and_groups(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(207, _INVITE_XML)
+
+    result = service.list_calendar_shares("Privat")
+
+    assert result == [
+        {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": True, "status": "akzeptiert"},
+        {"empfaenger": "team", "typ": "gruppe", "schreibzugriff": False, "status": "ausstehend"},
+    ]
+
+
+def test_list_calendar_shares_unknown_invite_status_falls_back_to_raw_lowercase(
+    service, principal, dav_client
+):
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/privat/</d:href>
+    <d:propstat>
+      <d:prop>
+        <oc:invite>
+          <oc:user>
+            <d:href>principal:principals/users/bob</d:href>
+            <oc:invite-mystery/>
+            <oc:access><oc:read/></oc:access>
+          </oc:user>
+        </oc:invite>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_calendar_shares("Privat")
+
+    assert result == [
+        {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": False, "status": "mystery"}
+    ]
+
+
+def test_list_calendar_shares_no_invitees_returns_empty_list(service, principal, dav_client):
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/privat/</d:href>
+    <d:propstat>
+      <d:prop><oc:invite/></d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    assert service.list_calendar_shares("Privat") == []
+
+
+def test_list_calendar_shares_unexpected_status_raises_clean_error(service, principal, dav_client):
+    calendar = _make_calendar("Privat", components=["VEVENT"])
+    principal.calendars.return_value = [calendar]
+    dav_client.request.return_value = _dav_response(500)
+
+    with pytest.raises(TaskMcpError, match="unexpected error"):
+        service.list_calendar_shares("Privat")

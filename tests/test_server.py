@@ -64,6 +64,9 @@ def test_all_tools_registered(tools):
         "create_event_from_task",
         "get_agenda",
         "get_free_busy",
+        "share_calendar",
+        "unshare_calendar",
+        "list_calendar_shares",
     }
 
 
@@ -481,6 +484,61 @@ def test_get_free_busy_passes_benutzer_through(tools, fake_service):
     fake_service.get_free_busy.assert_called_once_with(
         "2026-07-20", "2026-07-21", "bob@example.com"
     )
+
+
+# --- share_calendar / unshare_calendar / list_calendar_shares ---
+
+
+def test_share_calendar_delegates(tools, fake_service):
+    fake_service.share_calendar.return_value = {
+        "kalender_name": "Privat",
+        "empfaenger": "bob",
+        "schreibzugriff": True,
+    }
+    result = _run(
+        tools["share_calendar"].fn(kalender_name="Privat", empfaenger="bob", schreibzugriff=True)
+    )
+    fake_service.share_calendar.assert_called_once_with("Privat", "bob", False, True)
+    assert result == {"kalender_name": "Privat", "empfaenger": "bob", "schreibzugriff": True}
+
+
+def test_share_calendar_defaults_gruppe_and_schreibzugriff_false(tools, fake_service):
+    fake_service.share_calendar.return_value = {
+        "kalender_name": "Privat",
+        "empfaenger": "team",
+        "schreibzugriff": False,
+    }
+    _run(tools["share_calendar"].fn(kalender_name="Privat", empfaenger="team"))
+    fake_service.share_calendar.assert_called_once_with("Privat", "team", False, False)
+
+
+def test_share_calendar_passes_gruppe_through(tools, fake_service):
+    fake_service.share_calendar.return_value = {
+        "kalender_name": "Privat",
+        "empfaenger": "team",
+        "schreibzugriff": False,
+    }
+    _run(tools["share_calendar"].fn(kalender_name="Privat", empfaenger="team", gruppe=True))
+    fake_service.share_calendar.assert_called_once_with("Privat", "team", True, False)
+
+
+def test_unshare_calendar_delegates(tools, fake_service):
+    result = _run(
+        tools["unshare_calendar"].fn(kalender_name="Privat", empfaenger="bob", gruppe=False)
+    )
+    fake_service.unshare_calendar.assert_called_once_with("Privat", "bob", False)
+    assert result == {"kalender_name": "Privat", "empfaenger": "bob"}
+
+
+def test_list_calendar_shares_delegates(tools, fake_service):
+    fake_service.list_calendar_shares.return_value = [
+        {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": True, "status": "akzeptiert"}
+    ]
+    result = _run(tools["list_calendar_shares"].fn(kalender_name="Privat"))
+    fake_service.list_calendar_shares.assert_called_once_with("Privat")
+    assert result == [
+        {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": True, "status": "akzeptiert"}
+    ]
 
 
 def test_link_task_to_event_defaults_to_zeitblock(tools, fake_service):
