@@ -61,3 +61,8 @@ class EventNotFoundError(TaskMcpError):
 
 class InvalidEventDataError(TaskMcpError):
     """Raised when event field values can't be mapped to valid iCalendar data."""
+
+
+class InvalidIcsDataError(TaskMcpError):
+    """Raised when ICS text passed to import_ics isn't a parseable VCALENDAR
+    containing at least one VEVENT or VTODO."""
