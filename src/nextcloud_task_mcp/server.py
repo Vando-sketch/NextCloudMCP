@@ -909,6 +909,73 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         """
         return await _call(caldav_service.list_calendar_shares, kalender_name)
 
+    @mcp.tool
+    async def list_trash() -> list[dict[str, Any]]:
+        """List deleted tasks/events in Nextcloud's calendar trash bin.
+
+        Uses Nextcloud's calendar-trashbin DAV plugin; on a server without
+        it, this fails with a clean "trash bin not available" error instead
+        of a raw HTTP error.
+
+        Returns:
+            A list of {"id": trash item id (pass to restore_from_trash),
+            "titel": title if derivable from the item's data or None,
+            "typ": "aufgabe"/"termin"/None, "kalender": the original
+            calendar's URI if reported by the server or None, "geloescht_am":
+            ISO 8601 deletion timestamp or None} dicts.
+        """
+        return await _call(caldav_service.list_trash)
+
+    @mcp.tool
+    async def restore_from_trash(id: str) -> dict[str, str]:
+        """Restore a deleted task/event from the trash bin to its original calendar.
+
+        Args:
+            id: Trash item id, as returned by list_trash's "id" field.
+
+        Returns:
+            {"id": id} on success.
+        """
+        await _call(caldav_service.restore_from_trash, id)
+        return {"id": id}
+
+    @mcp.tool
+    async def export_calendar(kalender_name: str) -> dict[str, str]:
+        """Export a task list or event calendar as a single ICS (VCALENDAR) text.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar
+                to export (resolved across both kinds).
+
+        Returns:
+            {"kalender_name", "ics": the full VCALENDAR text, containing
+            every task/event in the calendar}.
+        """
+        return await _call(caldav_service.export_calendar, kalender_name)
+
+    @mcp.tool
+    async def import_ics(kalender_name: str, ics: str) -> dict[str, Any]:
+        """Import ICS (VCALENDAR) text into an existing task list or event calendar.
+
+        Top-level VEVENT/VTODO components are grouped by UID, so a recurring
+        event/task and its override instances are saved together as one
+        calendar object. A component whose kind (event/task) the target
+        calendar doesn't support is skipped rather than failing the whole
+        import.
+
+        Args:
+            kalender_name: Display name of the target task list or event
+                calendar (resolved across both kinds).
+            ics: Full ICS text; must be a VCALENDAR containing at least one
+                VEVENT or VTODO.
+
+        Returns:
+            {"kalender_name", "importiert": number of calendar objects
+            created, "uebersprungen": number skipped because the target
+            calendar doesn't support that component kind}.
+        """
+        return await _call(caldav_service.import_ics, kalender_name, ics)
+
     return mcp
 
 

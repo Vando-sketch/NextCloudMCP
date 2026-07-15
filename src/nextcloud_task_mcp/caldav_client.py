@@ -42,6 +42,7 @@ from .errors import (
     ConnectionFailedError,
     EventNotFoundError,
     InvalidEventDataError,
+    InvalidIcsDataError,
     InvalidTaskDataError,
     TaskConflictError,
     TaskListAlreadyExistsError,
@@ -155,6 +156,8 @@ def _translate(exc: Exception) -> TaskMcpError:
 
 _DAV_NS = "DAV:"
 _OC_NS = "http://owncloud.org/ns"
+_NC_NS = "http://nextcloud.com/ns"
+_CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
 
 # Maps the {oc}invite-* child element found on an {oc}user share entry to
 # the German status vocabulary this server returns. Nextcloud's own server
@@ -170,6 +173,10 @@ _INVITE_STATUS_MAP = {
     "invite-invalid": "ungueltig",
     "invite-deleted": "geloescht",
 }
+
+# A trashbin object's resource name is "<numeric id>.ics" (see Nextcloud's
+# DeletedCalendarObjectsCollection::getChild, which 404s on anything else).
+_TRASH_ID_RE = re.compile(r"^\d+\.ics$")
 
 
 def _clark(namespace: str, tag: str) -> str:
@@ -231,6 +238,20 @@ def _invite_propfind_body() -> str:
     root = etree.Element(_clark(_DAV_NS, "propfind"), nsmap={"d": _DAV_NS, "o": _OC_NS})
     prop = etree.SubElement(root, _clark(_DAV_NS, "prop"))
     etree.SubElement(prop, _clark(_OC_NS, "invite"))
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
+
+
+def _trashbin_propfind_body() -> str:
+    """Build a PROPFIND body for listing trashbin objects (Nextcloud's
+    calendar-trashbin plugin, namespace `http://nextcloud.com/ns`)."""
+    root = etree.Element(
+        _clark(_DAV_NS, "propfind"), nsmap={"d": _DAV_NS, "c": _CALDAV_NS, "nc": _NC_NS}
+    )
+    prop = etree.SubElement(root, _clark(_DAV_NS, "prop"))
+    etree.SubElement(prop, _clark(_DAV_NS, "displayname"))
+    etree.SubElement(prop, _clark(_CALDAV_NS, "calendar-data"))
+    etree.SubElement(prop, _clark(_NC_NS, "deleted-at"))
+    etree.SubElement(prop, _clark(_NC_NS, "calendar-uri"))
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
 
 
@@ -296,6 +317,53 @@ def _parse_invite_response(tree: Any) -> list[dict[str, Any]]:
                 }
             )
     return shares
+
+
+def _parse_deleted_at(raw: str | None) -> str | None:
+    """Parse a `{nc}deleted-at` property value into an ISO timestamp.
+
+    Nextcloud's calendar-trashbin plugin has been observed to encode this as
+    a raw Unix epoch integer (tried first) as well as an ISO 8601 string
+    (`DateTimeInterface::ATOM`, e.g. from newer server versions) - both are
+    accepted; anything else parses to None rather than raising, since this is
+    a display-only field.
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromtimestamp(int(text), tz=timezone.utc).isoformat()
+    except (ValueError, OverflowError, OSError):
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
+    except ValueError:
+        return None
+
+
+def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None]:
+    """Best-effort SUMMARY/component-kind extraction from a trashbin item's
+    raw calendar-data, for `list_trash`'s "titel"/"typ" fields.
+
+    Returns (None, None) if `ics_text` is missing or unparseable - a trashbin
+    listing entry is still useful without a title.
+    """
+    if not ics_text or not ics_text.strip():
+        return None, None
+    try:
+        parsed = Calendar.from_ical(ics_text)
+    except Exception:
+        return None, None
+    for component in parsed.walk():
+        if component.name == "VEVENT":
+            summary = component.get("summary")
+            return (str(summary) if summary else None), "termin"
+        if component.name == "VTODO":
+            summary = component.get("summary")
+            return (str(summary) if summary else None), "aufgabe"
+    return None, None
 
 
 class CalDavService:
@@ -567,6 +635,12 @@ class CalDavService:
             raise
         except Exception as exc:
             raise _translate(exc) from exc
+
+    def _trashbin_objects_url(self) -> Any:
+        return self._client.url.join(f"calendars/{self._username}/trashbin/objects/")
+
+    def _trashbin_restore_url(self) -> Any:
+        return self._client.url.join(f"calendars/{self._username}/trashbin/restore/")
 
     def list_task_lists(self) -> list[dict[str, str]]:
         """Return all VTODO-supporting calendars on the account as {"name", "url"} dicts.
@@ -1829,3 +1903,221 @@ class CalDavService:
                     f"'{kalender_name}' (HTTP {response.status})."
                 )
             return _parse_invite_response(response.tree)
+
+    # ------------------------------------------------------------------
+    # Trash bin (Nextcloud calendar-trashbin DAV plugin)
+    # ------------------------------------------------------------------
+
+    def list_trash(self) -> list[dict[str, Any]]:
+        """List deleted calendar objects (tasks/events) in Nextcloud's trash bin.
+
+        Reads Nextcloud's calendar-trashbin plugin (PROPFIND, Depth 1, on
+        `.../trashbin/objects/`) - a non-Nextcloud CalDAV server has no such
+        collection, which is reported as a clean "not available" error
+        rather than a raw 404/405.
+        """
+        with self._lock:
+            response = self._dav_request(
+                self._trashbin_objects_url(),
+                "PROPFIND",
+                _trashbin_propfind_body(),
+                {"Content-Type": "application/xml; charset=utf-8", "Depth": "1"},
+                forbidden_message="Nextcloud denied access to the trash bin (permission denied).",
+            )
+            if response.status in (404, 405):
+                raise TaskMcpError("The trash bin is not available on this server.")
+            if response.status not in (200, 207):
+                logger.warning("Unexpected trashbin listing response %s", response.status)
+                raise TaskMcpError(
+                    f"Nextcloud returned an unexpected error listing the trash bin "
+                    f"(HTTP {response.status})."
+                )
+
+            items: list[dict[str, Any]] = []
+            for href, props in _iter_multistatus_responses(response.tree):
+                name = unquote(href.rstrip("/").rsplit("/", 1)[-1])
+                if not _TRASH_ID_RE.match(name):
+                    # The `objects/` collection's own Depth-1 response entry,
+                    # or anything else that isn't a trashed calendar object.
+                    continue
+
+                deleted_el = props.get(_clark(_NC_NS, "deleted-at"))
+                calendar_uri_el = props.get(_clark(_NC_NS, "calendar-uri"))
+                calendar_data_el = props.get(_clark(_CALDAV_NS, "calendar-data"))
+                displayname_el = props.get(_clark(_DAV_NS, "displayname"))
+
+                titel, typ = _derive_title_and_type(
+                    calendar_data_el.text if calendar_data_el is not None else None
+                )
+                if titel is None and displayname_el is not None and displayname_el.text:
+                    titel = displayname_el.text.strip()
+
+                items.append(
+                    {
+                        "id": name,
+                        "titel": titel,
+                        "typ": typ,
+                        "kalender": (
+                            calendar_uri_el.text.strip()
+                            if calendar_uri_el is not None and calendar_uri_el.text
+                            else None
+                        ),
+                        "geloescht_am": _parse_deleted_at(
+                            deleted_el.text if deleted_el is not None else None
+                        ),
+                    }
+                )
+            return items
+
+    def restore_from_trash(self, trash_id: str) -> None:
+        """Restore a deleted calendar object from the trash bin to its original calendar.
+
+        MOVEs the trashbin entry from `.../trashbin/objects/<trash_id>` to
+        `.../trashbin/restore/<trash_id>`; Nextcloud's server restores it to
+        its original calendar as a side effect of that move, not this method.
+        """
+        if not trash_id or not trash_id.strip():
+            raise TaskMcpError("id is required to restore an item from the trash bin.")
+
+        with self._lock:
+            source = self._trashbin_objects_url().join(trash_id)
+            destination = self._trashbin_restore_url().join(trash_id)
+            response = self._dav_request(
+                source,
+                "MOVE",
+                "",
+                {"Destination": str(destination)},
+                forbidden_message=(
+                    f"Nextcloud denied restoring trash item '{trash_id}' (permission denied)."
+                ),
+            )
+            if response.status == 404:
+                raise TaskMcpError(f"Trash item '{trash_id}' was not found in the trash bin.")
+            if response.status == 405:
+                raise TaskMcpError("The trash bin is not available on this server.")
+            if response.status not in (200, 201, 204):
+                logger.warning(
+                    "Unexpected trashbin restore response %s for %s", response.status, trash_id
+                )
+                raise TaskMcpError(
+                    f"Nextcloud rejected restoring trash item '{trash_id}' "
+                    f"(HTTP {response.status})."
+                )
+
+    # ------------------------------------------------------------------
+    # ICS import / export
+    # ------------------------------------------------------------------
+
+    def export_calendar(self, kalender_name: str) -> dict[str, str]:
+        """Export a task list or event calendar as a single ICS (VCALENDAR) text.
+
+        Built client-side for portability: every object in the collection
+        (`calendar.events()` / `calendar.todos()`, whichever the collection
+        supports) is fetched, and its components (including any VTIMEZONEs
+        and, for a recurring event/task, its override instances - these
+        already live together in one calendar object) are merged into one
+        VCALENDAR with a single PRODID/VERSION header. VTIMEZONE components
+        are de-duplicated by TZID.
+        """
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+
+            try:
+                events = calendar.events() if self._supports_component(calendar, "VEVENT") else []
+                todos = (
+                    calendar.todos(include_completed=True)
+                    if self._supports_component(calendar, "VTODO")
+                    else []
+                )
+            except caldav_error.NotFoundError as exc:
+                raise TaskMcpError(
+                    f"Calendar or task list '{kalender_name}' was not found."
+                ) from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            merged = Calendar()
+            merged.add("prodid", "-//nextcloud-task-mcp//EN")
+            merged.add("version", "2.0")
+            seen_tzids: set[str] = set()
+            for obj in list(events) + list(todos):
+                try:
+                    instance = obj.icalendar_instance
+                except Exception as exc:
+                    raise _translate(exc) from exc
+                for component in instance.subcomponents:
+                    if component.name == "VTIMEZONE":
+                        tzid = str(component.get("TZID", ""))
+                        if tzid:
+                            if tzid in seen_tzids:
+                                continue
+                            seen_tzids.add(tzid)
+                    merged.add_component(component)
+
+            return {"kalender_name": kalender_name, "ics": merged.to_ical().decode("utf-8")}
+
+    def import_ics(self, kalender_name: str, ics: str) -> dict[str, Any]:
+        """Import ICS text into a task list or event calendar.
+
+        Top-level VEVENT/VTODO components are grouped by UID (so a recurring
+        event/task and its override instances stay together as ONE saved
+        calendar object, along with any VTIMEZONEs from the source ICS), then
+        each group is saved via `calendar.save_event`/`calendar.save_todo`.
+        A group whose kind (VEVENT/VTODO) the target collection doesn't
+        support is skipped rather than failing the whole import.
+        """
+        if not ics or not ics.strip():
+            raise InvalidIcsDataError("ics is required and must not be empty.")
+        try:
+            parsed = Calendar.from_ical(ics)
+        except Exception as exc:
+            raise InvalidIcsDataError(f"Could not parse ics: {exc}") from exc
+        if getattr(parsed, "name", None) != "VCALENDAR":
+            raise InvalidIcsDataError("ics must be a VCALENDAR.")
+
+        timezones = [c for c in parsed.subcomponents if c.name == "VTIMEZONE"]
+        groups: dict[tuple[str, str], list[Any]] = {}
+        for component in parsed.subcomponents:
+            if component.name not in ("VEVENT", "VTODO"):
+                continue
+            uid = str(component.get("UID") or uuid.uuid4())
+            groups.setdefault((uid, component.name), []).append(component)
+
+        if not groups:
+            raise InvalidIcsDataError("ics must contain at least one VEVENT or VTODO component.")
+
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+
+            importiert = 0
+            uebersprungen = 0
+            for (_uid, kind), components in groups.items():
+                if not self._supports_component(calendar, kind):
+                    uebersprungen += 1
+                    continue
+
+                sub_calendar = Calendar()
+                sub_calendar.add("prodid", "-//nextcloud-task-mcp//EN")
+                sub_calendar.add("version", "2.0")
+                for tz in timezones:
+                    sub_calendar.add_component(tz)
+                for component in components:
+                    sub_calendar.add_component(component)
+                ical_text = sub_calendar.to_ical().decode("utf-8")
+
+                try:
+                    if kind == "VEVENT":
+                        calendar.save_event(ical=ical_text)
+                    else:
+                        calendar.save_todo(ical=ical_text)
+                except TaskMcpError:
+                    raise
+                except Exception as exc:
+                    raise _translate(exc) from exc
+                importiert += 1
+
+        return {
+            "kalender_name": kalender_name,
+            "importiert": importiert,
+            "uebersprungen": uebersprungen,
+        }
