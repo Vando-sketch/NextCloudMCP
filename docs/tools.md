@@ -17,6 +17,8 @@ Values for enum-like fields:
 | `teilnehmer[].status` (read-only, in event results) | `"ausstehend"`, `"zugesagt"`, `"abgesagt"`, `"vorläufig"`, `"delegiert"` |
 | `teilnehmer[].rolle` | `"leitung"`, `"erforderlich"` (default), `"optional"`, `"keine-teilnahme"` |
 | `antwort` (`respond_to_event`) | `"zugesagt"`, `"abgesagt"`, `"vorläufig"` |
+| `typ` (`share_calendar`/`list_calendar_shares`) | `"benutzer"`, `"gruppe"` |
+| `status` (`list_calendar_shares`) | `"akzeptiert"`, `"ausstehend"`, `"abgelehnt"`, `"ungueltig"`, `"geloescht"`, or a raw lowercased status the server reported |
 
 Dates are ISO 8601 strings. Two rules apply everywhere a date/datetime is
 accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
@@ -620,6 +622,54 @@ user is free the whole range.
 
 ---
 
+## Calendar sharing
+
+Nextcloud-specific DAV extension (not part of any CalDAV RFC) — these three
+tools only work against a real Nextcloud server, not a generic CalDAV
+server. All three resolve `kalender_name` across **both** task lists and
+event calendars (whichever kind has that display name).
+
+### `share_calendar(kalender_name, empfaenger, gruppe=False, schreibzugriff=False)`
+
+Shares a task list or event calendar with a Nextcloud user or group.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the task list or event calendar |
+| `empfaenger` | string | yes | Nextcloud user id, or group id when `gruppe=True` |
+| `gruppe` | boolean | no (default `false`) | `empfaenger` names a group instead of a user |
+| `schreibzugriff` | boolean | no (default `false`) | Grant read-write instead of read-only access |
+
+Calling this again for the same `empfaenger` updates their access level
+rather than creating a duplicate share. Returns:
+
+```json
+{"kalender_name": "Privat", "empfaenger": "bob", "schreibzugriff": true}
+```
+
+### `unshare_calendar(kalender_name, empfaenger, gruppe=False)`
+
+Removes a user's or group's share of a task list or event calendar. A no-op
+(not an error) if `empfaenger` doesn't currently have a share. Returns
+`{"kalender_name": ..., "empfaenger": ...}`.
+
+### `list_calendar_shares(kalender_name)`
+
+Lists everyone a task list or event calendar is currently shared with:
+
+```json
+[
+  {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": true, "status": "akzeptiert"},
+  {"empfaenger": "team", "typ": "gruppe", "schreibzugriff": false, "status": "ausstehend"}
+]
+```
+
+See the enum table above for `typ`/`status` values; an invite status the
+server reports that isn't one of the known ones comes back lowercased
+instead of being dropped.
+
+---
+
 ## Errors
 
 All failures come back as short, single-line MCP tool errors, for example:
@@ -660,6 +710,13 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `You are not listed as an attendee of this event, so there is nothing to respond to.`
 - `Nextcloud could not provide free/busy information for 'bob@example.com' (the user may
   be unknown, or scheduling may be disabled on the server).`
+- `Calendar or task list 'Ghost' was not found.` — `share_calendar`/`export_calendar`/etc.
+  found no task list or event calendar with this name.
+- `empfaenger is required to share a calendar.`
+- `Nextcloud could not find user/group 'ghost' to share 'Privat' with.` — `empfaenger`
+  isn't a real Nextcloud user/group id.
+- `Nextcloud denied sharing 'Privat' with 'bob' (permission denied, or the sharing
+  backend is disabled).`
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).

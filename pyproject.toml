@@ -19,6 +19,11 @@ dependencies = [
     "fastmcp>=2.9,<3",
     "caldav>=3.0,<4",
     "icalendar>=6.0,<8",
+    # Already an indirect dependency via caldav (which uses it for its own
+    # DAV element (de)serialization); imported directly here too for the
+    # Nextcloud-specific raw DAV requests (sharing, trashbin) that have no
+    # caldav library API of their own - see caldav_client.py.
+    "lxml>=4.9",
 ]
 
 [project.urls]
@@ -82,7 +87,7 @@ warn_redundant_casts = true
 exclude = "^src/nextcloud_task_mcp/personal_auth\\.py$"
 
 [[tool.mypy.overrides]]
-module = ["caldav.*", "icalendar.*", "requests.*", "niquests.*"]
+module = ["caldav.*", "icalendar.*", "requests.*", "niquests.*", "lxml.*"]
 ignore_missing_imports = true
 
 # caldav ships its own py.typed stubs, so `ignore_missing_imports` above
