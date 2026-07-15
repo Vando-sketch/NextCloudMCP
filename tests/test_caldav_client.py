@@ -1278,7 +1278,7 @@ def test_link_task_to_event_writes_relation_on_event(service, principal):
 
     todo_cal.get_todo_by_uid.assert_called_once_with("task-9")
     parsed = event_mapping.parse_vevent(component)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-9", "beziehung": "uebergeordnet"}]
+    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-9", "beziehung": "zeitblock"}]
     event_obj.save.assert_called_once_with()
 
 
@@ -1291,6 +1291,98 @@ def test_link_task_to_event_missing_task_raises_before_touching_event(service, p
     with pytest.raises(TaskNotFoundError):
         service.link_task_to_event("Privat", "missing", "Termine", "event-1")
     event_cal.event_by_uid.assert_not_called()
+
+
+# --- list_events_for_task ---
+
+
+def _make_related_vevent(uid: str, task_uid: str | None, reltype: str = "PARENT") -> Event:
+    event = _make_vevent(uid)
+    if task_uid is not None:
+        event.add("related-to", task_uid, parameters={"RELTYPE": reltype})
+    return event
+
+
+def test_list_events_for_task_returns_only_linked_events(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    linked = _make_event_obj(_make_related_vevent("event-linked", "task-1"))
+    unlinked = _make_event_obj(_make_related_vevent("event-unlinked", None))
+    event_cal.events.return_value = [linked, unlinked]
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    result = service.list_events_for_task("Privat", "task-1")
+
+    todo_cal.get_todo_by_uid.assert_called_once_with("task-1")
+    assert [e["uid"] for e in result] == ["event-linked"]
+    assert result[0]["verknuepfte_aufgaben"] == [{"uid": "task-1", "beziehung": "zeitblock"}]
+    assert result[0]["kalender_name"] == "Termine"
+
+
+def test_list_events_for_task_matches_any_reltype(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.events.return_value = [
+        _make_event_obj(_make_related_vevent("event-1", "task-1", reltype="CHILD"))
+    ]
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    result = service.list_events_for_task("Privat", "task-1")
+
+    assert [e["uid"] for e in result] == ["event-1"]
+    assert result[0]["verknuepfte_aufgaben"] == [{"uid": "task-1", "beziehung": "voraussetzung"}]
+
+
+def test_list_events_for_task_missing_task_raises(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.side_effect = caldav_error.NotFoundError("nope")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    with pytest.raises(TaskNotFoundError):
+        service.list_events_for_task("Privat", "missing")
+    event_cal.events.assert_not_called()
+
+
+def test_list_events_for_task_searches_only_named_calendars(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    cal1 = _make_calendar("Arbeit", "https://cloud.example.com/dav/a/", components=["VEVENT"])
+    cal2 = _make_calendar(
+        "Privatkalender", "https://cloud.example.com/dav/p/", components=["VEVENT"]
+    )
+    cal1.events.return_value = [_make_event_obj(_make_related_vevent("e1", "task-1"))]
+    cal2.events.return_value = [_make_event_obj(_make_related_vevent("e2", "task-1"))]
+    principal.calendars.return_value = [todo_cal, cal1, cal2]
+
+    result = service.list_events_for_task("Privat", "task-1", calendar_names=["Arbeit"])
+
+    assert [e["uid"] for e in result] == ["e1"]
+    cal2.events.assert_not_called()
+
+
+def test_list_events_for_task_unknown_calendar_raises(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    principal.calendars.return_value = [todo_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.list_events_for_task("Privat", "task-1", calendar_names=["Nonexistent"])
+
+
+def test_list_events_for_task_sorted_by_start(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    later = _make_related_vevent("event-later", "task-1")
+    del later["dtstart"]
+    later.add("dtstart", datetime(2026, 8, 1, tzinfo=timezone.utc))
+    earlier = _make_related_vevent("event-earlier", "task-1")
+    del earlier["dtstart"]
+    earlier.add("dtstart", datetime(2026, 7, 1, tzinfo=timezone.utc))
+    event_cal.events.return_value = [_make_event_obj(later), _make_event_obj(earlier)]
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    result = service.list_events_for_task("Privat", "task-1")
+
+    assert [e["uid"] for e in result] == ["event-earlier", "event-later"]
 
 
 # --- create_event_from_task ---

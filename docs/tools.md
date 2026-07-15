@@ -322,7 +322,7 @@ event started long before. Results are sorted by `start`. One event dict:
   "wiederholung": "FREQ=WEEKLY;BYDAY=MO",
   "ausnahme_daten": ["2026-07-27T14:00:00+00:00"],
   "url": null,
-  "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "uebergeordnet"}],
+  "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "zeitblock"}],
   "wiederholung_von": null,
   "kalender": "Personal"
 }
@@ -332,6 +332,14 @@ event started long before. Results are sorted by `start`. One event dict:
 materialized a single occurrence of a series. For **all-day** events `start`
 and `ende` are date-only strings and `ende` is the **inclusive** last day
 (RFC 5545's exclusive `DTEND` is translated on the way in and out).
+
+`verknuepfte_aufgaben` entries' `beziehung` uses exactly the same vocabulary
+as `link_task_to_event`'s `beziehung` parameter: a link written as
+`"zeitblock"` reads back as `"zeitblock"`, and one written as
+`"voraussetzung"` reads back as `"voraussetzung"` - request and response are
+the same words, round-trip. `"gleichrangig"` (RFC 5545 `SIBLING`) or a raw
+lowercased `RELTYPE` can also appear for links written by other CalDAV
+clients that this server didn't create.
 
 ---
 
@@ -402,6 +410,49 @@ server's event dicts).
 
 The task must exist; linking is idempotent (re-linking the same pair is a
 no-op).
+
+---
+
+## `list_events_for_task(list_name, task_uid, kalender_namen=None)`
+
+The task-side counterpart of `link_task_to_event`: since the `RELATED-TO`
+link is only ever written on the event, there is no direct way to find
+linked events starting from a task — this tool does the reverse lookup,
+scanning events in the given calendars for a `verknuepfte_aufgaben` entry
+whose `uid` matches `task_uid`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_name` | string | yes | Display name of the task list containing the task |
+| `task_uid` | string (UID) | yes | UID of the task to find linked events for |
+| `kalender_namen` | list of strings | no | Calendars to search; `null` = all event calendars |
+
+The task must exist (same check and error as `link_task_to_event`). Returns
+event dicts with the same shape as `list_events` entries, each with an added
+`"kalender_name"` key, sorted by start:
+
+```json
+[
+  {
+    "uid": "7f0c9e2a-...",
+    "titel": "Steuererklärung vorbereiten",
+    "start": "2026-07-20T14:00:00+00:00",
+    "ende": "2026-07-20T15:00:00+00:00",
+    "ganztaegig": false,
+    "ort": null,
+    "beschreibung": null,
+    "tags": [],
+    "status": null,
+    "sichtbarkeit": null,
+    "wiederholung": null,
+    "ausnahme_daten": [],
+    "url": null,
+    "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "zeitblock"}],
+    "wiederholung_von": null,
+    "kalender_name": "Personal"
+  }
+]
+```
 
 ---
 
