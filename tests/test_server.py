@@ -69,6 +69,8 @@ def test_all_tools_registered(tools):
         "list_calendar_shares",
         "list_trash",
         "restore_from_trash",
+        "export_calendar",
+        "import_ics",
     }
 
 
@@ -565,6 +567,31 @@ def test_restore_from_trash_delegates(tools, fake_service):
     result = _run(tools["restore_from_trash"].fn(id="42.ics"))
     fake_service.restore_from_trash.assert_called_once_with("42.ics")
     assert result == {"id": "42.ics"}
+
+
+# --- export_calendar / import_ics ---
+
+
+def test_export_calendar_delegates(tools, fake_service):
+    fake_service.export_calendar.return_value = {
+        "kalender_name": "Privat",
+        "ics": "BEGIN:VCALENDAR\nEND:VCALENDAR\n",
+    }
+    result = _run(tools["export_calendar"].fn(kalender_name="Privat"))
+    fake_service.export_calendar.assert_called_once_with("Privat")
+    assert result["ics"].startswith("BEGIN:VCALENDAR")
+
+
+def test_import_ics_delegates(tools, fake_service):
+    fake_service.import_ics.return_value = {
+        "kalender_name": "Privat",
+        "importiert": 2,
+        "uebersprungen": 1,
+    }
+    ics_text = "BEGIN:VCALENDAR\nEND:VCALENDAR\n"
+    result = _run(tools["import_ics"].fn(kalender_name="Privat", ics=ics_text))
+    fake_service.import_ics.assert_called_once_with("Privat", ics_text)
+    assert result == {"kalender_name": "Privat", "importiert": 2, "uebersprungen": 1}
 
 
 def test_link_task_to_event_defaults_to_zeitblock(tools, fake_service):

@@ -713,6 +713,52 @@ currently in the trash bin (already restored, or never existed).
 
 ---
 
+## ICS import / export
+
+### `export_calendar(kalender_name)`
+
+Exports a task list or event calendar as a single ICS (VCALENDAR) text
+containing every task/event in it.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the task list or event calendar |
+
+```json
+{"kalender_name": "Privat", "ics": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n..."}
+```
+
+Built with a single `PRODID`/`VERSION` header; a recurring event/task and its
+override instances are kept together, and `VTIMEZONE` components are
+de-duplicated by `TZID`.
+
+### `import_ics(kalender_name, ics)`
+
+Imports ICS text into an existing task list or event calendar.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the target task list or event calendar |
+| `ics` | string | yes | Full ICS text; must be a VCALENDAR with at least one VEVENT or VTODO |
+
+Top-level `VEVENT`/`VTODO` components are grouped by `UID`, so a recurring
+event/task and its override instances are saved together as one calendar
+object (along with any `VTIMEZONE`s from the source ICS). A component whose
+kind the target calendar doesn't support (e.g. a `VEVENT` in an ICS file
+being imported into a plain task list) is skipped rather than failing the
+whole import.
+
+```json
+{"kalender_name": "Privat", "importiert": 3, "uebersprungen": 1}
+```
+
+`importiert` is the number of calendar objects created; `uebersprungen`
+("skipped") the number of UID groups whose component kind wasn't supported
+by the target calendar. Malformed ICS text is rejected with a clean error
+that includes the parser's detail message.
+
+---
+
 ## Errors
 
 All failures come back as short, single-line MCP tool errors, for example:
@@ -763,6 +809,8 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `The trash bin is not available on this server.` — the server isn't Nextcloud, or
   doesn't have the calendar-trashbin plugin.
 - `Trash item '42.ics' was not found in the trash bin.` — already restored, or a bad id.
+- `ics must be a VCALENDAR.` / `ics must contain at least one VEVENT or VTODO component.`
+- `Could not parse ics: ...` — malformed ICS text; the message includes the parser's detail.
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).

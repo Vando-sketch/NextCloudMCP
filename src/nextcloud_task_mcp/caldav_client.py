@@ -42,6 +42,7 @@ from .errors import (
     ConnectionFailedError,
     EventNotFoundError,
     InvalidEventDataError,
+    InvalidIcsDataError,
     InvalidTaskDataError,
     TaskConflictError,
     TaskListAlreadyExistsError,
@@ -2002,3 +2003,121 @@ class CalDavService:
                     f"Nextcloud rejected restoring trash item '{trash_id}' "
                     f"(HTTP {response.status})."
                 )
+
+    # ------------------------------------------------------------------
+    # ICS import / export
+    # ------------------------------------------------------------------
+
+    def export_calendar(self, kalender_name: str) -> dict[str, str]:
+        """Export a task list or event calendar as a single ICS (VCALENDAR) text.
+
+        Built client-side for portability: every object in the collection
+        (`calendar.events()` / `calendar.todos()`, whichever the collection
+        supports) is fetched, and its components (including any VTIMEZONEs
+        and, for a recurring event/task, its override instances - these
+        already live together in one calendar object) are merged into one
+        VCALENDAR with a single PRODID/VERSION header. VTIMEZONE components
+        are de-duplicated by TZID.
+        """
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+
+            try:
+                events = calendar.events() if self._supports_component(calendar, "VEVENT") else []
+                todos = (
+                    calendar.todos(include_completed=True)
+                    if self._supports_component(calendar, "VTODO")
+                    else []
+                )
+            except caldav_error.NotFoundError as exc:
+                raise TaskMcpError(
+                    f"Calendar or task list '{kalender_name}' was not found."
+                ) from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            merged = Calendar()
+            merged.add("prodid", "-//nextcloud-task-mcp//EN")
+            merged.add("version", "2.0")
+            seen_tzids: set[str] = set()
+            for obj in list(events) + list(todos):
+                try:
+                    instance = obj.icalendar_instance
+                except Exception as exc:
+                    raise _translate(exc) from exc
+                for component in instance.subcomponents:
+                    if component.name == "VTIMEZONE":
+                        tzid = str(component.get("TZID", ""))
+                        if tzid:
+                            if tzid in seen_tzids:
+                                continue
+                            seen_tzids.add(tzid)
+                    merged.add_component(component)
+
+            return {"kalender_name": kalender_name, "ics": merged.to_ical().decode("utf-8")}
+
+    def import_ics(self, kalender_name: str, ics: str) -> dict[str, Any]:
+        """Import ICS text into a task list or event calendar.
+
+        Top-level VEVENT/VTODO components are grouped by UID (so a recurring
+        event/task and its override instances stay together as ONE saved
+        calendar object, along with any VTIMEZONEs from the source ICS), then
+        each group is saved via `calendar.save_event`/`calendar.save_todo`.
+        A group whose kind (VEVENT/VTODO) the target collection doesn't
+        support is skipped rather than failing the whole import.
+        """
+        if not ics or not ics.strip():
+            raise InvalidIcsDataError("ics is required and must not be empty.")
+        try:
+            parsed = Calendar.from_ical(ics)
+        except Exception as exc:
+            raise InvalidIcsDataError(f"Could not parse ics: {exc}") from exc
+        if getattr(parsed, "name", None) != "VCALENDAR":
+            raise InvalidIcsDataError("ics must be a VCALENDAR.")
+
+        timezones = [c for c in parsed.subcomponents if c.name == "VTIMEZONE"]
+        groups: dict[tuple[str, str], list[Any]] = {}
+        for component in parsed.subcomponents:
+            if component.name not in ("VEVENT", "VTODO"):
+                continue
+            uid = str(component.get("UID") or uuid.uuid4())
+            groups.setdefault((uid, component.name), []).append(component)
+
+        if not groups:
+            raise InvalidIcsDataError("ics must contain at least one VEVENT or VTODO component.")
+
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+
+            importiert = 0
+            uebersprungen = 0
+            for (_uid, kind), components in groups.items():
+                if not self._supports_component(calendar, kind):
+                    uebersprungen += 1
+                    continue
+
+                sub_calendar = Calendar()
+                sub_calendar.add("prodid", "-//nextcloud-task-mcp//EN")
+                sub_calendar.add("version", "2.0")
+                for tz in timezones:
+                    sub_calendar.add_component(tz)
+                for component in components:
+                    sub_calendar.add_component(component)
+                ical_text = sub_calendar.to_ical().decode("utf-8")
+
+                try:
+                    if kind == "VEVENT":
+                        calendar.save_event(ical=ical_text)
+                    else:
+                        calendar.save_todo(ical=ical_text)
+                except TaskMcpError:
+                    raise
+                except Exception as exc:
+                    raise _translate(exc) from exc
+                importiert += 1
+
+        return {
+            "kalender_name": kalender_name,
+            "importiert": importiert,
+            "uebersprungen": uebersprungen,
+        }

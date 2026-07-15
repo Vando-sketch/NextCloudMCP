@@ -939,6 +939,43 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         await _call(caldav_service.restore_from_trash, id)
         return {"id": id}
 
+    @mcp.tool
+    async def export_calendar(kalender_name: str) -> dict[str, str]:
+        """Export a task list or event calendar as a single ICS (VCALENDAR) text.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar
+                to export (resolved across both kinds).
+
+        Returns:
+            {"kalender_name", "ics": the full VCALENDAR text, containing
+            every task/event in the calendar}.
+        """
+        return await _call(caldav_service.export_calendar, kalender_name)
+
+    @mcp.tool
+    async def import_ics(kalender_name: str, ics: str) -> dict[str, Any]:
+        """Import ICS (VCALENDAR) text into an existing task list or event calendar.
+
+        Top-level VEVENT/VTODO components are grouped by UID, so a recurring
+        event/task and its override instances are saved together as one
+        calendar object. A component whose kind (event/task) the target
+        calendar doesn't support is skipped rather than failing the whole
+        import.
+
+        Args:
+            kalender_name: Display name of the target task list or event
+                calendar (resolved across both kinds).
+            ics: Full ICS text; must be a VCALENDAR containing at least one
+                VEVENT or VTODO.
+
+        Returns:
+            {"kalender_name", "importiert": number of calendar objects
+            created, "uebersprungen": number skipped because the target
+            calendar doesn't support that component kind}.
+        """
+        return await _call(caldav_service.import_ics, kalender_name, ics)
+
     return mcp
 
 
