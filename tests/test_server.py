@@ -67,6 +67,8 @@ def test_all_tools_registered(tools):
         "share_calendar",
         "unshare_calendar",
         "list_calendar_shares",
+        "list_trash",
+        "restore_from_trash",
     }
 
 
@@ -539,6 +541,30 @@ def test_list_calendar_shares_delegates(tools, fake_service):
     assert result == [
         {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": True, "status": "akzeptiert"}
     ]
+
+
+# --- list_trash / restore_from_trash ---
+
+
+def test_list_trash_delegates(tools, fake_service):
+    fake_service.list_trash.return_value = [
+        {
+            "id": "42.ics",
+            "titel": "Einkaufen",
+            "typ": "aufgabe",
+            "kalender": "personal",
+            "geloescht_am": "2026-07-10T12:00:00+00:00",
+        }
+    ]
+    result = _run(tools["list_trash"].fn())
+    fake_service.list_trash.assert_called_once_with()
+    assert result[0]["id"] == "42.ics"
+
+
+def test_restore_from_trash_delegates(tools, fake_service):
+    result = _run(tools["restore_from_trash"].fn(id="42.ics"))
+    fake_service.restore_from_trash.assert_called_once_with("42.ics")
+    assert result == {"id": "42.ics"}
 
 
 def test_link_task_to_event_defaults_to_zeitblock(tools, fake_service):

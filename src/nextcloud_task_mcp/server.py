@@ -909,6 +909,36 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         """
         return await _call(caldav_service.list_calendar_shares, kalender_name)
 
+    @mcp.tool
+    async def list_trash() -> list[dict[str, Any]]:
+        """List deleted tasks/events in Nextcloud's calendar trash bin.
+
+        Uses Nextcloud's calendar-trashbin DAV plugin; on a server without
+        it, this fails with a clean "trash bin not available" error instead
+        of a raw HTTP error.
+
+        Returns:
+            A list of {"id": trash item id (pass to restore_from_trash),
+            "titel": title if derivable from the item's data or None,
+            "typ": "aufgabe"/"termin"/None, "kalender": the original
+            calendar's URI if reported by the server or None, "geloescht_am":
+            ISO 8601 deletion timestamp or None} dicts.
+        """
+        return await _call(caldav_service.list_trash)
+
+    @mcp.tool
+    async def restore_from_trash(id: str) -> dict[str, str]:
+        """Restore a deleted task/event from the trash bin to its original calendar.
+
+        Args:
+            id: Trash item id, as returned by list_trash's "id" field.
+
+        Returns:
+            {"id": id} on success.
+        """
+        await _call(caldav_service.restore_from_trash, id)
+        return {"id": id}
+
     return mcp
 
 
