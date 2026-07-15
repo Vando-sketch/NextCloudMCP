@@ -43,6 +43,14 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Fixed
 
+- **`list_trash` no longer fails with HTTP 501 against real Nextcloud**
+  (#13). Nextcloud's `DeletedCalendarObjectsCollection` doesn't support
+  listing children via PROPFIND - a Depth-1 PROPFIND on
+  `trashbin/objects/` is answered with `501 Not Implemented`. The listing
+  now uses a `CALDAV:calendar-query` REPORT instead, which returns the
+  trashed objects together with the `nc:deleted-at`/`nc:calendar-uri`
+  properties. Verified live against a Nextcloud instance (delete → list →
+  restore round-trip).
 - **Explicit UTC-offset datetimes (e.g. `2026-07-30T07:50:00+02:00`) no longer
   land on the wrong day after CalDAV sync.** `parse_datetime_input` used to
   keep an aware input's `tzinfo` as-is; `icalendar` serializes a fixed-offset
