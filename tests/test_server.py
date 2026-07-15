@@ -500,9 +500,7 @@ def test_share_calendar_delegates(tools, fake_service):
         "schreibzugriff": True,
     }
     result = _run(
-        tools["share_calendar"].fn(
-            kalender_name="Privat", empfaenger="bob", schreibzugriff=True
-        )
+        tools["share_calendar"].fn(kalender_name="Privat", empfaenger="bob", schreibzugriff=True)
     )
     fake_service.share_calendar.assert_called_once_with("Privat", "bob", False, True)
     assert result == {"kalender_name": "Privat", "empfaenger": "bob", "schreibzugriff": True}

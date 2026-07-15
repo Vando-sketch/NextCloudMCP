@@ -1826,9 +1826,7 @@ class CalDavService:
             "schreibzugriff": schreibzugriff,
         }
 
-    def unshare_calendar(
-        self, kalender_name: str, empfaenger: str, gruppe: bool = False
-    ) -> None:
+    def unshare_calendar(self, kalender_name: str, empfaenger: str, gruppe: bool = False) -> None:
         """Remove a user's or group's share of a task list or event calendar.
 
         A no-op (not an error) if `empfaenger` doesn't currently have a share
@@ -1891,8 +1889,7 @@ class CalDavService:
                 _invite_propfind_body(),
                 {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
                 forbidden_message=(
-                    f"Nextcloud denied reading the shares of '{kalender_name}' "
-                    "(permission denied)."
+                    f"Nextcloud denied reading the shares of '{kalender_name}' (permission denied)."
                 ),
             )
             if response.status not in (200, 207):
@@ -2026,9 +2023,7 @@ class CalDavService:
             calendar = self._resolve_collection_any(kalender_name)
 
             try:
-                events = (
-                    calendar.events() if self._supports_component(calendar, "VEVENT") else []
-                )
+                events = calendar.events() if self._supports_component(calendar, "VEVENT") else []
                 todos = (
                     calendar.todos(include_completed=True)
                     if self._supports_component(calendar, "VTODO")
