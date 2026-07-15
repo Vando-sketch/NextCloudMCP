@@ -24,7 +24,14 @@ accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
   / `get_task` as `"2026-07-20"`, not a midnight datetime.
 - Any other ISO 8601 datetime (e.g. `"2026-07-20T14:00:00"`,
   `"2026-07-20T14:00:00+02:00"`) is stored as a datetime. A **naive**
-  datetime (no UTC offset) is interpreted as UTC.
+  datetime (no UTC offset) is interpreted as UTC; a datetime with an
+  explicit offset is converted to (and always comes back as) UTC.
+- A datetime may instead be followed by a space and an **IANA timezone
+  name**, e.g. `"2026-07-20T14:00:00 Europe/Berlin"` — the correct
+  standard/daylight offset (e.g. CET vs. CEST) is then resolved for that
+  specific date, so callers don't have to work out themselves which one
+  applies. Combining a numeric offset and a timezone name in the same value
+  is rejected.
 
 ---
 
