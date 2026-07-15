@@ -2597,3 +2597,191 @@ def test_import_ics_calendar_not_found_across_both_kinds(service, principal):
 
     with pytest.raises(TaskMcpError, match="was not found"):
         service.import_ics("Ghost", _ICS_WITH_TZ.format(uid="e1", summary="Eins"))
+
+
+# ======================================================================
+# Batched per-collection metadata (supported-component-set + color)
+#
+# Regression guard for the per-tool-call latency fix: `_supports_component`
+# and `list_calendars`'s color lookup must read from ONE Depth-1 PROPFIND
+# over the calendar-home-set, not a PROPFIND per calendar (caldav's
+# `get_supported_components()` / color `get_properties()`).
+# ======================================================================
+
+
+_COLLECTION_META_XML = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"
+               xmlns:ical="http://apple.com/ns/ical/">
+  <d:response>
+    <d:href>/dav/calendars/u/personal/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>Personal</d:displayname>
+        <c:supported-calendar-component-set>
+          <c:comp name="VTODO"/>
+        </c:supported-calendar-component-set>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/dav/calendars/u/arbeit/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:displayname>Arbeit</d:displayname>
+        <c:supported-calendar-component-set>
+          <c:comp name="VEVENT"/>
+        </c:supported-calendar-component-set>
+        <ical:calendar-color>#FF0000FF</ical:calendar-color>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+
+
+def _personal_and_arbeit() -> tuple[MagicMock, MagicMock]:
+    personal = _make_calendar("Personal", "https://cloud.example.com/dav/calendars/u/personal/")
+    arbeit = _make_calendar(
+        "Arbeit", "https://cloud.example.com/dav/calendars/u/arbeit/", components=["VEVENT"]
+    )
+    return personal, arbeit
+
+
+def test_list_task_lists_uses_batched_metadata_not_per_calendar_propfind(
+    service, principal, dav_client
+):
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    result = service.list_task_lists()
+
+    # Only the VTODO collection is returned, resolved from the batch.
+    assert result == [{"name": "Personal", "url": "https://cloud.example.com/dav/calendars/u/personal/"}]
+    # The component support came from the single batched PROPFIND, not from a
+    # per-calendar caldav lookup.
+    personal.get_supported_components.assert_not_called()
+    arbeit.get_supported_components.assert_not_called()
+    # Exactly one PROPFIND, over the calendar-home-set, at Depth 1.
+    assert dav_client.request.call_count == 1
+    args, _ = dav_client.request.call_args
+    assert args[0] == "https://cloud.example.com/dav/calendars/u/"
+    assert args[1] == "PROPFIND"
+    assert args[3]["Depth"] == "1"
+
+
+def test_list_calendars_reads_color_from_batched_metadata(service, principal, dav_client):
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    result = service.list_calendars()
+
+    assert result == [
+        {
+            "name": "Arbeit",
+            "url": "https://cloud.example.com/dav/calendars/u/arbeit/",
+            "farbe": "#FF0000FF",
+            "komponenten": ["VEVENT"],
+        }
+    ]
+    # Color came from the batch, not a per-calendar CalendarColor PROPFIND.
+    arbeit.get_properties.assert_not_called()
+    personal.get_supported_components.assert_not_called()
+    arbeit.get_supported_components.assert_not_called()
+
+
+def test_collection_metadata_is_cached_across_calls(service, principal, dav_client):
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    service.list_task_lists()
+    service.list_task_lists()
+
+    # The metadata PROPFIND runs once for the process, not once per call.
+    assert dav_client.request.call_count == 1
+
+
+def test_collection_metadata_invalidated_after_create(service, principal, dav_client):
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    service.list_task_lists()
+    assert dav_client.request.call_count == 1
+
+    principal.make_calendar.return_value = _make_calendar(
+        "Groceries", "https://cloud.example.com/dav/calendars/u/groceries/"
+    )
+    service.create_task_list("Groceries")
+
+    # Creating a collection drops the cache, so the next listing re-fetches.
+    service.list_task_lists()
+    assert dav_client.request.call_count == 2
+
+
+def test_supports_component_falls_back_when_calendar_absent_from_batch(
+    service, principal, dav_client
+):
+    # A calendar whose href isn't in the batched response (e.g. a subscription
+    # collection elsewhere) still resolves via caldav's per-calendar lookup.
+    stray = _make_calendar(
+        "Extern", "https://other.example.com/dav/feeds/holidays/", components=["VEVENT"]
+    )
+    stray.get_properties.return_value = {}
+    principal.calendars.return_value = [stray]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    result = service.list_calendars()
+
+    assert result == [
+        {
+            "name": "Extern",
+            "url": "https://other.example.com/dav/feeds/holidays/",
+            "farbe": None,
+            "komponenten": ["VEVENT"],
+        }
+    ]
+    stray.get_supported_components.assert_called()
+
+
+def test_collection_list_is_cached_across_calls(service, principal):
+    principal.calendars.return_value = [_make_calendar("Personal")]
+
+    service.list_task_lists()
+    service.list_task_lists()
+
+    # `principal.calendars()` (two PROPFINDs in caldav) runs once, not per call.
+    assert principal.calendars.call_count == 1
+
+
+def test_collection_list_refetched_after_create(service, principal):
+    principal.calendars.return_value = [_make_calendar("Personal")]
+
+    service.list_task_lists()
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+
+    principal.make_calendar.return_value = _make_calendar(
+        "Groceries", "https://cloud.example.com/dav/calendars/u/groceries/"
+    )
+    service.create_task_list("Groceries")  # fresh list for the conflict check
+    service.list_task_lists()  # cache was invalidated by the create
+
+    assert principal.calendars.call_count == 3
+
+
+def test_collection_list_refetched_after_rename(service, principal):
+    cal = _make_calendar("Alt", "https://cloud.example.com/dav/calendars/u/alt/")
+    principal.calendars.return_value = [cal]
+
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+
+    service.rename_task_list("Alt", "Neu")  # fresh list + invalidation
+    service.list_task_lists()
+
+    assert principal.calendars.call_count == 3
