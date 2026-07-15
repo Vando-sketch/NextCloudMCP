@@ -232,7 +232,12 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
         (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
         datetime; a *naive* datetime (no UTC offset, e.g.
-        "2026-07-20T14:00:00") is interpreted as UTC.
+        "2026-07-20T14:00:00") is interpreted as UTC. A datetime may instead
+        be followed by a space and an IANA timezone name, e.g.
+        "2026-07-20T14:00:00 Europe/Berlin" - the correct offset (standard or
+        daylight time) is then resolved for that specific date, so callers
+        don't need to work out themselves whether e.g. CET or CEST applies.
+        Combining a numeric offset with a timezone name is rejected.
 
         Returns:
             {"uid": the new task's UID}.
@@ -497,7 +502,12 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             kalender_name: Display name of the target event calendar.
             titel: Event title (VEVENT SUMMARY).
             start: ISO 8601 start -> DTSTART. Exactly "YYYY-MM-DD" creates an
-                all-day event; naive datetimes are interpreted as UTC.
+                all-day event; naive datetimes are interpreted as UTC. A
+                datetime may instead be followed by a space and an IANA
+                timezone name (e.g. "2026-07-20T14:00:00 Europe/Berlin") to
+                have the correct standard/daylight offset resolved for that
+                date automatically; combining a numeric offset with a
+                timezone name is rejected.
             ende: Optional ISO 8601 end -> DTEND. For all-day events this is
                 the last day INCLUSIVE (e.g. start="2026-07-20",
                 ende="2026-07-21" spans two days). start and ende must both be
