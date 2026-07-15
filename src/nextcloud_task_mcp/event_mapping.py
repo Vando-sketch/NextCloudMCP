@@ -720,3 +720,107 @@ def filter_events(
     if limit is not None:
         events = events[:limit]
     return events
+
+
+# ======================================================================
+# Free-busy (get_free_busy)
+# ======================================================================
+
+
+def event_busy_interval(component) -> tuple[datetime, datetime] | None:
+    """Return the (start, end) UTC interval a VEVENT occupies, or None if it
+    doesn't count as busy time.
+
+    A cancelled event (STATUS=CANCELLED) or a transparent one
+    (TRANSP=TRANSPARENT, e.g. Nextcloud's "does not block time" option) is
+    not busy time; neither is an event without a DTSTART. All-day dates are
+    expanded to the full UTC day(s) they cover, using the same DTEND/DURATION
+    fallback as `_format_end` - but returning the *exclusive* end datetime
+    (unlike the German `ende` field, which is inclusive), since that's the
+    natural representation for an interval to be merged with others in
+    `merge_busy_intervals`. An event with an end at or before its start
+    collapses to a zero-length interval at its start rather than going
+    negative.
+    """
+    status = component.get("status")
+    if status is not None and str(status).strip().upper() == "CANCELLED":
+        return None
+    transp = component.get("transp")
+    if transp is not None and str(transp).strip().upper() == "TRANSPARENT":
+        return None
+
+    dtstart = component.get("dtstart")
+    if dtstart is None:
+        return None
+    start_value = dtstart.dt
+
+    dtend = component.get("dtend")
+    if dtend is not None:
+        end_value = dtend.dt
+    else:
+        duration = component.get("duration")
+        end_value = start_value + duration.dt if duration is not None else start_value
+
+    def _to_utc_instant(value: date | datetime) -> datetime:
+        if isinstance(value, datetime):
+            return _as_utc(value)
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+
+    start_dt = _to_utc_instant(start_value)
+    end_dt = _to_utc_instant(end_value)
+    if end_dt < start_dt:
+        end_dt = start_dt
+    return (start_dt, end_dt)
+
+
+def merge_busy_intervals(
+    intervals: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Sort and coalesce overlapping (or touching) busy intervals.
+
+    Zero-length intervals (end == start, e.g. a point-in-time busy marker)
+    are dropped - they contribute no actual busy time. Touching intervals
+    (one ends exactly when the next starts, as with back-to-back meetings)
+    are merged into one, the same as overlapping ones - a caller asking "is
+    this person busy" gets one contiguous block rather than an artificial
+    seam. Input order doesn't matter; naive datetimes are treated as UTC,
+    same rule as everywhere else in this module.
+    """
+    normalized = sorted((_as_utc(start), _as_utc(end)) for start, end in intervals if end > start)
+    merged: list[list[datetime]] = []
+    for start, end in normalized:
+        if merged and start <= merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1][1] = end
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
+    """Read the busy periods off a parsed VFREEBUSY component (RFC 5545 FREEBUSY).
+
+    Only FBTYPE=FREE periods are excluded - BUSY, BUSY-TENTATIVE and
+    BUSY-UNAVAILABLE (and any FBTYPE this server doesn't specifically know
+    about) all count as busy time, mirroring `get_free_busy`'s "is this
+    person unavailable" question rather than trying to distinguish shades of
+    busy. Handles both wire forms icalendar produces when parsing a VFREEBUSY
+    with more than one FREEBUSY property (each period keeps its own FBTYPE
+    parameter, even when flattened into one list by icalendar).
+    """
+    freebusy = component.get("freebusy")
+    if freebusy is None:
+        return []
+    entries = freebusy if isinstance(freebusy, list) else [freebusy]
+    periods: list[tuple[datetime, datetime]] = []
+    for entry in entries:
+        params = getattr(entry, "params", {}) or {}
+        fbtype = str(params.get("FBTYPE", "BUSY")).strip().upper()
+        if fbtype == "FREE":
+            continue
+        start = getattr(entry, "start", None)
+        end = getattr(entry, "end", None)
+        if start is None or end is None:
+            continue
+        periods.append((_as_utc(start), _as_utc(end)))
+    return periods

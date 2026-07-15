@@ -806,6 +806,109 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             list_names=listen_namen,
         )
 
+    @mcp.tool
+    async def get_free_busy(
+        von: str,
+        bis: str,
+        benutzer: str | None = None,
+    ) -> dict[str, Any]:
+        """Get busy time intervals in a date/time range, for yourself or another user.
+
+        Args:
+            von: ISO 8601 start of the range. Naive datetimes are interpreted
+                as UTC; a date-only value means the start of that day.
+            bis: ISO 8601 end of the range. A date-only value includes that
+                entire day.
+            benutzer: Optional Nextcloud user id or email of another account
+                to query. When omitted (default), returns your own
+                availability, computed by aggregating your own event
+                calendars. When given, this sends a CalDAV free-busy
+                scheduling request to the server for that user - the server
+                resolves `benutzer`, not this tool; a user with no visible
+                scheduling info (unknown to the server, or with scheduling
+                disabled) produces an error rather than an empty result, so
+                it isn't mistaken for "fully free".
+
+        Returns:
+            {"von": range start, "bis": range end, "benutzer": benutzer,
+            "belegt": merged, sorted busy intervals as a list of
+            {"von": iso, "bis": iso} dicts}. Cancelled and "transparent"
+            (does-not-block-time) events are excluded from your own
+            availability; overlapping/back-to-back busy blocks are merged
+            into one interval.
+        """
+        return await _call(caldav_service.get_free_busy, von, bis, benutzer)
+
+    @mcp.tool
+    async def share_calendar(
+        kalender_name: str,
+        empfaenger: str,
+        gruppe: bool = False,
+        schreibzugriff: bool = False,
+    ) -> dict[str, Any]:
+        """Share a task list or event calendar with a Nextcloud user or group.
+
+        Uses Nextcloud's own CalDAV sharing extension - this only works
+        against a real Nextcloud server, not a generic CalDAV server, since
+        it isn't part of any CalDAV RFC. Calling this again for the same
+        empfaenger updates their access level instead of creating a
+        duplicate share.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar
+                to share (resolved across both kinds).
+            empfaenger: Nextcloud user id (or group id when gruppe=True) to
+                share with.
+            gruppe: If True, empfaenger names a group instead of a user.
+            schreibzugriff: If True, grant read-write access; otherwise the
+                share is read-only.
+
+        Returns:
+            {"kalender_name", "empfaenger", "schreibzugriff"} on success.
+        """
+        return await _call(
+            caldav_service.share_calendar, kalender_name, empfaenger, gruppe, schreibzugriff
+        )
+
+    @mcp.tool
+    async def unshare_calendar(
+        kalender_name: str,
+        empfaenger: str,
+        gruppe: bool = False,
+    ) -> dict[str, str]:
+        """Remove a user's or group's share of a task list or event calendar.
+
+        A no-op (not an error) if empfaenger doesn't currently have a share
+        of this calendar.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar.
+            empfaenger: Nextcloud user id (or group id when gruppe=True) to
+                unshare from.
+            gruppe: If True, empfaenger names a group instead of a user.
+
+        Returns:
+            {"kalender_name", "empfaenger"} on success.
+        """
+        await _call(caldav_service.unshare_calendar, kalender_name, empfaenger, gruppe)
+        return {"kalender_name": kalender_name, "empfaenger": empfaenger}
+
+    @mcp.tool
+    async def list_calendar_shares(kalender_name: str) -> list[dict[str, Any]]:
+        """List everyone a task list or event calendar is currently shared with.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar.
+
+        Returns:
+            A list of {"empfaenger": user/group id, "typ": "benutzer" or
+            "gruppe", "schreibzugriff": bool, "status": invite status, e.g.
+            "akzeptiert"/"ausstehend"/"abgelehnt" (an unrecognized raw status
+            from the server comes back lowercased instead of being dropped)}
+            dicts.
+        """
+        return await _call(caldav_service.list_calendar_shares, kalender_name)
+
     return mcp
 
 

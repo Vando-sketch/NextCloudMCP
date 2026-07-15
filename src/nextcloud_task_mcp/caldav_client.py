@@ -6,9 +6,10 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, TypeVar
+from urllib.parse import unquote
 
 from caldav.collection import Calendar as DAVCalendar
 from caldav.collection import Principal as DAVPrincipal
@@ -17,6 +18,7 @@ from caldav.elements import dav
 from caldav.elements import ical as ical_elements
 from caldav.lib import error as caldav_error
 from icalendar import Calendar, Event, Todo
+from lxml import etree
 
 # caldav's top-level `caldav.DAVClient`/`DAVPrincipal`/`DAVCalendar`
 # are exposed via PEP 562 module-level lazy imports (see caldav/__init__.py),
@@ -141,6 +143,159 @@ def _translate(exc: Exception) -> TaskMcpError:
         return ConnectionFailedError("A network error occurred talking to Nextcloud.")
     logger.warning("Unexpected error talking to Nextcloud", exc_info=exc)
     return TaskMcpError("An unexpected error occurred talking to Nextcloud.")
+
+
+# ----------------------------------------------------------------------
+# Nextcloud-specific DAV extensions (sharing, trashbin): these are not part
+# of any CalDAV RFC and have no API in the caldav library, so the methods
+# below build/parse raw XML and send it through `DAVClient.request` directly
+# (see `CalDavService._dav_request`). Namespaces per Nextcloud's sabre/dav
+# app (`OCA\DAV\DAV\Sharing\Plugin::NS_OWNCLOUD`/`NS_NEXTCLOUD`).
+# ----------------------------------------------------------------------
+
+_DAV_NS = "DAV:"
+_OC_NS = "http://owncloud.org/ns"
+
+# Maps the {oc}invite-* child element found on an {oc}user share entry to
+# the German status vocabulary this server returns. Nextcloud's own server
+# currently always emits invite-accepted (shares are auto-accepted), but
+# other invite-* elements are part of the same sharing XML vocabulary (they
+# do appear for the closely related calendarserver.org CalDAV-sharing
+# elements some clients/servers use) - handled liberally rather than assumed
+# absent.
+_INVITE_STATUS_MAP = {
+    "invite-accepted": "akzeptiert",
+    "invite-declined": "abgelehnt",
+    "invite-noresponse": "ausstehend",
+    "invite-invalid": "ungueltig",
+    "invite-deleted": "geloescht",
+}
+
+
+def _clark(namespace: str, tag: str) -> str:
+    """Build a Clark-notation tag ("{ns}tag") for lxml element construction/lookup."""
+    return f"{{{namespace}}}{tag}"
+
+
+def _local_name(tag: str) -> str:
+    """Strip the Clark-notation namespace off an lxml element tag."""
+    return tag.split("}", 1)[1] if "}" in tag else tag
+
+
+def _principal_href(empfaenger: str, gruppe: bool) -> str:
+    """Build the "principal:principals/<users|groups>/<id>" href Nextcloud's
+    sharing plugin expects in a `{oc}share` request's `{DAV:}href`."""
+    kind = "groups" if gruppe else "users"
+    return f"principal:principals/{kind}/{empfaenger}"
+
+
+def _parse_principal_href(href: str) -> tuple[str | None, str]:
+    """Reverse of `_principal_href`: recover (id, "benutzer"|"gruppe") from a
+    share entry's `{DAV:}href` text (as returned in a `{oc}invite` listing).
+
+    Parsed liberally: the leading "principal:" scheme prefix is optional, and
+    any href of the general shape ".../<users|groups>/<id>" is recognized
+    even without a "principals/" segment before it, so a server that renders
+    this slightly differently is still handled. Falls back to treating the
+    last path segment as a user id if the kind can't be determined.
+    """
+    remainder = href.strip()
+    if remainder.lower().startswith("principal:"):
+        remainder = remainder[len("principal:") :]
+    parts = [p for p in remainder.strip("/").split("/") if p]
+    if not parts:
+        return None, "benutzer"
+    if len(parts) >= 2 and parts[-2] in ("users", "groups"):
+        kind = "gruppe" if parts[-2] == "groups" else "benutzer"
+        return unquote(parts[-1]), kind
+    return unquote(parts[-1]), "benutzer"
+
+
+def _share_request_body(principal_href: str, *, remove: bool, read_write: bool) -> str:
+    """Build the `{oc}share` POST body to add/update or remove one sharee."""
+    root = etree.Element(_clark(_OC_NS, "share"), nsmap={"d": _DAV_NS, "o": _OC_NS})
+    if remove:
+        action = etree.SubElement(root, _clark(_OC_NS, "remove"))
+        etree.SubElement(action, _clark(_DAV_NS, "href")).text = principal_href
+    else:
+        action = etree.SubElement(root, _clark(_OC_NS, "set"))
+        etree.SubElement(action, _clark(_DAV_NS, "href")).text = principal_href
+        etree.SubElement(action, _clark(_OC_NS, "summary"))
+        if read_write:
+            etree.SubElement(action, _clark(_OC_NS, "read-write"))
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
+
+
+def _invite_propfind_body() -> str:
+    """Build a PROPFIND body requesting just the `{oc}invite` property."""
+    root = etree.Element(_clark(_DAV_NS, "propfind"), nsmap={"d": _DAV_NS, "o": _OC_NS})
+    prop = etree.SubElement(root, _clark(_DAV_NS, "prop"))
+    etree.SubElement(prop, _clark(_OC_NS, "invite"))
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8").decode("utf-8")
+
+
+def _iter_multistatus_responses(
+    tree: Any,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield (href, {Clark-tag: element}) for each `{DAV:}response` in a
+    multistatus tree, collecting only properties reported with a 200 OK
+    propstat (a property Nextcloud doesn't have for a given resource comes
+    back under a 404 propstat instead, which is silently skipped here).
+    """
+    if tree is None:
+        return
+    for response_el in tree.findall(_clark(_DAV_NS, "response")):
+        href_el = response_el.find(_clark(_DAV_NS, "href"))
+        if href_el is None or not href_el.text:
+            continue
+        props: dict[str, Any] = {}
+        for propstat_el in response_el.findall(_clark(_DAV_NS, "propstat")):
+            status_el = propstat_el.find(_clark(_DAV_NS, "status"))
+            if status_el is None or status_el.text is None or " 200 " not in f" {status_el.text} ":
+                continue
+            prop_el = propstat_el.find(_clark(_DAV_NS, "prop"))
+            if prop_el is None:
+                continue
+            for child in prop_el:
+                props[child.tag] = child
+        yield href_el.text, props
+
+
+def _parse_invite_response(tree: Any) -> list[dict[str, Any]]:
+    """Parse a `{oc}invite` PROPFIND response into share dicts."""
+    shares: list[dict[str, Any]] = []
+    for _, props in _iter_multistatus_responses(tree):
+        invite_el = props.get(_clark(_OC_NS, "invite"))
+        if invite_el is None:
+            continue
+        for user_el in invite_el:
+            if _local_name(user_el.tag) != "user":
+                continue  # skip {oc}organizer - that's the sharer, not a sharee
+            href_el = user_el.find(_clark(_DAV_NS, "href"))
+            if href_el is None or not href_el.text:
+                continue
+            empfaenger, typ = _parse_principal_href(href_el.text)
+            if not empfaenger:
+                continue
+            access_el = user_el.find(_clark(_OC_NS, "access"))
+            read_write = access_el is not None and any(
+                _local_name(child.tag) == "read-write" for child in access_el
+            )
+            status = "akzeptiert"
+            for child in user_el:
+                local = _local_name(child.tag)
+                if local.startswith("invite-"):
+                    status = _INVITE_STATUS_MAP.get(local, local[len("invite-") :])
+                    break
+            shares.append(
+                {
+                    "empfaenger": empfaenger,
+                    "typ": typ,
+                    "schreibzugriff": read_write,
+                    "status": status,
+                }
+            )
+    return shares
 
 
 class CalDavService:
@@ -360,6 +515,58 @@ class CalDavService:
     def _with_calendar(self, list_name: str, fn: Callable[[DAVCalendar], _T]) -> _T:
         """Task-list flavour of `_with_collection`, kept for the VTODO call sites."""
         return self._with_collection(list_name, "VTODO", fn)
+
+    def _resolve_collection_any(self, name: str) -> DAVCalendar:
+        """Resolve `name` to a collection of either kind (task list or event calendar).
+
+        Used by the cross-cutting Nextcloud features below (sharing, ICS
+        export/import) that operate identically on both kinds. Tries the
+        VEVENT-supporting collections first, then VTODO; an ambiguous name
+        found within either kind is raised immediately - matching
+        `_resolve_collection`'s "don't guess" stance - rather than silently
+        falling through to try the other kind.
+        """
+        try:
+            return self._resolve_collection(name, "VEVENT")
+        except (CalendarNotFoundError, TaskListNotFoundError):
+            pass
+        try:
+            return self._resolve_collection(name, "VTODO")
+        except (CalendarNotFoundError, TaskListNotFoundError) as exc:
+            raise TaskMcpError(f"Calendar or task list '{name}' was not found.") from exc
+
+    def _dav_request(
+        self,
+        url: Any,
+        method: str,
+        body: str,
+        headers: dict[str, str],
+        *,
+        forbidden_message: str,
+    ) -> Any:
+        """Send a raw DAV request via the shared session, translating errors.
+
+        Nextcloud's sharing/trashbin extensions used below are outside plain
+        CalDAV and have no caldav-library API, so these go straight through
+        `DAVClient.request`. Its own auth-negotiation logic already turns any
+        HTTP 401/403 response into `caldav_error.AuthorizationError` before
+        this ever sees a response object (see `DAVClient._sync_request`) -
+        `_translate` would turn that into a generic "bad credentials"
+        message, which is misleading for a 403 that actually means "no
+        permission for this specific operation", so it's caught here and
+        replaced with the caller-supplied, operation-specific
+        `forbidden_message` instead. Any other response (including 404 and
+        other 4xx/5xx) comes back as a normal `DAVResponse` for the caller to
+        inspect via `.status`.
+        """
+        try:
+            return self._client.request(str(url), method, body, headers)
+        except caldav_error.AuthorizationError as exc:
+            raise TaskMcpError(forbidden_message) from exc
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
 
     def list_task_lists(self) -> list[dict[str, str]]:
         """Return all VTODO-supporting calendars on the account as {"name", "url"} dicts.
@@ -1387,3 +1594,238 @@ class CalDavService:
                     aufgaben.append(task)
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
+
+    # ------------------------------------------------------------------
+    # Free-busy
+    # ------------------------------------------------------------------
+
+    def get_free_busy(self, von: str, bis: str, benutzer: str | None = None) -> dict[str, Any]:
+        """Return merged busy intervals in [von, bis] for the caller, or another user.
+
+        With `benutzer=None`, busy blocks are computed from every VEVENT
+        calendar the caller can see: events in range are fetched the same way
+        as `list_events` (a server-side CalDAV time-range REPORT), then
+        non-cancelled, non-transparent ones contribute a busy interval (see
+        `event_mapping.event_busy_interval`), merged and sorted (see
+        `event_mapping.merge_busy_intervals`).
+
+        With `benutzer` set, a CalDAV RFC 6638 free-busy scheduling request is
+        sent to the server (`principal.freebusy_request`, POSTing a VFREEBUSY
+        to the schedule-outbox) asking about that user - the server resolves
+        `benutzer` against its own known accounts, not this client. If the
+        server rejects the request (unknown user, scheduling disabled, ...)
+        this raises a `TaskMcpError` with a clean, actionable message.
+        """
+        start_bound = self._range_bound(von, exclusive_end=False)
+        end_bound = self._range_bound(bis, exclusive_end=True)
+        if start_bound is None or end_bound is None:
+            raise InvalidEventDataError("von and bis are required for get_free_busy.")
+
+        with self._lock:
+            if benutzer is None:
+                merged = self._own_free_busy(start_bound, end_bound)
+            else:
+                merged = self._free_busy_for_user(benutzer, start_bound, end_bound)
+
+        return {
+            "von": start_bound.isoformat(),
+            "bis": end_bound.isoformat(),
+            "benutzer": benutzer,
+            "belegt": [{"von": start.isoformat(), "bis": end.isoformat()} for start, end in merged],
+        }
+
+    def _own_free_busy(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+        targets = self._event_calendars(None)
+        intervals: list[tuple[datetime, datetime]] = []
+        for name, target_calendar in targets:
+            try:
+                # `_event_calendars(None)` just freshly listed everything, so
+                # (like list_events's all-calendars branch) query the object
+                # directly rather than going through the cache-retry path.
+                objs = target_calendar.search(start=start, end=end, event=True, expand=False)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise CalendarNotFoundError(f"Calendar '{name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            for obj in objs:
+                interval = event_mapping.event_busy_interval(obj.icalendar_component)
+                if interval is not None:
+                    intervals.append(interval)
+
+        return event_mapping.merge_busy_intervals(intervals)
+
+    def _free_busy_for_user(
+        self, benutzer: str, start: datetime, end: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        principal = self._get_principal()
+        is_mailto = benutzer.strip().lower().startswith("mailto:")
+        address = benutzer if is_mailto else f"mailto:{benutzer}"
+        bare = address[len("mailto:") :]
+
+        try:
+            response = principal.freebusy_request(start, end, [address])
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
+
+        if not isinstance(response, dict):
+            raise TaskMcpError(
+                f"Nextcloud returned an unexpected free/busy response for '{benutzer}'."
+            )
+
+        errors = response.get("errors") or {}
+        entry = response.get(address, response.get(bare))
+        if entry is None:
+            # A single-attendee request should get back at most one non-error
+            # key; if the server echoed the recipient back in some other form
+            # (case, trailing slash, ...) this still finds it without having
+            # to guess every possible normalization.
+            other_keys = [key for key in response if key != "errors"]
+            if len(other_keys) == 1:
+                entry = response[other_keys[0]]
+
+        if entry is None:
+            detail = errors.get(address) or errors.get(bare) or next(iter(errors.values()), None)
+            message = (
+                f"Nextcloud could not provide free/busy information for '{benutzer}' "
+                "(the user may be unknown, or scheduling may be disabled on the server)."
+            )
+            if detail:
+                message += f" Server status: {detail}"
+            raise TaskMcpError(message)
+
+        try:
+            component = entry.icalendar_component
+        except Exception as exc:
+            raise _translate(exc) from exc
+
+        periods = event_mapping.extract_freebusy_periods(component)
+        return event_mapping.merge_busy_intervals(periods)
+
+    # ------------------------------------------------------------------
+    # Calendar sharing (Nextcloud DAV extension - not part of any CalDAV
+    # RFC, so this only works against a real Nextcloud server)
+    # ------------------------------------------------------------------
+
+    def share_calendar(
+        self,
+        kalender_name: str,
+        empfaenger: str,
+        gruppe: bool = False,
+        schreibzugriff: bool = False,
+    ) -> dict[str, Any]:
+        """Share a task list or event calendar with a Nextcloud user or group.
+
+        Uses Nextcloud's own CalDAV sharing extension (POST `{DAV:}share` to
+        the collection's own URL) - this has no equivalent in any CalDAV RFC,
+        so it only works against a real Nextcloud server. Calling this again
+        for the same `empfaenger` updates their access level rather than
+        creating a duplicate share.
+        """
+        if not empfaenger or not empfaenger.strip():
+            raise TaskMcpError("empfaenger is required to share a calendar.")
+
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+            body = _share_request_body(
+                _principal_href(empfaenger, gruppe), remove=False, read_write=schreibzugriff
+            )
+            response = self._dav_request(
+                calendar.url,
+                "POST",
+                body,
+                {"Content-Type": "application/xml; charset=utf-8"},
+                forbidden_message=(
+                    f"Nextcloud denied sharing '{kalender_name}' with '{empfaenger}' "
+                    "(permission denied, or the sharing backend is disabled)."
+                ),
+            )
+            self._raise_for_share_response(response, kalender_name, empfaenger)
+
+        return {
+            "kalender_name": kalender_name,
+            "empfaenger": empfaenger,
+            "schreibzugriff": schreibzugriff,
+        }
+
+    def unshare_calendar(self, kalender_name: str, empfaenger: str, gruppe: bool = False) -> None:
+        """Remove a user's or group's share of a task list or event calendar.
+
+        A no-op (not an error) if `empfaenger` doesn't currently have a share
+        of this calendar - Nextcloud's sharing plugin doesn't distinguish
+        "removed" from "wasn't shared" in its response.
+        """
+        if not empfaenger or not empfaenger.strip():
+            raise TaskMcpError("empfaenger is required to unshare a calendar.")
+
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+            body = _share_request_body(
+                _principal_href(empfaenger, gruppe), remove=True, read_write=False
+            )
+            response = self._dav_request(
+                calendar.url,
+                "POST",
+                body,
+                {"Content-Type": "application/xml; charset=utf-8"},
+                forbidden_message=(
+                    f"Nextcloud denied unsharing '{kalender_name}' from '{empfaenger}' "
+                    "(permission denied, or the sharing backend is disabled)."
+                ),
+            )
+            self._raise_for_share_response(response, kalender_name, empfaenger)
+
+    def _raise_for_share_response(self, response: Any, kalender_name: str, empfaenger: str) -> None:
+        if response.status in (200, 204, 207):
+            return
+        if response.status == 404:
+            raise TaskMcpError(
+                f"Nextcloud could not find user/group '{empfaenger}' to share "
+                f"'{kalender_name}' with."
+            )
+        if response.status == 400:
+            raise TaskMcpError(
+                f"Nextcloud rejected the sharing request for '{kalender_name}' as invalid "
+                f"(check that '{empfaenger}' is a valid user/group id)."
+            )
+        logger.warning(
+            "Unexpected sharing response %s for calendar %s", response.status, kalender_name
+        )
+        raise TaskMcpError(
+            f"Nextcloud rejected the sharing request for '{kalender_name}' "
+            f"(HTTP {response.status})."
+        )
+
+    def list_calendar_shares(self, kalender_name: str) -> list[dict[str, Any]]:
+        """List everyone a task list or event calendar is currently shared with.
+
+        Reads Nextcloud's `{oc}invite` DAV property (PROPFIND, Depth 0) -
+        like `share_calendar`, this only works against a real Nextcloud
+        server.
+        """
+        with self._lock:
+            calendar = self._resolve_collection_any(kalender_name)
+            response = self._dav_request(
+                calendar.url,
+                "PROPFIND",
+                _invite_propfind_body(),
+                {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
+                forbidden_message=(
+                    f"Nextcloud denied reading the shares of '{kalender_name}' (permission denied)."
+                ),
+            )
+            if response.status not in (200, 207):
+                logger.warning(
+                    "Unexpected share-listing response %s for calendar %s",
+                    response.status,
+                    kalender_name,
+                )
+                raise TaskMcpError(
+                    f"Nextcloud returned an unexpected error listing the shares of "
+                    f"'{kalender_name}' (HTTP {response.status})."
+                )
+            return _parse_invite_response(response.tree)
