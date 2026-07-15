@@ -445,8 +445,14 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             ende (all-day: inclusive last day), ganztaegig, ort, beschreibung,
             tags, status ("bestätigt"/"vorläufig"/"abgesagt" or None),
             sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
-            url, verknuepfte_aufgaben (RELATED-TO links), wiederholung_von,
-            kalender (the calendar's display name).
+            url, verknuepfte_aufgaben (RELATED-TO links; each entry's
+            "beziehung" uses the same values as link_task_to_event's
+            beziehung parameter - "zeitblock"/"voraussetzung" - plus
+            "gleichrangig" or a raw lowercased RELTYPE for links written by
+            other CalDAV clients), wiederholung_von, kalender (the calendar's
+            display name), organisator ({"email", "name"} or None), teilnehmer
+            (list of {"email", "name", "status", "rolle", "rsvp"}; "status" is
+            "ausstehend"/"zugesagt"/"abgesagt"/"vorläufig"/"delegiert").
         """
         return await _call(
             caldav_service.list_events,
@@ -488,6 +494,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         erinnerungen: list[str] | None = None,
         url: str | None = None,
         verknuepfte_aufgabe: str | None = None,
+        teilnehmer: list[dict[str, Any]] | None = None,
     ) -> dict[str, str]:
         """Create a new calendar event.
 
@@ -519,7 +526,20 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
                 absolute ISO 8601 datetime -> VALARM.
             url: Optional URL -> URL.
             verknuepfte_aufgabe: Optional UID of an existing task this event
-                reserves time for -> RELATED-TO;RELTYPE=PARENT on the event.
+                reserves time for -> RELATED-TO;RELTYPE=PARENT on the event
+                (the "zeitblock" semantics of link_task_to_event; reading the
+                event back via list_events/get_event surfaces this as a
+                verknuepfte_aufgaben entry with beziehung "zeitblock").
+            teilnehmer: Optional list of attendees -> ATTENDEE. Each entry:
+                {"email": required, "name": optional, "rolle": optional
+                "leitung"/"erforderlich"/"optional"/"keine-teilnahme" (default
+                "erforderlich"), "rsvp": optional bool (default True)}. The
+                first time attendees are added to an event with none yet,
+                ORGANIZER is set to your own account's address automatically.
+                IMPORTANT: Nextcloud's CalDAV server does server-side
+                scheduling - saving an event with ORGANIZER+ATTENDEE sends
+                iMIP invitation mails automatically; this tool does not send
+                any mail itself.
 
         Returns:
             {"uid": the new event's UID}.
@@ -538,6 +558,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             erinnerungen=erinnerungen,
             url=url,
             verknuepfte_aufgabe=verknuepfte_aufgabe,
+            teilnehmer=teilnehmer,
         )
         new_uid = await _call(caldav_service.create_event, kalender_name, fields)
         return {"uid": new_uid}
@@ -559,6 +580,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         erinnerungen: list[str] | None = None,
         url: str | None = None,
         verknuepfte_aufgabe: str | None = None,
+        teilnehmer: list[dict[str, Any]] | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing event. Only fields that are explicitly given are changed.
@@ -570,13 +592,23 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
                 field left as None is left unchanged. To move a single
                 occurrence of a recurring event, add its original date to
                 ausnahme_daten and create a separate replacement event.
+            teilnehmer: Optional, same shape as in create_event. Setting this
+                REPLACES the event's entire attendee list (it is not an
+                append). As in create_event, ORGANIZER is set to your own
+                account's address the first time attendees are added to an
+                event that has none yet; Nextcloud sends iMIP invitation
+                mails server-side once the event is saved, not this tool. To
+                respond to an event you were invited to (set your own RSVP
+                status), use respond_to_event instead of this tool.
             felder_leeren: Optional list of field names to clear (remove the
                 property entirely). Accepted values: "ende", "ort",
                 "beschreibung", "tags", "status", "sichtbarkeit",
                 "wiederholung", "ausnahme_daten", "erinnerungen", "url",
-                "verknuepfte_aufgabe". "titel" and "start" cannot be cleared.
-                Naming an unknown field, or naming a field that is also given
-                a new value in the same call, is an error.
+                "verknuepfte_aufgabe", "teilnehmer" (clearing "teilnehmer"
+                removes every attendee and, if none remain, ORGANIZER too).
+                "titel" and "start" cannot be cleared. Naming an unknown
+                field, or naming a field that is also given a new value in
+                the same call, is an error.
 
         Returns:
             {"uid": event_uid} on success.
@@ -595,6 +627,7 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             erinnerungen=erinnerungen,
             url=url,
             verknuepfte_aufgabe=verknuepfte_aufgabe,
+            teilnehmer=teilnehmer,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_event, kalender_name, event_uid, fields)
@@ -615,6 +648,36 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return {"uid": event_uid}
 
     @mcp.tool
+    async def respond_to_event(
+        kalender_name: str,
+        event_uid: str,
+        antwort: str,
+        kommentar: str | None = None,
+    ) -> dict[str, str]:
+        """Reply to a calendar invitation - set your own RSVP status on an event.
+
+        Finds your own ATTENDEE entry on the event by matching it against
+        your account's CalDAV calendar-user-addresses, and sets its PARTSTAT.
+        Fails with a clear error if you are not listed as an attendee of this
+        event at all. Saves the event afterwards; Nextcloud's CalDAV server
+        propagates the reply to the organizer as an iMIP/iTIP REPLY mail
+        automatically - this tool does not send any mail itself.
+
+        Args:
+            kalender_name: Display name of the calendar containing the event
+                (typically the calendar the invitation landed in).
+            event_uid: UID of the event to respond to.
+            antwort: One of "zugesagt" (accept), "abgesagt" (decline),
+                "vorläufig" (tentative) -> ATTENDEE PARTSTAT.
+            kommentar: Optional comment to attach to the reply -> COMMENT.
+
+        Returns:
+            {"uid": event_uid, "antwort": antwort} on success.
+        """
+        await _call(caldav_service.respond_to_event, kalender_name, event_uid, antwort, kommentar)
+        return {"uid": event_uid, "antwort": antwort}
+
+    @mcp.tool
     async def link_task_to_event(
         list_name: str,
         task_uid: str,
@@ -626,7 +689,11 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
 
         The link is stored on the event (the Nextcloud Tasks UI would
         misrender a task-side link as a broken subtask), and shows up in the
-        event's verknuepfte_aufgaben.
+        event's verknuepfte_aufgaben with a "beziehung" equal to the
+        `beziehung` value passed here - the request and response vocabulary
+        is identical ("zeitblock"/"voraussetzung"), so a link written as
+        "zeitblock" reads back as "zeitblock", never "uebergeordnet" or
+        similar internal RELTYPE naming.
 
         Args:
             list_name: Display name of the task list containing the task.
@@ -651,6 +718,37 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         return {"task_uid": task_uid, "event_uid": event_uid, "beziehung": beziehung}
 
     @mcp.tool
+    async def list_events_for_task(
+        list_name: str,
+        task_uid: str,
+        kalender_namen: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find events linked to a task - the task-side counterpart of link_task_to_event.
+
+        link_task_to_event stores the RELATED-TO link on the event only (see
+        its docstring for why), so there is normally no way to discover a
+        link starting from the task; this tool does the reverse lookup by
+        scanning the queried calendars' events for a verknuepfte_aufgaben
+        entry pointing at task_uid.
+
+        Args:
+            list_name: Display name of the task list containing the task.
+            task_uid: UID of the task to find linked events for.
+            kalender_namen: Optional list of calendar display names to
+                search; None searches every event calendar on the account.
+
+        Returns:
+            Event dicts (same shape as list_events entries, each with an
+            added "kalender_name" key), sorted by start.
+        """
+        return await _call(
+            caldav_service.list_events_for_task,
+            list_name,
+            task_uid,
+            calendar_names=kalender_namen,
+        )
+
+    @mcp.tool
     async def create_event_from_task(
         list_name: str,
         task_uid: str,
@@ -662,7 +760,9 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
 
         Title, notes, location and tags are copied from the task. The event is
         linked back to the task via RELATED-TO (the "zeitblock" semantics of
-        link_task_to_event); the task itself is not modified.
+        link_task_to_event); the task itself is not modified. The new event's
+        verknuepfte_aufgaben will show this task with beziehung "zeitblock",
+        same as if link_task_to_event had been called explicitly.
 
         Args:
             list_name: Display name of the task list containing the task.
@@ -715,6 +815,176 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             calendar_names=kalender_namen,
             list_names=listen_namen,
         )
+
+    @mcp.tool
+    async def get_free_busy(
+        von: str,
+        bis: str,
+        benutzer: str | None = None,
+    ) -> dict[str, Any]:
+        """Get busy time intervals in a date/time range, for yourself or another user.
+
+        Args:
+            von: ISO 8601 start of the range. Naive datetimes are interpreted
+                as UTC; a date-only value means the start of that day.
+            bis: ISO 8601 end of the range. A date-only value includes that
+                entire day.
+            benutzer: Optional Nextcloud user id or email of another account
+                to query. When omitted (default), returns your own
+                availability, computed by aggregating your own event
+                calendars. When given, this sends a CalDAV free-busy
+                scheduling request to the server for that user - the server
+                resolves `benutzer`, not this tool; a user with no visible
+                scheduling info (unknown to the server, or with scheduling
+                disabled) produces an error rather than an empty result, so
+                it isn't mistaken for "fully free".
+
+        Returns:
+            {"von": range start, "bis": range end, "benutzer": benutzer,
+            "belegt": merged, sorted busy intervals as a list of
+            {"von": iso, "bis": iso} dicts}. Cancelled and "transparent"
+            (does-not-block-time) events are excluded from your own
+            availability; overlapping/back-to-back busy blocks are merged
+            into one interval.
+        """
+        return await _call(caldav_service.get_free_busy, von, bis, benutzer)
+
+    @mcp.tool
+    async def share_calendar(
+        kalender_name: str,
+        empfaenger: str,
+        gruppe: bool = False,
+        schreibzugriff: bool = False,
+    ) -> dict[str, Any]:
+        """Share a task list or event calendar with a Nextcloud user or group.
+
+        Uses Nextcloud's own CalDAV sharing extension - this only works
+        against a real Nextcloud server, not a generic CalDAV server, since
+        it isn't part of any CalDAV RFC. Calling this again for the same
+        empfaenger updates their access level instead of creating a
+        duplicate share.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar
+                to share (resolved across both kinds).
+            empfaenger: Nextcloud user id (or group id when gruppe=True) to
+                share with.
+            gruppe: If True, empfaenger names a group instead of a user.
+            schreibzugriff: If True, grant read-write access; otherwise the
+                share is read-only.
+
+        Returns:
+            {"kalender_name", "empfaenger", "schreibzugriff"} on success.
+        """
+        return await _call(
+            caldav_service.share_calendar, kalender_name, empfaenger, gruppe, schreibzugriff
+        )
+
+    @mcp.tool
+    async def unshare_calendar(
+        kalender_name: str,
+        empfaenger: str,
+        gruppe: bool = False,
+    ) -> dict[str, str]:
+        """Remove a user's or group's share of a task list or event calendar.
+
+        A no-op (not an error) if empfaenger doesn't currently have a share
+        of this calendar.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar.
+            empfaenger: Nextcloud user id (or group id when gruppe=True) to
+                unshare from.
+            gruppe: If True, empfaenger names a group instead of a user.
+
+        Returns:
+            {"kalender_name", "empfaenger"} on success.
+        """
+        await _call(caldav_service.unshare_calendar, kalender_name, empfaenger, gruppe)
+        return {"kalender_name": kalender_name, "empfaenger": empfaenger}
+
+    @mcp.tool
+    async def list_calendar_shares(kalender_name: str) -> list[dict[str, Any]]:
+        """List everyone a task list or event calendar is currently shared with.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar.
+
+        Returns:
+            A list of {"empfaenger": user/group id, "typ": "benutzer" or
+            "gruppe", "schreibzugriff": bool, "status": invite status, e.g.
+            "akzeptiert"/"ausstehend"/"abgelehnt" (an unrecognized raw status
+            from the server comes back lowercased instead of being dropped)}
+            dicts.
+        """
+        return await _call(caldav_service.list_calendar_shares, kalender_name)
+
+    @mcp.tool
+    async def list_trash() -> list[dict[str, Any]]:
+        """List deleted tasks/events in Nextcloud's calendar trash bin.
+
+        Uses Nextcloud's calendar-trashbin DAV plugin; on a server without
+        it, this fails with a clean "trash bin not available" error instead
+        of a raw HTTP error.
+
+        Returns:
+            A list of {"id": trash item id (pass to restore_from_trash),
+            "titel": title if derivable from the item's data or None,
+            "typ": "aufgabe"/"termin"/None, "kalender": the original
+            calendar's URI if reported by the server or None, "geloescht_am":
+            ISO 8601 deletion timestamp or None} dicts.
+        """
+        return await _call(caldav_service.list_trash)
+
+    @mcp.tool
+    async def restore_from_trash(id: str) -> dict[str, str]:
+        """Restore a deleted task/event from the trash bin to its original calendar.
+
+        Args:
+            id: Trash item id, as returned by list_trash's "id" field.
+
+        Returns:
+            {"id": id} on success.
+        """
+        await _call(caldav_service.restore_from_trash, id)
+        return {"id": id}
+
+    @mcp.tool
+    async def export_calendar(kalender_name: str) -> dict[str, str]:
+        """Export a task list or event calendar as a single ICS (VCALENDAR) text.
+
+        Args:
+            kalender_name: Display name of the task list or event calendar
+                to export (resolved across both kinds).
+
+        Returns:
+            {"kalender_name", "ics": the full VCALENDAR text, containing
+            every task/event in the calendar}.
+        """
+        return await _call(caldav_service.export_calendar, kalender_name)
+
+    @mcp.tool
+    async def import_ics(kalender_name: str, ics: str) -> dict[str, Any]:
+        """Import ICS (VCALENDAR) text into an existing task list or event calendar.
+
+        Top-level VEVENT/VTODO components are grouped by UID, so a recurring
+        event/task and its override instances are saved together as one
+        calendar object. A component whose kind (event/task) the target
+        calendar doesn't support is skipped rather than failing the whole
+        import.
+
+        Args:
+            kalender_name: Display name of the target task list or event
+                calendar (resolved across both kinds).
+            ics: Full ICS text; must be a VCALENDAR containing at least one
+                VEVENT or VTODO.
+
+        Returns:
+            {"kalender_name", "importiert": number of calendar objects
+            created, "uebersprungen": number skipped because the target
+            calendar doesn't support that component kind}.
+        """
+        return await _call(caldav_service.import_ics, kalender_name, ics)
 
     return mcp
 

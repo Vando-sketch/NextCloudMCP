@@ -14,6 +14,12 @@ Values for enum-like fields:
 | `status` (events) | `"bestätigt"`, `"vorläufig"`, `"abgesagt"` |
 | `beziehung` (`link_task_to_event`) | `"zeitblock"`, `"voraussetzung"` |
 | `farbe` | `"#RRGGBB"` or `"#RRGGBBAA"` |
+| `teilnehmer[].status` (read-only, in event results) | `"ausstehend"`, `"zugesagt"`, `"abgesagt"`, `"vorläufig"`, `"delegiert"` |
+| `teilnehmer[].rolle` | `"leitung"`, `"erforderlich"` (default), `"optional"`, `"keine-teilnahme"` |
+| `antwort` (`respond_to_event`) | `"zugesagt"`, `"abgesagt"`, `"vorläufig"` |
+| `typ` (`share_calendar`/`list_calendar_shares`) | `"benutzer"`, `"gruppe"` |
+| `status` (`list_calendar_shares`) | `"akzeptiert"`, `"ausstehend"`, `"abgelehnt"`, `"ungueltig"`, `"geloescht"`, or a raw lowercased status the server reported |
+| `typ` (`list_trash`) | `"aufgabe"`, `"termin"`, or `null` |
 
 Dates are ISO 8601 strings. Two rules apply everywhere a date/datetime is
 accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
@@ -329,9 +335,19 @@ event started long before. Results are sorted by `start`. One event dict:
   "wiederholung": "FREQ=WEEKLY;BYDAY=MO",
   "ausnahme_daten": ["2026-07-27T14:00:00+00:00"],
   "url": null,
-  "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "uebergeordnet"}],
+  "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "zeitblock"}],
   "wiederholung_von": null,
-  "kalender": "Personal"
+  "kalender": "Personal",
+  "organisator": {"email": "chef@example.com", "name": "Chefin"},
+  "teilnehmer": [
+    {
+      "email": "kollege@example.com",
+      "name": "Kollege",
+      "status": "zugesagt",
+      "rolle": "erforderlich",
+      "rsvp": true
+    }
+  ]
 }
 ```
 
@@ -339,6 +355,21 @@ event started long before. Results are sorted by `start`. One event dict:
 materialized a single occurrence of a series. For **all-day** events `start`
 and `ende` are date-only strings and `ende` is the **inclusive** last day
 (RFC 5545's exclusive `DTEND` is translated on the way in and out).
+
+`verknuepfte_aufgaben` entries' `beziehung` uses exactly the same vocabulary
+as `link_task_to_event`'s `beziehung` parameter: a link written as
+`"zeitblock"` reads back as `"zeitblock"`, and one written as
+`"voraussetzung"` reads back as `"voraussetzung"` - request and response are
+the same words, round-trip. `"gleichrangig"` (RFC 5545 `SIBLING`) or a raw
+lowercased `RELTYPE` can also appear for links written by other CalDAV
+clients that this server didn't create.
+
+`organisator` is the event's `ORGANIZER` ({"email", "name"}), or `null` if
+the event has no attendees/organizer. `teilnehmer` lists every `ATTENDEE`
+(`[]` if none); `rsvp` reflects whether the attendee's `RSVP` parameter is
+`TRUE` (missing `RSVP` reads as `false`, per RFC 5545's default). See
+`create_event`'s `teilnehmer` for how to set attendees, and
+`respond_to_event` for replying to an invitation.
 
 ---
 
@@ -366,6 +397,7 @@ mapping:
 | `erinnerungen` | `VALARM` | relative durations (e.g. `"-PT30M"`) trigger before `start`; absolute ISO datetimes as-is |
 | `url` | `URL` | |
 | `verknuepfte_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of a task this event reserves time for |
+| `teilnehmer` | `ATTENDEE` (one per entry) | list of attendee dicts, see below |
 
 Returns `{"uid": ...}`.
 
@@ -373,16 +405,84 @@ To move or cancel a **single occurrence** of a recurring event: add its
 original date to `ausnahme_daten` (via `update_event`) and, for a move, create
 a separate replacement event.
 
+### Attendees (`teilnehmer`)
+
+Each entry:
+
+| Key | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `email` | string | yes | — | Attendee's email -> `ATTENDEE:mailto:<email>` |
+| `name` | string | no | — | -> `CN` parameter |
+| `rolle` | string enum | no | `"erforderlich"` | -> `ROLE` parameter (see enum table above) |
+| `rsvp` | boolean | no | `true` | -> `RSVP` parameter |
+
+Every written `ATTENDEE` also gets `PARTSTAT=NEEDS-ACTION` and
+`CUTYPE=INDIVIDUAL`. The first time attendees are added to an event that has
+none yet, `ORGANIZER` is set automatically to your own account's address (an
+event that already has attendees keeps whatever `ORGANIZER` it already has).
+
+**Important — server-side scheduling:** Nextcloud's CalDAV server sends iMIP
+invitation emails automatically when an event with `ORGANIZER` and
+`ATTENDEE`s is saved by the organizer. This tool does not send any mail
+itself; saving the event is what triggers Nextcloud to do so.
+
+Example:
+
+```json
+{
+  "kalender_name": "Termine",
+  "titel": "Sprint-Planung",
+  "start": "2026-07-20T14:00:00",
+  "ende": "2026-07-20T15:00:00",
+  "teilnehmer": [
+    {"email": "alice@example.com", "name": "Alice", "rolle": "leitung"},
+    {"email": "bob@example.com", "rolle": "optional", "rsvp": false}
+  ]
+}
+```
+
 ---
 
 ## `update_event(kalender_name, event_uid, ...)`
 
 Same fields as `create_event`, all optional. Only fields you pass are changed;
-`erinnerungen` and `ausnahme_daten` replace all existing entries. `felder_leeren`
-removes properties entirely — accepted names: `ende`, `ort`, `beschreibung`,
-`tags`, `status`, `sichtbarkeit`, `wiederholung`, `ausnahme_daten`,
-`erinnerungen`, `url`, `verknuepfte_aufgabe` (`titel` and `start` cannot be
-cleared; a field can't be both set and cleared in one call).
+`erinnerungen` and `ausnahme_daten` replace all existing entries, and so does
+`teilnehmer` — passing it **replaces the entire attendee list**, it does not
+add to it. `felder_leeren` removes properties entirely — accepted names:
+`ende`, `ort`, `beschreibung`, `tags`, `status`, `sichtbarkeit`,
+`wiederholung`, `ausnahme_daten`, `erinnerungen`, `url`,
+`verknuepfte_aufgabe`, `teilnehmer` (`titel` and `start` cannot be cleared; a
+field can't be both set and cleared in one call).
+
+Clearing `"teilnehmer"` removes every `ATTENDEE` and, since an `ORGANIZER`
+with no attendees is meaningless, also removes `ORGANIZER` if none remain.
+
+To **respond** to an event you were invited to (set your own RSVP status),
+use `respond_to_event` instead of setting `teilnehmer` here — `teilnehmer`
+replaces the whole list and would overwrite everyone else's replies too.
+
+---
+
+## `respond_to_event(kalender_name, event_uid, antwort, kommentar=None)`
+
+Replies to a calendar invitation: finds **your own** `ATTENDEE` entry on the
+event (matched against your account's CalDAV calendar-user-addresses,
+case-insensitive, `mailto:` ignored) and sets its `PARTSTAT`. Fails with a
+clear error if you are not listed as an attendee of this event at all.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Calendar containing the event |
+| `event_uid` | string | yes | UID of the event to respond to |
+| `antwort` | string enum | yes | `"zugesagt"` / `"abgesagt"` / `"vorläufig"` -> `PARTSTAT` |
+| `kommentar` | string | no | -> `COMMENT` |
+
+Returns `{"uid": event_uid, "antwort": antwort}`.
+
+Saves the event afterwards; Nextcloud's CalDAV server propagates the reply to
+the organizer as an iMIP/iTIP reply mail automatically — same server-side
+scheduling mechanism that sends the original invitations, this tool does not
+send any mail itself.
 
 ---
 
@@ -409,6 +509,49 @@ server's event dicts).
 
 The task must exist; linking is idempotent (re-linking the same pair is a
 no-op).
+
+---
+
+## `list_events_for_task(list_name, task_uid, kalender_namen=None)`
+
+The task-side counterpart of `link_task_to_event`: since the `RELATED-TO`
+link is only ever written on the event, there is no direct way to find
+linked events starting from a task — this tool does the reverse lookup,
+scanning events in the given calendars for a `verknuepfte_aufgaben` entry
+whose `uid` matches `task_uid`.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_name` | string | yes | Display name of the task list containing the task |
+| `task_uid` | string (UID) | yes | UID of the task to find linked events for |
+| `kalender_namen` | list of strings | no | Calendars to search; `null` = all event calendars |
+
+The task must exist (same check and error as `link_task_to_event`). Returns
+event dicts with the same shape as `list_events` entries, each with an added
+`"kalender_name"` key, sorted by start:
+
+```json
+[
+  {
+    "uid": "7f0c9e2a-...",
+    "titel": "Steuererklärung vorbereiten",
+    "start": "2026-07-20T14:00:00+00:00",
+    "ende": "2026-07-20T15:00:00+00:00",
+    "ganztaegig": false,
+    "ort": null,
+    "beschreibung": null,
+    "tags": [],
+    "status": null,
+    "sichtbarkeit": null,
+    "wiederholung": null,
+    "ausnahme_daten": [],
+    "url": null,
+    "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "zeitblock"}],
+    "wiederholung_von": null,
+    "kalender_name": "Personal"
+  }
+]
+```
 
 ---
 
@@ -448,6 +591,181 @@ with an added `"liste"` key naming its task list.
 
 ---
 
+## `get_free_busy(von, bis, benutzer=None)`
+
+Busy time intervals in `[von, bis]`, for yourself or another Nextcloud user.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `von` | string (ISO 8601) | yes | Range start; date-only = start of that day |
+| `bis` | string (ISO 8601) | yes | Range end; date-only includes that whole day |
+| `benutzer` | string | no | Nextcloud user id or email of another account; `null` = your own availability |
+
+With `benutzer` omitted, busy blocks are computed by aggregating your own
+event calendars: non-cancelled (`STATUS` ≠ `CANCELLED`), non-transparent
+(`TRANSP` ≠ `TRANSPARENT`) events in range each contribute a busy interval,
+which are then merged (overlapping and back-to-back blocks become one) and
+sorted.
+
+With `benutzer` set, this sends a CalDAV `RFC 6638` free-busy scheduling
+request to the Nextcloud server for that user — **the server resolves
+`benutzer`**, not this tool. If the server can't provide free/busy
+information for that user (unknown account, scheduling disabled, ...), the
+call fails with an error rather than silently returning an empty (looks
+"fully free") result.
+
+```json
+{
+  "von": "2026-07-20T00:00:00+00:00",
+  "bis": "2026-07-21T00:00:00+00:00",
+  "benutzer": null,
+  "belegt": [
+    {"von": "2026-07-20T14:00:00+00:00", "bis": "2026-07-20T15:00:00+00:00"}
+  ]
+}
+```
+
+`belegt` ("busy") is the merged, sorted list of busy intervals; empty if the
+user is free the whole range.
+
+---
+
+## Calendar sharing
+
+Nextcloud-specific DAV extension (not part of any CalDAV RFC) — these three
+tools only work against a real Nextcloud server, not a generic CalDAV
+server. All three resolve `kalender_name` across **both** task lists and
+event calendars (whichever kind has that display name).
+
+### `share_calendar(kalender_name, empfaenger, gruppe=False, schreibzugriff=False)`
+
+Shares a task list or event calendar with a Nextcloud user or group.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the task list or event calendar |
+| `empfaenger` | string | yes | Nextcloud user id, or group id when `gruppe=True` |
+| `gruppe` | boolean | no (default `false`) | `empfaenger` names a group instead of a user |
+| `schreibzugriff` | boolean | no (default `false`) | Grant read-write instead of read-only access |
+
+Calling this again for the same `empfaenger` updates their access level
+rather than creating a duplicate share. Returns:
+
+```json
+{"kalender_name": "Privat", "empfaenger": "bob", "schreibzugriff": true}
+```
+
+### `unshare_calendar(kalender_name, empfaenger, gruppe=False)`
+
+Removes a user's or group's share of a task list or event calendar. A no-op
+(not an error) if `empfaenger` doesn't currently have a share. Returns
+`{"kalender_name": ..., "empfaenger": ...}`.
+
+### `list_calendar_shares(kalender_name)`
+
+Lists everyone a task list or event calendar is currently shared with:
+
+```json
+[
+  {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": true, "status": "akzeptiert"},
+  {"empfaenger": "team", "typ": "gruppe", "schreibzugriff": false, "status": "ausstehend"}
+]
+```
+
+See the enum table above for `typ`/`status` values; an invite status the
+server reports that isn't one of the known ones comes back lowercased
+instead of being dropped.
+
+---
+
+## Trash bin
+
+Nextcloud-specific `calendar-trashbin` DAV plugin — deleting a task or event
+(`delete_task`/`delete_event`, or deleting a whole list/calendar) moves it
+here rather than purging it immediately. There is deliberately no tool to
+empty the trash or permanently delete an item; only listing and restoring.
+
+### `list_trash()`
+
+No parameters. Returns every deleted task/event still in the trash bin:
+
+```json
+[
+  {
+    "id": "42.ics",
+    "titel": "Einkaufen",
+    "typ": "aufgabe",
+    "kalender": "personal",
+    "geloescht_am": "2026-07-10T12:00:00+00:00"
+  }
+]
+```
+
+`id` is opaque — pass it to `restore_from_trash` verbatim. `titel`/`typ` are
+derived from the deleted item's own data and are `null` if that can't be
+read; `kalender` is the original calendar's URI if the server reports it, or
+`null`. On a server without the trashbin plugin (non-Nextcloud), this fails
+with a clean "trash bin not available on this server" error.
+
+### `restore_from_trash(id)`
+
+Restores a deleted task/event to its original calendar.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `id` | string | yes | Trash item id, from `list_trash`'s `"id"` field |
+
+Returns `{"id": ...}` on success. Fails with a clean error if `id` isn't
+currently in the trash bin (already restored, or never existed).
+
+---
+
+## ICS import / export
+
+### `export_calendar(kalender_name)`
+
+Exports a task list or event calendar as a single ICS (VCALENDAR) text
+containing every task/event in it.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the task list or event calendar |
+
+```json
+{"kalender_name": "Privat", "ics": "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n..."}
+```
+
+Built with a single `PRODID`/`VERSION` header; a recurring event/task and its
+override instances are kept together, and `VTIMEZONE` components are
+de-duplicated by `TZID`.
+
+### `import_ics(kalender_name, ics)`
+
+Imports ICS text into an existing task list or event calendar.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the target task list or event calendar |
+| `ics` | string | yes | Full ICS text; must be a VCALENDAR with at least one VEVENT or VTODO |
+
+Top-level `VEVENT`/`VTODO` components are grouped by `UID`, so a recurring
+event/task and its override instances are saved together as one calendar
+object (along with any `VTIMEZONE`s from the source ICS). A component whose
+kind the target calendar doesn't support (e.g. a `VEVENT` in an ICS file
+being imported into a plain task list) is skipped rather than failing the
+whole import.
+
+```json
+{"kalender_name": "Privat", "importiert": 3, "uebersprungen": 1}
+```
+
+`importiert` is the number of calendar objects created; `uebersprungen`
+("skipped") the number of UID groups whose component kind wasn't supported
+by the target calendar. Malformed ICS text is rejected with a clean error
+that includes the parser's detail message.
+
+---
+
 ## Errors
 
 All failures come back as short, single-line MCP tool errors, for example:
@@ -483,6 +801,23 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `Unknown beziehung 'egal'. Expected one of: zeitblock, voraussetzung.`
 - `The task has no faellig_datum (due date); pass an explicit start for the event instead.`
 - `datum must be a date-only 'YYYY-MM-DD' string, got '2026-07-20T14:00:00'.`
+- `Unknown rolle 'chef'. Expected one of: leitung, erforderlich, optional, keine-teilnahme.`
+- `Unknown antwort 'vielleicht'. Expected one of: zugesagt, abgesagt, vorläufig.`
+- `You are not listed as an attendee of this event, so there is nothing to respond to.`
+- `Nextcloud could not provide free/busy information for 'bob@example.com' (the user may
+  be unknown, or scheduling may be disabled on the server).`
+- `Calendar or task list 'Ghost' was not found.` — `share_calendar`/`export_calendar`/etc.
+  found no task list or event calendar with this name.
+- `empfaenger is required to share a calendar.`
+- `Nextcloud could not find user/group 'ghost' to share 'Privat' with.` — `empfaenger`
+  isn't a real Nextcloud user/group id.
+- `Nextcloud denied sharing 'Privat' with 'bob' (permission denied, or the sharing
+  backend is disabled).`
+- `The trash bin is not available on this server.` — the server isn't Nextcloud, or
+  doesn't have the calendar-trashbin plugin.
+- `Trash item '42.ics' was not found in the trash bin.` — already restored, or a bad id.
+- `ics must be a VCALENDAR.` / `ics must contain at least one VEVENT or VTODO component.`
+- `Could not parse ics: ...` — malformed ICS text; the message includes the parser's detail.
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
 (`401`), before reaching tool logic — see [Authentication](../README.md#authentication).
