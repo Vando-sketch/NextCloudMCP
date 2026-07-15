@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from icalendar import Alarm, vDuration
 
@@ -132,7 +133,22 @@ def parse_datetime_input(value: str) -> date | datetime:
       offset) is interpreted as UTC (B2) - the same rule already used for
       absolute VALARM triggers, so the same-looking input is no longer
       interpreted two different ways depending on which property it ends up
-      in.
+      in. An *explicit* UTC offset (e.g. "+02:00") is converted to UTC rather
+      than kept as-is: `icalendar` serializes a fixed-offset `tzinfo` as
+      `DTSTART;TZID="UTC+02:00":...` without ever emitting the matching
+      VTIMEZONE component the TZID reference requires, so CalDAV clients that
+      don't recognize the (nonstandard) TZID fall back to interpreting the
+      timestamp in their own local zone - shifting the moment, and often the
+      calendar day. Converting to UTC first means the property is written
+      with a plain "Z" suffix instead, which every client understands.
+    - A datetime may instead be followed by a space and an IANA timezone
+      name, e.g. "2026-01-15T08:00:00 Europe/Berlin" - the datetime part
+      must then be naive (no numeric offset; combining both is rejected as
+      ambiguous). The offset is resolved for that specific date via
+      `zoneinfo`, so callers no longer need to work out themselves whether
+      standard or daylight time (e.g. CET vs. CEST) applies on a given day -
+      a fixed numeric offset picked once and reused year-round is wrong for
+      half the year in any zone that observes DST.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):
@@ -141,13 +157,33 @@ def parse_datetime_input(value: str) -> date | datetime:
         except ValueError:
             pass  # fall through to the datetime/error path below
 
-    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    dt_text = text
+    zone: ZoneInfo | None = None
+    if " " in text:
+        candidate_text, _, candidate_zone = text.rpartition(" ")
+        try:
+            zone = ZoneInfo(candidate_zone)
+        except (ZoneInfoNotFoundError, ValueError):
+            zone = None
+        else:
+            dt_text = candidate_text
+
+    normalized = dt_text[:-1] + "+00:00" if dt_text.endswith("Z") else dt_text
     try:
         dt = datetime.fromisoformat(normalized)
     except ValueError:
         pass
     else:
-        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        if zone is not None:
+            if dt.tzinfo is not None:
+                raise InvalidTaskDataError(
+                    f"Could not parse '{value}': an explicit UTC offset and a "
+                    "timezone name cannot both be given - use one or the other."
+                )
+            return dt.replace(tzinfo=zone).astimezone(timezone.utc)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
 

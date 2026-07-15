@@ -61,6 +61,31 @@ def test_apply_and_parse_round_trip():
     assert parsed["wiederholung"] is None
     assert parsed["ausnahme_daten"] == []
     assert parsed["verknuepfte_aufgaben"] == []
+
+
+def test_explicit_offset_start_is_stored_and_round_trips_in_utc():
+    """Regression test for an explicit UTC-offset start losing its instant.
+
+    `icalendar` serializes an aware datetime whose tzinfo is a plain
+    fixed offset (as produced by `datetime.fromisoformat("...+02:00")`) as
+    DTSTART;TZID="UTC+02:00":... - a TZID with no matching VTIMEZONE
+    component in the calendar. CalDAV clients that don't recognize that
+    (nonstandard) TZID silently fall back to interpreting the timestamp in
+    their own local zone, shifting the moment - and, as reported, the
+    calendar day. Normalizing the input to UTC before writing (like
+    `mapping.parse_datetime_input` already did for naive input) avoids the
+    bogus TZID entirely: the property is written as plain UTC with a "Z"
+    suffix, which every client understands, and the instant is preserved.
+    """
+    event = _new_event()
+    _apply(event, start="2026-07-30T07:50:00+02:00")
+
+    ical_bytes = event.to_ical()
+    assert b"TZID" not in ical_bytes
+    assert b"DTSTART:20260730T055000Z" in ical_bytes
+
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["start"] == "2026-07-30T05:50:00+00:00"
     assert parsed["wiederholung_von"] is None
 
 

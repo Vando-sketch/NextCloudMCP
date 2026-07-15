@@ -247,12 +247,45 @@ def test_naive_datetime_input_is_interpreted_as_utc():
     assert result.hour == 14
 
 
-def test_offset_datetime_input_keeps_its_offset():
+def test_named_timezone_input_resolves_dst_offset_for_the_date():
+    """A named IANA zone resolves the correct offset per date (CEST vs. CET).
+
+    A fixed numeric offset picked once (e.g. always "+02:00" for
+    Europe/Berlin) is only correct for half the year - Germany observes CET
+    (+01:00) outside daylight saving time. Passing the zone name instead of
+    a manually chosen offset avoids that whole class of off-by-one-hour bug.
+    """
+    summer = mapping.parse_datetime_input("2026-07-20T14:00:00 Europe/Berlin")
+    assert summer == datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)  # CEST = UTC+2
+
+    winter = mapping.parse_datetime_input("2026-01-20T14:00:00 Europe/Berlin")
+    assert winter == datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)  # CET = UTC+1
+
+
+def test_named_timezone_with_explicit_offset_is_rejected():
+    with pytest.raises(InvalidTaskDataError):
+        mapping.parse_datetime_input("2026-07-20T14:00:00+02:00 Europe/Berlin")
+
+
+def test_unknown_timezone_name_falls_back_to_plain_datetime_error():
+    with pytest.raises(InvalidTaskDataError):
+        mapping.parse_datetime_input("2026-07-20T14:00:00 Mars/Olympus_Mons")
+
+
+def test_offset_datetime_input_is_normalized_to_utc():
+    """An explicit offset must survive as the same instant, but stored in UTC.
+
+    `icalendar` serializes a fixed-offset tzinfo (e.g. "+02:00") as
+    DTSTART;TZID="UTC+02:00":... without ever writing the matching
+    VTIMEZONE component that TZID requires - CalDAV clients that don't
+    recognize it fall back to their local zone, shifting the moment (and
+    often the calendar day). Normalizing to UTC here means it's written
+    with a plain "Z" suffix instead, which every client understands.
+    """
     result = mapping.parse_datetime_input("2026-07-20T14:00:00+02:00")
     assert isinstance(result, datetime)  # narrows away the `date` half of the return type
-    offset = result.utcoffset()
-    assert offset is not None
-    assert offset.total_seconds() == 2 * 3600
+    assert result.tzinfo == timezone.utc
+    assert result == datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 
 
 def test_naive_datetime_matches_absolute_trigger_semantics():
