@@ -2659,7 +2659,9 @@ def test_list_task_lists_uses_batched_metadata_not_per_calendar_propfind(
     result = service.list_task_lists()
 
     # Only the VTODO collection is returned, resolved from the batch.
-    assert result == [{"name": "Personal", "url": "https://cloud.example.com/dav/calendars/u/personal/"}]
+    assert result == [
+        {"name": "Personal", "url": "https://cloud.example.com/dav/calendars/u/personal/"}
+    ]
     # The component support came from the single batched PROPFIND, not from a
     # per-calendar caldav lookup.
     personal.get_supported_components.assert_not_called()
