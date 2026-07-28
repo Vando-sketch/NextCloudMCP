@@ -720,6 +720,64 @@ currently in the trash bin (already restored, or never existed).
 
 ---
 
+## Notes
+
+Nextcloud's Notes app, over its own plain JSON REST API — unrelated to
+CalDAV/the tools above. A note's living-document use case (current state,
+decisions + rationale, open questions, next step) is a convention for how
+you write `inhalt`, not something this server enforces.
+
+### `list_notizen(kategorie=None)`
+
+Lists every note without its content, to keep the listing cheap.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kategorie` | string | no | Filter to notes in this category |
+
+```json
+[{"id": 42, "titel": "Projekt X", "kategorie": "Arbeit", "favorit": false, "geaendert": "2026-07-20T12:00:00+00:00"}]
+```
+
+### `get_notiz(notiz_id)`
+
+Fetches one note, including its full content.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `notiz_id` | integer | yes | Note id, from `list_notizen`/`search_notizen` |
+
+```json
+{"id": 42, "titel": "Projekt X", "kategorie": "Arbeit", "inhalt": "...", "favorit": false, "geaendert": "2026-07-20T12:00:00+00:00", "schreibgeschuetzt": false}
+```
+
+### `create_notiz(titel, kategorie=None, inhalt=None, favorit=None)`
+
+Creates a note. Only `titel` is required. Returns the created note, same
+shape as `get_notiz`.
+
+### `update_notiz(notiz_id, titel=None, kategorie=None, inhalt=None, favorit=None)`
+
+Updates only the fields explicitly given; `inhalt` **replaces** the existing
+content wholesale (use `append_notiz` to add to it instead). At least one
+field must be given. Returns the updated note, same shape as `get_notiz`.
+
+### `append_notiz(notiz_id, text)`
+
+Appends `text` to a note's existing content (blank-line-separated if the note
+already has content). Implemented as a read-then-write — the Notes API has
+no atomic append — so a concurrent edit to the same note between the two may
+be lost. Returns the updated note, same shape as `get_notiz`.
+
+### `search_notizen(suchtext, kategorie=None)`
+
+Case-insensitive substring search over title and content. The Notes API has
+no server-side full-text search, so this fetches the (optionally
+category-filtered) notes and filters client-side. Returns matches in the
+same shape as `list_notizen` (no content).
+
+---
+
 ## ICS import / export
 
 ### `export_calendar(kalender_name)`
@@ -779,6 +837,9 @@ All failures come back as short, single-line MCP tool errors, for example:
   mean.
 - `Nextcloud rejected the CalDAV credentials (check username/app password).`
 - `Could not reach the Nextcloud server (connection refused or timed out).`
+- `The requested note was not found.` — stale or wrong `notiz_id`; call
+  `list_notizen`/`search_notizen` to find the current one.
+- `Nextcloud rejected the Notes API credentials (check username/app password).`
 - `The task was modified by another client since it was last read (conflicting edit).
   Re-fetch the task and retry.` — another client (e.g. the Nextcloud Tasks app) changed
   this task between your last read and this write; re-fetch it with `list_tasks` and

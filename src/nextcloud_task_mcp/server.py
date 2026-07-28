@@ -11,10 +11,11 @@ import anyio.to_thread
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
-from . import event_mapping, mapping
+from . import event_mapping, mapping, notes_mapping
 from .caldav_client import CalDavService
 from .config import Settings, is_local_hostname
 from .errors import TaskMcpError
+from .notes_client import NotesService
 from .personal_auth import PersonalAuthProvider
 
 logger = logging.getLogger(__name__)
@@ -40,11 +41,32 @@ async def _call(fn, *args: Any, **kwargs: Any) -> Any:
         raise ToolError("An unexpected internal error occurred.") from exc
 
 
-def build_server(settings: Settings, service: CalDavService | None = None) -> FastMCP:
+async def _call_notes(coro: Any) -> Any:
+    """Await a NotesService coroutine call, translating errors like `_call`.
+
+    Unlike `_call`, there's no blocking library call to move off the event
+    loop - `NotesService` talks to the Notes REST API over `httpx` natively
+    async - so this just awaits directly instead of using
+    `anyio.to_thread.run_sync`.
+    """
+    try:
+        return await coro
+    except TaskMcpError as exc:
+        raise ToolError(str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - safety net for unforeseen failures
+        logger.exception("Unexpected error in Notes API call")
+        raise ToolError("An unexpected internal error occurred.") from exc
+
+
+def build_server(
+    settings: Settings,
+    service: CalDavService | None = None,
+    notes_service: NotesService | None = None,
+) -> FastMCP:
     """Construct the FastMCP server with OAuth 2.1 auth and all task tools registered.
 
-    `service` can be injected for testing; defaults to a real CalDavService
-    built from `settings`.
+    `service`/`notes_service` can be injected for testing; default to a real
+    CalDavService/NotesService built from `settings`.
     """
     allowed_redirect_domains = settings.oauth_allowed_redirect_domains
     if allowed_redirect_domains is None and not is_local_hostname(
@@ -74,6 +96,14 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
         url=settings.caldav_url,
         username=settings.caldav_username,
         password=settings.caldav_password,
+        timeout=settings.caldav_timeout_seconds,
+    )
+    notes_svc = notes_service or NotesService(
+        base_url=settings.notes_base_url,
+        username=settings.caldav_username,
+        password=settings.caldav_password,
+        # Shared with CalDAV's timeout - both are just "how long to wait for
+        # a Nextcloud HTTP request", not worth a second env var for.
         timeout=settings.caldav_timeout_seconds,
     )
 
@@ -985,6 +1015,125 @@ def build_server(settings: Settings, service: CalDavService | None = None) -> Fa
             calendar doesn't support that component kind}.
         """
         return await _call(caldav_service.import_ics, kalender_name, ics)
+
+    # ------------------------------------------------------------------
+    # Notes (Nextcloud Notes app's JSON REST API - see notes_client.py)
+    # ------------------------------------------------------------------
+
+    @mcp.tool
+    async def list_notizen(kategorie: str | None = None) -> list[dict[str, Any]]:
+        """List all Nextcloud notes (title/category/favorite only, not content).
+
+        Args:
+            kategorie: Optional category name to filter by.
+
+        Returns:
+            A list of {"id": note id, "titel": title, "kategorie": category
+            name or None, "favorit": bool, "geaendert": ISO 8601 last-modified
+            timestamp or None} dicts. Note content is not included here - use
+            get_notiz to read a specific note's content.
+        """
+        return await _call_notes(notes_svc.list_notes(kategorie))
+
+    @mcp.tool
+    async def get_notiz(notiz_id: int) -> dict[str, Any]:
+        """Fetch a single note by id, including its full content.
+
+        Args:
+            notiz_id: The note's id, as returned by list_notizen/search_notizen.
+
+        Returns:
+            {"id", "titel", "kategorie" (or None), "inhalt": full content,
+            "favorit": bool, "geaendert": ISO 8601 last-modified timestamp or
+            None, "schreibgeschuetzt": True if the note is read-only}.
+        """
+        return await _call_notes(notes_svc.get_note(notiz_id))
+
+    @mcp.tool
+    async def create_notiz(
+        titel: str,
+        kategorie: str | None = None,
+        inhalt: str | None = None,
+        favorit: bool | None = None,
+    ) -> dict[str, Any]:
+        """Create a new Nextcloud note.
+
+        Args:
+            titel: Note title.
+            kategorie: Optional category name.
+            inhalt: Optional initial content.
+            favorit: Optional favorite flag (defaults to false server-side).
+
+        Returns:
+            The created note, same shape as get_notiz's return value.
+        """
+        fields = notes_mapping.NoteFields(
+            titel=titel, kategorie=kategorie, inhalt=inhalt, favorit=favorit
+        )
+        return await _call_notes(notes_svc.create_note(fields))
+
+    @mcp.tool
+    async def update_notiz(
+        notiz_id: int,
+        titel: str | None = None,
+        kategorie: str | None = None,
+        inhalt: str | None = None,
+        favorit: bool | None = None,
+    ) -> dict[str, Any]:
+        """Update an existing note. Only fields that are explicitly given are changed.
+
+        Args:
+            notiz_id: The note's id.
+            titel: New title, or None to leave unchanged.
+            kategorie: New category, or None to leave unchanged.
+            inhalt: New full content - this REPLACES the existing content (use
+                append_notiz to add to it instead), or None to leave unchanged.
+            favorit: New favorite flag, or None to leave unchanged.
+
+        At least one field must be given.
+
+        Returns:
+            The updated note, same shape as get_notiz's return value.
+        """
+        fields = notes_mapping.NoteFields(
+            titel=titel, kategorie=kategorie, inhalt=inhalt, favorit=favorit
+        )
+        return await _call_notes(notes_svc.update_note(notiz_id, fields))
+
+    @mcp.tool
+    async def append_notiz(notiz_id: int, text: str) -> dict[str, Any]:
+        """Append text to an existing note's content, keeping what's already there.
+
+        Reads the note's current content and writes it back with `text`
+        appended (separated by a blank line if the note already has content).
+        Not an atomic server-side append - the Notes API has none - so a
+        concurrent edit to the same note between the read and the write may
+        be lost.
+
+        Args:
+            notiz_id: The note's id.
+            text: Text to append.
+
+        Returns:
+            The updated note, same shape as get_notiz's return value.
+        """
+        return await _call_notes(notes_svc.append_note(notiz_id, text))
+
+    @mcp.tool
+    async def search_notizen(suchtext: str, kategorie: str | None = None) -> list[dict[str, Any]]:
+        """Search notes by a case-insensitive substring match over title and content.
+
+        The Notes API has no server-side full-text search, so this fetches
+        the (optionally category-filtered) notes and filters client-side.
+
+        Args:
+            suchtext: Substring to search for in the title or content.
+            kategorie: Optional category name to narrow the search to first.
+
+        Returns:
+            Matching notes, same shape as list_notizen's return value (no content).
+        """
+        return await _call_notes(notes_svc.search_notes(suchtext, kategorie))
 
     return mcp
 

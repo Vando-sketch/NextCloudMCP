@@ -9,6 +9,15 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Notes support**: 6 new MCP tools (`list_notizen`, `get_notiz`,
+  `create_notiz`, `update_notiz`, `append_notiz`, `search_notizen`) over the
+  Nextcloud Notes app's own JSON REST API - a per-project "living document"
+  alongside the task/calendar tools' "what's open" view. Deliberately a
+  separate code path from CalDAV: a new async `notes_client.py`
+  (`NotesService`, built on `httpx`) and `notes_mapping.py` translation
+  layer, with their own `NEXTCLOUD_BASE_URL` config setting (reusing the
+  existing CalDAV credentials/OAuth gate). `append_notiz` is a
+  read-then-write, not an atomic server-side append - the Notes API has none.
 - **Calendar & event support (VEVENT)**: 12 new MCP tools alongside the task
   tools. Calendar management (`list_calendars`, `create_calendar`,
   `update_calendar` for rename/recolor, `delete_calendar`), full event CRUD
