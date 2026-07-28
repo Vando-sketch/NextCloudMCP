@@ -66,3 +66,12 @@ class InvalidEventDataError(TaskMcpError):
 class InvalidIcsDataError(TaskMcpError):
     """Raised when ICS text passed to import_ics isn't a parseable VCALENDAR
     containing at least one VEVENT or VTODO."""
+
+
+class NotizNotFoundError(TaskMcpError):
+    """Raised when the requested note id does not exist."""
+
+
+class InvalidNotizDataError(TaskMcpError):
+    """Raised when note field values are rejected by the Notes API, or when
+    a note tool call is missing data it needs (e.g. no fields to update)."""
