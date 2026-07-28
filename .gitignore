@@ -22,3 +22,6 @@ build/
 .oauth-state/
 
 .DS_Store
+
+# graphify skill output (generated knowledge-graph artifacts, not project source).
+graphify-out/
