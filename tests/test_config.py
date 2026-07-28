@@ -12,6 +12,7 @@ def _settings(**overrides) -> Settings:
         caldav_url="https://cloud.example.com/remote.php/dav/",
         caldav_username="testuser",
         caldav_password="testpass",
+        notes_base_url="https://cloud.example.com",
         public_base_url="http://127.0.0.1:8000",
         oauth_password=None,
         oauth_state_dir=".oauth-state-test",
@@ -127,6 +128,28 @@ def test_https_caldav_url_always_allowed():
     _settings(caldav_url="https://cloud.example.com/remote.php/dav/", allow_insecure_http=False)
 
 
+# --- NEXTCLOUD_BASE_URL scheme enforcement (mirrors NEXTCLOUD_CALDAV_URL/D8) ---
+
+
+def test_http_notes_base_url_rejected_for_non_local_host():
+    with pytest.raises(ConfigError, match="https"):
+        _settings(notes_base_url="http://cloud.example.com")
+
+
+def test_http_notes_base_url_allowed_for_localhost():
+    _settings(notes_base_url="http://localhost:8080")
+    _settings(notes_base_url="http://127.0.0.1:8080")
+    _settings(notes_base_url="http://[::1]:8080")
+
+
+def test_http_notes_base_url_allowed_with_escape_hatch():
+    _settings(notes_base_url="http://cloud.example.com", allow_insecure_http=True)
+
+
+def test_https_notes_base_url_always_allowed():
+    _settings(notes_base_url="https://cloud.example.com", allow_insecure_http=False)
+
+
 # --- NEXTCLOUD_HTTP_TIMEOUT_SECONDS (A2) ---
 
 
@@ -144,6 +167,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", "https://cloud.example.com/remote.php/dav/")
     monkeypatch.setenv("NEXTCLOUD_USERNAME", "testuser")
     monkeypatch.setenv("NEXTCLOUD_APP_PASSWORD", "testpass")
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
 
 
@@ -180,6 +204,7 @@ def test_from_env_rejects_non_integer_caldav_timeout_seconds(monkeypatch: pytest
         "NEXTCLOUD_CALDAV_URL",
         "NEXTCLOUD_USERNAME",
         "NEXTCLOUD_APP_PASSWORD",
+        "NEXTCLOUD_BASE_URL",
         "PUBLIC_BASE_URL",
     ],
 )
@@ -191,6 +216,14 @@ def test_from_env_raises_on_each_missing_required_var(
 
     with pytest.raises(ConfigError, match=missing_var):
         Settings.from_env()
+
+
+def test_from_env_reads_notes_base_url(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.org")
+
+    settings = Settings.from_env()
+    assert settings.notes_base_url == "https://cloud.example.org"
 
 
 def test_from_env_raises_on_blank_required_var(monkeypatch: pytest.MonkeyPatch):

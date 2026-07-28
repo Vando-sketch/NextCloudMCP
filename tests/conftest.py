@@ -142,6 +142,7 @@ def settings(tmp_path) -> Settings:
         caldav_url="https://cloud.example.com/remote.php/dav/",
         caldav_username="testuser",
         caldav_password="testpass",
+        notes_base_url="https://cloud.example.com",
         public_base_url="https://test.example.com",
         oauth_password=TEST_OAUTH_PASSWORD,
         oauth_state_dir=str(tmp_path / "oauth-state"),

@@ -24,6 +24,10 @@ dependencies = [
     # Nextcloud-specific raw DAV requests (sharing, trashbin) that have no
     # caldav library API of their own - see caldav_client.py.
     "lxml>=4.9",
+    # Already an indirect dependency via fastmcp/mcp; imported directly here
+    # too for the Notes app's plain JSON REST API (notes_client.py), which has
+    # nothing to do with CalDAV/the caldav library.
+    "httpx>=0.27,<1",
 ]
 
 [project.urls]

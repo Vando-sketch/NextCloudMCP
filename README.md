@@ -54,6 +54,10 @@ Must be `https://` - the server refuses to start with a `http://` CalDAV URL unl
 points at a local address (`localhost`/`127.0.0.1`/`::1`) or `NEXTCLOUD_ALLOW_INSECURE_HTTP=1`
 is set, since `http://` sends the app password above in cleartext Basic Auth.
 
+The Notes tools use a separate, plain JSON REST API (unrelated to CalDAV), so they
+also need `NEXTCLOUD_BASE_URL` - your Nextcloud instance's base URL with no path, e.g.
+`https://<your-nextcloud-domain>`. Same https/app-password rules as the CalDAV URL above.
+
 `PUBLIC_BASE_URL` is the exact URL clients will use to reach this server - see
 [Authentication](#authentication) below for why this has to match precisely.
 
@@ -266,10 +270,29 @@ For all-day events `ende` is the **inclusive** last day (RFC 5545's exclusive
 one collection) are supported and show up in both `list_task_lists` and
 `list_calendars`.
 
+### Notes tools
+
+The Nextcloud Notes app, over its own JSON REST API - a separate code path
+from the CalDAV tools above, with its own `NEXTCLOUD_BASE_URL` config (see
+[Setup](#setup)). Useful as a per-project "living document" (current state,
+decisions + rationale, open questions, next step) alongside the task/calendar
+tools' "what's open" view. See [`docs/tools.md`](docs/tools.md) for the full
+reference.
+
+| Tool | Purpose |
+|---|---|
+| `list_notizen(kategorie=None)` | All notes, title/category/favorite only (no content) |
+| `get_notiz(notiz_id)` | Single note by id, including full content |
+| `create_notiz(titel, kategorie=None, inhalt=None, favorit=None)` | New note |
+| `update_notiz(notiz_id, ...)` | Partial update; `inhalt` replaces content wholesale |
+| `append_notiz(notiz_id, text)` | Read-then-write append to existing content |
+| `search_notizen(suchtext, kategorie=None)` | Case-insensitive substring search over title/content (client-side - the API has no full-text search) |
+
 ## Testing
 
-Unit tests mock the `caldav` library entirely - no network access, no real Nextcloud
-instance required:
+Unit tests mock the `caldav` library and the Notes REST API (via
+`httpx.MockTransport`) entirely - no network access, no real Nextcloud instance
+required:
 
 ```bash
 uv sync          # installs the dev group (pytest, ruff) by default
