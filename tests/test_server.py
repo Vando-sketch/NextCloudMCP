@@ -14,9 +14,11 @@ from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import (
     CalendarNotFoundError,
+    NotizNotFoundError,
     TaskListAlreadyExistsError,
     TaskListNotFoundError,
 )
+from nextcloud_task_mcp.notes_client import NotesService
 from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
 from nextcloud_task_mcp.server import build_server, main
 
@@ -32,8 +34,13 @@ def fake_service() -> MagicMock:
 
 
 @pytest.fixture
-def tools(settings, fake_service):
-    mcp = build_server(settings, service=fake_service)
+def fake_notes_service() -> MagicMock:
+    return MagicMock(spec=NotesService)
+
+
+@pytest.fixture
+def tools(settings, fake_service, fake_notes_service):
+    mcp = build_server(settings, service=fake_service, notes_service=fake_notes_service)
     return asyncio.run(mcp.get_tools())
 
 
@@ -71,6 +78,12 @@ def test_all_tools_registered(tools):
         "restore_from_trash",
         "export_calendar",
         "import_ics",
+        "list_notizen",
+        "get_notiz",
+        "create_notiz",
+        "update_notiz",
+        "append_notiz",
+        "search_notizen",
     }
 
 
@@ -117,6 +130,98 @@ def test_get_task_delegates_to_service(tools, fake_service):
     result = _run(tools["get_task"].fn("Personal", "abc"))
     assert result == {"uid": "abc", "titel": "Milch kaufen"}
     fake_service.get_task.assert_called_once_with("Personal", "abc")
+
+
+# --- Notes tools ---
+
+
+def test_list_notizen_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.list_notes.return_value = [{"id": 1, "titel": "Projekt X"}]
+    result = _run(tools["list_notizen"].fn("Arbeit"))
+    assert result == [{"id": 1, "titel": "Projekt X"}]
+    fake_notes_service.list_notes.assert_called_once_with("Arbeit")
+
+
+def test_get_notiz_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.get_note.return_value = {"id": 1, "titel": "Projekt X", "inhalt": "..."}
+    result = _run(tools["get_notiz"].fn(1))
+    assert result == {"id": 1, "titel": "Projekt X", "inhalt": "..."}
+    fake_notes_service.get_note.assert_called_once_with(1)
+
+
+def test_create_notiz_builds_note_fields(tools, fake_notes_service):
+    fake_notes_service.create_note.return_value = {"id": 2}
+    result = _run(tools["create_notiz"].fn("Projekt X", "Arbeit", "Erste Notiz", True))
+    assert result == {"id": 2}
+    fields = fake_notes_service.create_note.call_args[0][0]
+    assert fields.titel == "Projekt X"
+    assert fields.kategorie == "Arbeit"
+    assert fields.inhalt == "Erste Notiz"
+    assert fields.favorit is True
+
+
+def test_update_notiz_only_sets_given_fields(tools, fake_notes_service):
+    fake_notes_service.update_note.return_value = {"id": 2}
+    result = _run(tools["update_notiz"].fn(2, titel="Neuer Titel"))
+    assert result == {"id": 2}
+    notiz_id, fields = fake_notes_service.update_note.call_args[0]
+    assert notiz_id == 2
+    assert fields.titel == "Neuer Titel"
+    assert fields.kategorie is None
+    assert fields.inhalt is None
+    assert fields.favorit is None
+
+
+def test_append_notiz_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.append_note.return_value = {"id": 2, "inhalt": "Alt\n\nNeu"}
+    result = _run(tools["append_notiz"].fn(2, "Neu"))
+    assert result == {"id": 2, "inhalt": "Alt\n\nNeu"}
+    fake_notes_service.append_note.assert_called_once_with(2, "Neu")
+
+
+def test_search_notizen_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.search_notes.return_value = [{"id": 1, "titel": "Projekt X"}]
+    result = _run(tools["search_notizen"].fn("Projekt", "Arbeit"))
+    assert result == [{"id": 1, "titel": "Projekt X"}]
+    fake_notes_service.search_notes.assert_called_once_with("Projekt", "Arbeit")
+
+
+def test_notiz_tools_use_ascii_parameter_names(tools):
+    for tool_name in (
+        "list_notizen",
+        "get_notiz",
+        "create_notiz",
+        "update_notiz",
+        "append_notiz",
+        "search_notizen",
+    ):
+        schema = tools[tool_name].parameters
+        for prop_name in schema.get("properties", {}):
+            assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
+
+
+def test_create_notiz_requires_only_titel(tools):
+    schema = tools["create_notiz"].parameters
+    assert schema["required"] == ["titel"]
+
+
+def test_get_notiz_requires_notiz_id(tools):
+    schema = tools["get_notiz"].parameters
+    assert schema["required"] == ["notiz_id"]
+
+
+def test_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):
+    fake_notes_service.get_note.side_effect = NotizNotFoundError(
+        "The requested note was not found."
+    )
+    with pytest.raises(ToolError, match="was not found"):
+        _run(tools["get_notiz"].fn(999))
+
+
+def test_notiz_unexpected_exception_becomes_generic_tool_error(tools, fake_notes_service):
+    fake_notes_service.get_note.side_effect = RuntimeError("boom")
+    with pytest.raises(ToolError, match="unexpected internal error"):
+        _run(tools["get_notiz"].fn(1))
 
 
 def test_get_task_returns_wiederholung_field(tools, fake_service):
@@ -749,6 +854,7 @@ def test_build_server_keeps_vendored_default_when_public_base_url_is_local(fake_
         caldav_url="https://cloud.example.com/remote.php/dav/",
         caldav_username="testuser",
         caldav_password="testpass",
+        notes_base_url="https://cloud.example.com",
         public_base_url="http://127.0.0.1:8000",
         oauth_password=None,
         oauth_state_dir=str(tmp_path / "oauth-state"),

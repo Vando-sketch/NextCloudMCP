@@ -37,6 +37,13 @@ class Settings:
     caldav_url: str
     caldav_username: str
     caldav_password: str
+    # The Notes app's REST API (notes_client.py) lives under a plain Nextcloud
+    # web path (/index.php/apps/notes/api/v1/...), not under the CalDAV DAV
+    # root above - deriving one URL from the other by string-stripping would
+    # be fragile (custom reverse-proxy paths), so this is its own required
+    # setting. Reuses caldav_username/caldav_password for Basic Auth - same
+    # Nextcloud account, same app password.
+    notes_base_url: str
     public_base_url: str
     oauth_password: str | None
     oauth_state_dir: str
@@ -102,6 +109,21 @@ class Settings:
                 "testing."
             )
 
+        # Same cleartext-credential risk as NEXTCLOUD_CALDAV_URL above, and the
+        # same escape hatch (NEXTCLOUD_ALLOW_INSECURE_HTTP is shared across both
+        # Nextcloud HTTP clients - one "I understand this is insecure" flag).
+        parsed_notes = urlparse(self.notes_base_url)
+        notes_is_https = parsed_notes.scheme == "https"
+        notes_is_local = is_local_hostname(parsed_notes.hostname)
+        if not notes_is_https and not (notes_is_local or self.allow_insecure_http):
+            raise ConfigError(
+                "NEXTCLOUD_BASE_URL must use https:// - a http:// URL sends the "
+                "Nextcloud app password in cleartext Basic Auth. Use an https:// URL, "
+                "or set NEXTCLOUD_ALLOW_INSECURE_HTTP=1 if NEXTCLOUD_BASE_URL "
+                "genuinely points at a local address (localhost/127.0.0.1/::1) for "
+                "testing."
+            )
+
     @classmethod
     def from_env(cls) -> Settings:
         """Build settings from environment variables, raising ConfigError if invalid."""
@@ -158,6 +180,7 @@ class Settings:
             caldav_url=require("NEXTCLOUD_CALDAV_URL"),
             caldav_username=require("NEXTCLOUD_USERNAME"),
             caldav_password=require("NEXTCLOUD_APP_PASSWORD"),
+            notes_base_url=require("NEXTCLOUD_BASE_URL"),
             public_base_url=require("PUBLIC_BASE_URL"),
             oauth_password=os.environ.get("MCP_OAUTH_PASSWORD", "").strip() or None,
             oauth_state_dir=os.environ.get("MCP_OAUTH_STATE_DIR", ".oauth-state"),
