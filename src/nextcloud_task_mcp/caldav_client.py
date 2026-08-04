@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, time, timedelta, timezone
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
+from zoneinfo import ZoneInfo
 
 from caldav.collection import Calendar as DAVCalendar
 from caldav.collection import Principal as DAVPrincipal
@@ -17,7 +18,7 @@ from caldav.davclient import DAVClient
 from caldav.elements import dav
 from caldav.elements import ical as ical_elements
 from caldav.lib import error as caldav_error
-from icalendar import Calendar, Event, Todo
+from icalendar import Calendar, Event, Timezone, Todo
 from lxml import etree
 
 # caldav's top-level `caldav.DAVClient`/`DAVPrincipal`/`DAVCalendar`
@@ -450,6 +451,47 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
             summary = component.get("summary")
             return (str(summary) if summary else None), "aufgabe"
     return None, None
+
+
+def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
+    """Ensure `vcal` has a VTIMEZONE for every IANA zone `component` uses.
+
+    `event_mapping._parse_datetime` keeps an explicit IANA zone name (e.g.
+    "Europe/Berlin") as a `zoneinfo.ZoneInfo`-aware datetime instead of
+    collapsing it to a fixed UTC instant, so DTSTART/DTEND/EXDATE can come
+    out on the wire as e.g. `DTSTART;TZID=Europe/Berlin:...`. Per RFC 5545
+    3.6.5, a TZID referenced like that needs a matching VTIMEZONE component
+    in the same VCALENDAR, or other clients can't resolve it - this builds
+    one (via `icalendar.Timezone.from_tzinfo`) for each such zone and adds
+    it to `vcal`, skipping any TZID `vcal` already has (mirroring
+    `export_calendar`'s `seen_tzids` de-dup pattern).
+    """
+    seen_tzids = {str(c.get("TZID", "")) for c in vcal.subcomponents if c.name == "VTIMEZONE"}
+    zones: dict[str, ZoneInfo] = {}
+    for prop_name in ("dtstart", "dtend"):
+        prop = component.get(prop_name)
+        if prop is None:
+            continue
+        tzinfo = getattr(prop.dt, "tzinfo", None)
+        if isinstance(tzinfo, ZoneInfo):
+            zones.setdefault(tzinfo.key, tzinfo)
+    exdate_prop = component.get("exdate")
+    if exdate_prop is not None:
+        for entry in exdate_prop if isinstance(exdate_prop, list) else [exdate_prop]:
+            for dt_item in getattr(entry, "dts", []):
+                tzinfo = getattr(dt_item.dt, "tzinfo", None)
+                if isinstance(tzinfo, ZoneInfo):
+                    zones.setdefault(tzinfo.key, tzinfo)
+
+    for tzid, zone in zones.items():
+        if tzid in seen_tzids:
+            continue
+        # Inserted at the front (not appended) so a VTIMEZONE always precedes
+        # any VEVENT/VTODO already in `vcal` - required by RFC 5545 3.6.5,
+        # and `update_event` syncs onto a component already carrying its
+        # VEVENT, unlike `create_event`'s empty `vcal`.
+        vcal.subcomponents.insert(0, Timezone.from_tzinfo(zone, tzid=tzid))
+        seen_tzids.add(tzid)
 
 
 class CalDavService:
@@ -1558,6 +1600,7 @@ class CalDavService:
             vcal = Calendar()
             vcal.add("prodid", "-//nextcloud-task-mcp//EN")
             vcal.add("version", "2.0")
+            _sync_vtimezones(vcal, event)
             vcal.add_component(event)
             ical_text = vcal.to_ical().decode("utf-8")
 
@@ -1590,6 +1633,7 @@ class CalDavService:
                 event_mapping.apply_event_fields(
                     event_obj.icalendar_component, fields, own_organizer=own_organizer
                 )
+                _sync_vtimezones(event_obj.icalendar_instance, event_obj.icalendar_component)
                 event_obj.save()
 
             try:
