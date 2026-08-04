@@ -117,7 +117,7 @@ def visibility_label_to_ical(label: str) -> str:
         ) from None
 
 
-def parse_datetime_input(value: str) -> date | datetime:
+def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datetime:
     """Parse an ISO 8601 date or datetime string, accepting a trailing 'Z'.
 
     Two rules, applied consistently wherever this is used (DTSTART, DUE, and
@@ -144,11 +144,22 @@ def parse_datetime_input(value: str) -> date | datetime:
     - A datetime may instead be followed by a space and an IANA timezone
       name, e.g. "2026-01-15T08:00:00 Europe/Berlin" - the datetime part
       must then be naive (no numeric offset; combining both is rejected as
-      ambiguous). The offset is resolved for that specific date via
-      `zoneinfo`, so callers no longer need to work out themselves whether
-      standard or daylight time (e.g. CET vs. CEST) applies on a given day -
-      a fixed numeric offset picked once and reused year-round is wrong for
-      half the year in any zone that observes DST.
+      ambiguous). By default the offset is resolved for that specific date
+      via `zoneinfo` and the result converted to UTC, so callers no longer
+      need to work out themselves whether standard or daylight time (e.g.
+      CET vs. CEST) applies on a given day - a fixed numeric offset picked
+      once and reused year-round is wrong for half the year in any zone
+      that observes DST.
+    - `keep_zone=True` changes that last case only: instead of converting
+      to UTC, the returned datetime keeps its `zoneinfo.ZoneInfo` tzinfo.
+      Collapsing to a fixed UTC instant is correct for a one-off value, but
+      wrong for anything that repeats on wall-clock time (an RRULE) - a
+      recurring "09:00 Europe/Berlin" stored as a fixed UTC instant keeps
+      that UTC instant across a DST transition, so it displays as 08:00 or
+      10:00 local for half the year. Keeping the zone lets the RRULE be
+      evaluated in local time, the way RFC 5545 intends. Naive input and
+      explicit numeric offsets are unaffected by this flag - they carry no
+      IANA zone to preserve, so they still normalize to UTC as before.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):
@@ -180,7 +191,8 @@ def parse_datetime_input(value: str) -> date | datetime:
                     f"Could not parse '{value}': an explicit UTC offset and a "
                     "timezone name cannot both be given - use one or the other."
                 )
-            return dt.replace(tzinfo=zone).astimezone(timezone.utc)
+            dt = dt.replace(tzinfo=zone)
+            return dt if keep_zone else dt.astimezone(timezone.utc)
         if dt.tzinfo is None:
             return dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc)
