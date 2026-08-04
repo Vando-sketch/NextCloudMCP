@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from icalendar import Event, FreeBusy
@@ -87,6 +88,37 @@ def test_explicit_offset_start_is_stored_and_round_trips_in_utc():
     parsed = event_mapping.parse_vevent(event)
     assert parsed["start"] == "2026-07-30T05:50:00+00:00"
     assert parsed["wiederholung_von"] is None
+
+
+def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
+    """Regression test for recurring events drifting by an hour across DST.
+
+    Unlike a naive or numeric-offset datetime, an explicit IANA zone name
+    (e.g. "... Europe/Berlin") is kept as a zone-aware datetime instead of
+    collapsed to a fixed UTC instant. A fixed UTC instant is fine for a
+    one-off event, but wrong for a recurring one: RRULE evaluates against
+    the stored instant, so a "09:00 Europe/Berlin" meeting stored as a fixed
+    UTC instant would display as 08:00 or 10:00 local for half the year
+    once DST flips - the exact bug reported.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        ende="2026-07-20T10:00:00 Europe/Berlin",
+        wiederholung="FREQ=DAILY",
+    )
+
+    dtstart = _dt(event.get("dtstart"))
+    assert dtstart == datetime(2026, 7, 20, 9, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert isinstance(dtstart, datetime)
+    assert isinstance(dtstart.tzinfo, ZoneInfo)
+
+    ical_bytes = event.to_ical()
+    assert b"DTSTART;TZID=Europe/Berlin:20260720T090000" in ical_bytes
+
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["start"] == "2026-07-20T09:00:00+02:00"  # CEST
 
 
 def test_z_suffix_datetime_is_utc():

@@ -230,9 +230,17 @@ def _parse_datetime(value: str) -> date | datetime:
     The shared helpers in `mapping` raise `InvalidTaskDataError`; callers of
     the event tools should only ever see `InvalidEventDataError`, so the
     task-side error is translated here with the same message.
+
+    Passes `keep_zone=True`: unlike tasks, events can recur (RRULE), and a
+    recurring time is meant to stay fixed on the wall clock (e.g. "every
+    Monday 09:00 Europe/Berlin"), not at a fixed UTC instant - the latter
+    drifts by an hour across every DST transition. So an explicit IANA zone
+    name is kept as-is (DTSTART;TZID=...) instead of collapsed to UTC; the
+    matching VTIMEZONE component is attached where the event is written to
+    the wire (see `caldav_client.py`'s `_sync_vtimezones`).
     """
     try:
-        return parse_datetime_input(value)
+        return parse_datetime_input(value, keep_zone=True)
     except InvalidTaskDataError as exc:
         raise InvalidEventDataError(str(exc)) from None
 
