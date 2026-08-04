@@ -7,12 +7,13 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from caldav.lib.url import URL
-from icalendar import Calendar, Event, FreeBusy, Todo
+from icalendar import Calendar, Event, FreeBusy, Timezone, Todo
 from lxml import etree
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
@@ -1182,6 +1183,42 @@ def test_create_event_saves_serialized_vevent(service, principal):
     assert uid in ical_text
 
 
+def test_create_event_without_named_zone_has_no_vtimezone(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00"),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "VTIMEZONE" not in kwargs["ical"]
+
+
+def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal):
+    """Regression test: a named-zone DTSTART needs its own VTIMEZONE on the
+    wire (RFC 5545 3.6.5), or the TZID it references is dangling."""
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Meeting",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            ende="2026-07-20T10:00:00 Europe/Berlin",
+        ),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "BEGIN:VTIMEZONE" in ical_text
+    assert "TZID:Europe/Berlin" in ical_text
+    assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in ical_text
+    assert ical_text.index("BEGIN:VTIMEZONE") < ical_text.index("BEGIN:VEVENT")
+
+
 def test_get_event_parses_and_annotates_calendar(service, principal):
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.event_by_uid.return_value = _make_event_obj()
@@ -1214,6 +1251,49 @@ def test_update_event_applies_fields_and_saves(service, principal):
 
     assert str(component["location"]) == "Büro"
     event_obj.save.assert_called_once_with()
+
+
+def test_update_event_with_named_zone_adds_matching_vtimezone(service, principal):
+    component = _make_vevent()
+    instance = Calendar()
+    instance.add_component(component)
+    event_obj = _make_event_obj(component)
+    event_obj.icalendar_instance = instance
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.update_event(
+        "Termine",
+        "event-1",
+        event_mapping.EventFields(start="2026-07-20T09:00:00 Europe/Berlin"),
+    )
+
+    vtimezones = [c for c in instance.subcomponents if c.name == "VTIMEZONE"]
+    assert len(vtimezones) == 1
+    assert str(vtimezones[0]["TZID"]) == "Europe/Berlin"
+    assert instance.subcomponents.index(vtimezones[0]) < instance.subcomponents.index(component)
+
+
+def test_update_event_dedupes_existing_vtimezone(service, principal):
+    component = _make_vevent()
+    instance = Calendar()
+    instance.add_component(Timezone.from_tzinfo(ZoneInfo("Europe/Berlin"), tzid="Europe/Berlin"))
+    instance.add_component(component)
+    event_obj = _make_event_obj(component)
+    event_obj.icalendar_instance = instance
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    service.update_event(
+        "Termine",
+        "event-1",
+        event_mapping.EventFields(start="2026-07-20T09:00:00 Europe/Berlin"),
+    )
+
+    vtimezones = [c for c in instance.subcomponents if c.name == "VTIMEZONE"]
+    assert len(vtimezones) == 1
 
 
 def test_delete_event_deletes(service, principal):
