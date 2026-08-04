@@ -111,6 +111,7 @@ def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
 
     dtstart = _dt(event.get("dtstart"))
     assert dtstart == datetime(2026, 7, 20, 9, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert isinstance(dtstart, datetime)
     assert isinstance(dtstart.tzinfo, ZoneInfo)
 
     ical_bytes = event.to_ical()
