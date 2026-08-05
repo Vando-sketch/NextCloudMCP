@@ -15,6 +15,8 @@ from .mapping import (
     _set,
     build_alarm,
     extract_alarms,
+    format_datetime_output,
+    get_default_timezone,
     parse_datetime_input,
     visibility_label_to_ical,
 )
@@ -127,7 +129,9 @@ class EventFields:
 
     Date semantics: `start`/`ende` follow `mapping.parse_datetime_input` - a
     string of exactly the form "YYYY-MM-DD" makes the event all-day
-    (VALUE=DATE), a naive datetime is interpreted as UTC. For all-day events
+    (VALUE=DATE), a naive datetime is interpreted in the server's default
+    timezone and, since events pass `keep_zone=True`, keeps that zone
+    (DTSTART;TZID=...) instead of collapsing to UTC. For all-day events
     `ende` is the *inclusive* last day; RFC 5545 DTEND is exclusive, so one
     day is added when writing and subtracted again when parsing.
 
@@ -247,12 +251,28 @@ def _parse_datetime(value: str) -> date | datetime:
 
 
 def _as_utc(value: datetime) -> datetime:
-    """Make a datetime comparable: a naive value is treated as UTC.
+    """Make a datetime comparable: a naive value is read in the default zone.
 
-    Same rule as `mapping.parse_datetime_input` (B2); our own writes always
-    produce aware datetimes, but components written by other clients may not.
+    Same rule as `mapping.parse_datetime_input`; our own writes always produce
+    aware datetimes, but components written by other clients may carry
+    "floating" local times, and those must mean the same thing here as
+    everywhere else in the server - reading them as UTC instead would make
+    free/busy and sorting disagree with the day windows by the zone's offset.
     """
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    if value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=get_default_timezone())
+
+
+def _local_midnight(value: date) -> datetime:
+    """Start of an all-day date, in the server's default timezone.
+
+    All-day values carry no time, so any comparison has to pick an instant for
+    them. `caldav_client._range_bound` and `mapping._to_comparable_datetime`
+    pick local midnight; these helpers must agree, or an all-day event's busy
+    block would start (and end) at the wrong hour of its own day.
+    """
+    return datetime.combine(value, time.min, tzinfo=get_default_timezone())
 
 
 def _parse_rrule(text: str) -> vRecur:
@@ -534,14 +554,14 @@ def _format_end(component, start_value: date | datetime | None) -> str | None:
         value = dtend.dt
         if not isinstance(value, datetime):
             value = value - timedelta(days=1)
-        return value.isoformat()
+        return format_datetime_output(value)
     duration = component.get("duration")
     if duration is not None and start_value is not None:
         end_value = start_value + duration.dt
         if not isinstance(end_value, datetime):
             # date + duration is again the exclusive end day.
             end_value = end_value - timedelta(days=1)
-        return end_value.isoformat()
+        return format_datetime_output(end_value)
     return None
 
 
@@ -561,11 +581,16 @@ def _extract_exdates(component) -> list[str]:
     for entry in entries:
         dts = getattr(entry, "dts", None)
         if dts is not None:
-            result.extend(item.dt.isoformat() for item in dts)
+            for item in dts:
+                formatted = format_datetime_output(item.dt)
+                if formatted:
+                    result.append(formatted)
         else:
             value: Any = getattr(entry, "dt", None)
             if value is not None and hasattr(value, "isoformat"):
-                result.append(value.isoformat())
+                formatted = format_datetime_output(value)
+                if formatted:
+                    result.append(formatted)
             else:
                 result.append(str(entry))
     return result
@@ -597,7 +622,7 @@ def _format_recurrence_id(component) -> str | None:
     if prop is None:
         return None
     value = getattr(prop, "dt", prop)
-    return value.isoformat()
+    return format_datetime_output(value)
 
 
 def _parse_organizer(component) -> dict[str, Any] | None:
@@ -652,7 +677,7 @@ def parse_vevent(component) -> dict[str, Any]:
     return {
         "uid": str(component.get("uid")),
         "titel": str(component.get("summary", "")),
-        "start": start_value.isoformat() if start_value is not None else None,
+        "start": format_datetime_output(start_value),
         "ende": _format_end(component, start_value),
         "ganztaegig": start_value is not None and not isinstance(start_value, datetime),
         "ort": _text(component, "location"),
@@ -677,9 +702,9 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     """Chronological sort key over parsed event dicts.
 
     Events without a start sort last. All-day starts (bare dates) are
-    normalized to start-of-day UTC so they compare cleanly against datetime
-    starts; naive datetimes are treated as UTC (same rule as everywhere
-    else), aware ones compare by instant.
+    normalized to local start-of-day so they compare cleanly against datetime
+    starts; naive datetimes are read in the default zone (same rule as
+    everywhere else), aware ones compare by instant.
     """
     start = event.get("start")
     if start is None:
@@ -687,7 +712,7 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     parsed = _parse_datetime(start)
     if isinstance(parsed, datetime):
         return (0, _as_utc(parsed))
-    return (0, datetime.combine(parsed, time.min, tzinfo=timezone.utc))
+    return (0, _local_midnight(parsed))
 
 
 def filter_events(
@@ -744,7 +769,8 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
     A cancelled event (STATUS=CANCELLED) or a transparent one
     (TRANSP=TRANSPARENT, e.g. Nextcloud's "does not block time" option) is
     not busy time; neither is an event without a DTSTART. All-day dates are
-    expanded to the full UTC day(s) they cover, using the same DTEND/DURATION
+    expanded to the full *local* day(s) they cover (the server's default
+    timezone, matching every other day window), using the same DTEND/DURATION
     fallback as `_format_end` - but returning the *exclusive* end datetime
     (unlike the German `ende` field, which is inclusive), since that's the
     natural representation for an interval to be merged with others in
@@ -771,13 +797,13 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
         duration = component.get("duration")
         end_value = start_value + duration.dt if duration is not None else start_value
 
-    def _to_utc_instant(value: date | datetime) -> datetime:
+    def _to_instant(value: date | datetime) -> datetime:
         if isinstance(value, datetime):
             return _as_utc(value)
-        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+        return _local_midnight(value)
 
-    start_dt = _to_utc_instant(start_value)
-    end_dt = _to_utc_instant(end_value)
+    start_dt = _to_instant(start_value)
+    end_dt = _to_instant(end_value)
     if end_dt < start_dt:
         end_dt = start_dt
     return (start_dt, end_dt)

@@ -21,17 +21,19 @@ Values for enum-like fields:
 | `status` (`list_calendar_shares`) | `"akzeptiert"`, `"ausstehend"`, `"abgelehnt"`, `"ungueltig"`, `"geloescht"`, or a raw lowercased status the server reported |
 | `typ` (`list_trash`) | `"aufgabe"`, `"termin"`, or `null` |
 
-Dates are ISO 8601 strings. Two rules apply everywhere a date/datetime is
+Dates are ISO 8601 strings. Rules applying everywhere a date/datetime is
 accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
 `ausnahme_daten` and absolute `erinnerungen` entries):
+
+> **BREAKING CHANGE**: Timezone handling uses one configured server default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC behavior.
 
 - A value that is exactly `"YYYY-MM-DD"` (e.g. `"2026-07-20"`) creates an
   **all-day** entry (iCalendar `VALUE=DATE`) — it comes back from `list_tasks`
   / `get_task` as `"2026-07-20"`, not a midnight datetime.
 - Any other ISO 8601 datetime (e.g. `"2026-07-20T14:00:00"`,
   `"2026-07-20T14:00:00+02:00"`) is stored as a datetime. A **naive**
-  datetime (no UTC offset) is interpreted as UTC; a datetime with an
-  explicit offset is converted to (and always comes back as) UTC.
+  datetime (no UTC offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
+  Output timestamps are returned formatted in the default timezone with offset (e.g. `"+02:00"`).
 - A datetime may instead be followed by a space and an **IANA timezone
   name**, e.g. `"2026-07-20T14:00:00 Europe/Berlin"` — the correct
   standard/daylight offset (e.g. CET vs. CEST) is then resolved for that
@@ -93,10 +95,11 @@ Result — one dict per task:
 ```
 
 `erinnerungen` lists all alarms set on the task as relative duration strings (e.g. `"-P1D"`,
-`"-PT30M"`) or absolute ISO 8601 datetimes with offset (e.g. `"2026-08-07T09:00:00+00:00"`),
-matching the format `create_task`/`update_task` accepts. Absolute values always read back in
-UTC, so `"...Z"` and `"...+02:00"` input come back as `"+00:00"` — semantically identical,
-not byte-identical.
+`"-PT30M"`) or absolute ISO 8601 datetimes with offset (e.g. `"2026-08-07T09:00:00+02:00"`),
+matching the format `create_task`/`update_task` accepts. Absolute values are stored in UTC on
+the wire (RFC 5545 requires that) but read back in the server's default timezone, so `"...Z"`
+and `"...+00:00"` input come back with the local offset — the same instant, not the same
+string.
 
 Two details of an alarm have no slot in this format and are therefore lost when a read-back
 value is written again: whether a relative reminder was anchored to the due date or the start
@@ -168,7 +171,9 @@ Each entry is either:
   (`TRIGGER;RELATED=END`) when the task has one, otherwise to `start_datum`
   (`RELATED=START`). A relative reminder on a task with neither date is an error.
 - an **absolute** ISO 8601 datetime, e.g. `"2026-07-19T09:00:00+02:00"`. Stored as a UTC
-  `TRIGGER;VALUE=DATE-TIME` (values without an offset are assumed to already be UTC; input ending in `"...Z"` reads back as `"+00:00"` - semantically identical, not byte-identical).
+  `TRIGGER;VALUE=DATE-TIME` on the wire, as RFC 5545 requires; a value without an offset is
+  read in the server's default timezone first. Reading it back yields the same instant
+  rendered in the default timezone, so the string may differ from the one sent.
 
 Example call:
 
@@ -336,8 +341,8 @@ event started long before. Results are sorted by `start`. One event dict:
 {
   "uid": "7f0c9e2a-...",
   "titel": "Team-Meeting",
-  "start": "2026-07-20T14:00:00+00:00",
-  "ende": "2026-07-20T15:00:00+00:00",
+  "start": "2026-07-20T14:00:00+02:00",
+  "ende": "2026-07-20T15:00:00+02:00",
   "ganztaegig": false,
   "ort": "Konferenzraum",
   "beschreibung": "Sprint-Planung",
@@ -346,7 +351,7 @@ event started long before. Results are sorted by `start`. One event dict:
   "status": "bestätigt",
   "sichtbarkeit": null,
   "wiederholung": "FREQ=WEEKLY;BYDAY=MO",
-  "ausnahme_daten": ["2026-07-27T14:00:00+00:00"],
+  "ausnahme_daten": ["2026-07-27T14:00:00+02:00"],
   "url": null,
   "verknuepfte_aufgaben": [{"uid": "0f8ba4a4-...", "beziehung": "zeitblock"}],
   "wiederholung_von": null,
@@ -548,8 +553,8 @@ event dicts with the same shape as `list_events` entries, each with an added
   {
     "uid": "7f0c9e2a-...",
     "titel": "Steuererklärung vorbereiten",
-    "start": "2026-07-20T14:00:00+00:00",
-    "ende": "2026-07-20T15:00:00+00:00",
+    "start": "2026-07-20T14:00:00+02:00",
+    "ende": "2026-07-20T15:00:00+02:00",
     "ganztaegig": false,
     "ort": null,
     "beschreibung": null,
@@ -587,8 +592,8 @@ Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
 
 One day's calendar events and due tasks together — CalDAV has no combined
 VEVENT+VTODO query, so this is composed server-side. `datum` must be a
-date-only `"YYYY-MM-DD"` string; day boundaries are UTC (consistent with the
-naive-input-is-UTC rule).
+date-only `"YYYY-MM-DD"` string; day boundaries are in the server's default timezone
+(consistent with the naive-input rule).
 
 ```json
 {
@@ -629,11 +634,11 @@ call fails with an error rather than silently returning an empty (looks
 
 ```json
 {
-  "von": "2026-07-20T00:00:00+00:00",
-  "bis": "2026-07-21T00:00:00+00:00",
+  "von": "2026-07-20T00:00:00+02:00",
+  "bis": "2026-07-21T00:00:00+02:00",
   "benutzer": null,
   "belegt": [
-    {"von": "2026-07-20T14:00:00+00:00", "bis": "2026-07-20T15:00:00+00:00"}
+    {"von": "2026-07-20T14:00:00+02:00", "bis": "2026-07-20T15:00:00+02:00"}
   ]
 }
 ```
@@ -709,7 +714,7 @@ No parameters. Returns every deleted task/event still in the trash bin:
     "titel": "Einkaufen",
     "typ": "aufgabe",
     "kalender": "personal",
-    "geloescht_am": "2026-07-10T12:00:00+00:00"
+    "geloescht_am": "2026-07-10T14:00:00+02:00"
   }
 ]
 ```

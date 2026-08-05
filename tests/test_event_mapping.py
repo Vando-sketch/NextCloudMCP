@@ -9,7 +9,7 @@ import pytest
 from icalendar import Event, FreeBusy
 from icalendar.prop import vDDDTypes
 
-from nextcloud_task_mcp import event_mapping
+from nextcloud_task_mcp import event_mapping, mapping
 from nextcloud_task_mcp.errors import InvalidEventDataError
 from nextcloud_task_mcp.event_mapping import EventFields
 
@@ -49,9 +49,9 @@ def test_apply_and_parse_round_trip():
 
     assert parsed["uid"] == "event-1"
     assert parsed["titel"] == "Team-Meeting"
-    # Naive datetimes are interpreted as UTC (B2).
-    assert parsed["start"] == "2026-07-20T14:00:00+00:00"
-    assert parsed["ende"] == "2026-07-20T15:30:00+00:00"
+    # Naive datetimes are interpreted in default timezone (Europe/Berlin, +02:00 in July).
+    assert parsed["start"] == "2026-07-20T14:00:00+02:00"
+    assert parsed["ende"] == "2026-07-20T15:30:00+02:00"
     assert parsed["ganztaegig"] is False
     assert parsed["ort"] == "Konferenzraum"
     assert parsed["beschreibung"] == "Sprint-Planung"
@@ -66,19 +66,7 @@ def test_apply_and_parse_round_trip():
 
 
 def test_explicit_offset_start_is_stored_and_round_trips_in_utc():
-    """Regression test for an explicit UTC-offset start losing its instant.
-
-    `icalendar` serializes an aware datetime whose tzinfo is a plain
-    fixed offset (as produced by `datetime.fromisoformat("...+02:00")`) as
-    DTSTART;TZID="UTC+02:00":... - a TZID with no matching VTIMEZONE
-    component in the calendar. CalDAV clients that don't recognize that
-    (nonstandard) TZID silently fall back to interpreting the timestamp in
-    their own local zone, shifting the moment - and, as reported, the
-    calendar day. Normalizing the input to UTC before writing (like
-    `mapping.parse_datetime_input` already did for naive input) avoids the
-    bogus TZID entirely: the property is written as plain UTC with a "Z"
-    suffix, which every client understands, and the instant is preserved.
-    """
+    """Regression test for an explicit UTC-offset start losing its instant."""
     event = _new_event()
     _apply(event, start="2026-07-30T07:50:00+02:00")
 
@@ -87,21 +75,12 @@ def test_explicit_offset_start_is_stored_and_round_trips_in_utc():
     assert b"DTSTART:20260730T055000Z" in ical_bytes
 
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["start"] == "2026-07-30T05:50:00+00:00"
+    assert parsed["start"] == "2026-07-30T07:50:00+02:00"
     assert parsed["wiederholung_von"] is None
 
 
 def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
-    """Regression test for recurring events drifting by an hour across DST.
-
-    Unlike a naive or numeric-offset datetime, an explicit IANA zone name
-    (e.g. "... Europe/Berlin") is kept as a zone-aware datetime instead of
-    collapsed to a fixed UTC instant. A fixed UTC instant is fine for a
-    one-off event, but wrong for a recurring one: RRULE evaluates against
-    the stored instant, so a "09:00 Europe/Berlin" meeting stored as a fixed
-    UTC instant would display as 08:00 or 10:00 local for half the year
-    once DST flips - the exact bug reported.
-    """
+    """Regression test for recurring events drifting by an hour across DST."""
     event = _new_event()
     _apply(
         event,
@@ -122,12 +101,12 @@ def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
     assert parsed["start"] == "2026-07-20T09:00:00+02:00"  # CEST
 
 
-def test_z_suffix_datetime_is_utc():
+def test_z_suffix_datetime_input_formatted_in_default_timezone():
     event = _new_event()
     _apply(event, titel="T", start="2026-07-20T14:00:00Z", ende="2026-07-20T15:00:00Z")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["start"] == "2026-07-20T14:00:00+00:00"
-    assert parsed["ende"] == "2026-07-20T15:00:00+00:00"
+    assert parsed["start"] == "2026-07-20T16:00:00+02:00"
+    assert parsed["ende"] == "2026-07-20T17:00:00+02:00"
 
 
 # --- all-day handling: `ende` is the inclusive last day, DTEND is exclusive ---
@@ -204,8 +183,8 @@ def test_exdate_set_parse_and_clear():
     )
     parsed = event_mapping.parse_vevent(event)
     assert parsed["ausnahme_daten"] == [
-        "2026-07-27T14:00:00+00:00",
-        "2026-08-03T14:00:00+00:00",
+        "2026-07-27T14:00:00+02:00",
+        "2026-08-03T14:00:00+02:00",
     ]
 
     _apply(event, clear=("ausnahme_daten",))
@@ -216,7 +195,7 @@ def test_exdate_replaces_instead_of_appending():
     event = _new_event()
     _apply(event, titel="T", start="2026-07-20T14:00:00", ausnahme_daten=["2026-07-27T14:00:00"])
     _apply(event, ausnahme_daten=["2026-08-03T14:00:00"])
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-03T14:00:00+00:00"]
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-03T14:00:00+02:00"]
 
 
 def test_exdate_parses_repeated_properties_from_other_clients():
@@ -280,14 +259,14 @@ def test_parse_vevent_erinnerungen_absolute_round_trip():
     )
     parsed = event_mapping.parse_vevent(event)
     assert parsed["erinnerungen"] == [
-        "2026-08-07T09:00:00+00:00",
-        "2026-08-07T09:00:00+00:00",
+        "2026-08-07T11:00:00+02:00",
+        "2026-08-07T11:00:00+02:00",
     ]
 
 
 def test_parse_vevent_erinnerungen_preserves_order():
     event = _new_event()
-    reminders = ["-P1D", "-PT30M", "2026-08-07T09:00:00+00:00"]
+    reminders = ["-P1D", "-PT30M", "2026-08-07T11:00:00+02:00"]
     _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=reminders)
     parsed = event_mapping.parse_vevent(event)
     assert parsed["erinnerungen"] == reminders
@@ -680,7 +659,7 @@ def test_parse_duration_instead_of_dtend():
     event.add("dtstart", datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc))
     event.add("duration", timedelta(hours=2))
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["ende"] == "2026-07-20T16:00:00+00:00"
+    assert parsed["ende"] == "2026-07-20T18:00:00+02:00"
 
 
 def test_parse_recurrence_id_as_wiederholung_von():
@@ -688,7 +667,7 @@ def test_parse_recurrence_id_as_wiederholung_von():
     event.add("dtstart", datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc))
     event.add("recurrence-id", datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc))
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["wiederholung_von"] == "2026-07-27T14:00:00+00:00"
+    assert parsed["wiederholung_von"] == "2026-07-27T16:00:00+02:00"
 
 
 # --- filter_events ---
@@ -757,18 +736,36 @@ def test_event_busy_interval_timed_event():
     _apply(event, titel="T", start="2026-07-20T14:00:00", ende="2026-07-20T15:00:00")
     interval = event_mapping.event_busy_interval(event)
     assert interval == (
-        datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
-        datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+        datetime(2026, 7, 20, 15, 0, tzinfo=ZoneInfo("Europe/Berlin")),
     )
 
 
-def test_event_busy_interval_all_day_event_spans_full_utc_day():
+def test_event_busy_interval_all_day_event_spans_full_local_days():
+    """An all-day event blocks its own local days, not the UTC ones.
+
+    With a UTC anchor, a Berlin all-day event would start being busy at 02:00
+    local and bleed two hours into the next day - and disagree with the day
+    windows `list_events`/`get_agenda` use for the very same date.
+    """
     event = _new_event()
     _apply(event, titel="T", start="2026-08-01", ende="2026-08-02")
     interval = event_mapping.event_busy_interval(event)
+    berlin = ZoneInfo("Europe/Berlin")
+    assert interval == (
+        datetime(2026, 8, 1, 0, 0, tzinfo=berlin),
+        datetime(2026, 8, 3, 0, 0, tzinfo=berlin),
+    )
+
+
+def test_event_busy_interval_all_day_event_follows_configured_timezone():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-08-01", ende="2026-08-01")
+    mapping.set_default_timezone("UTC")
+    interval = event_mapping.event_busy_interval(event)
     assert interval == (
         datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc),
-        datetime(2026, 8, 3, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 2, 0, 0, tzinfo=timezone.utc),
     )
 
 
@@ -867,14 +864,16 @@ def test_merge_busy_intervals_empty_input():
     assert event_mapping.merge_busy_intervals([]) == []
 
 
-def test_merge_busy_intervals_naive_datetimes_treated_as_utc():
+def test_merge_busy_intervals_naive_datetimes_use_default_timezone():
+    """A foreign client's floating time means the same thing here as elsewhere."""
     a = datetime(2026, 7, 20, 9, 0)
     b = datetime(2026, 7, 20, 10, 0)
     result = event_mapping.merge_busy_intervals([(a, b)])
+    berlin = ZoneInfo("Europe/Berlin")
     assert result == [
         (
-            datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
-            datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, 9, 0, tzinfo=berlin),
+            datetime(2026, 7, 20, 10, 0, tzinfo=berlin),
         )
     ]
 

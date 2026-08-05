@@ -214,16 +214,17 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
 `faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
-date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
-RFC 5545, VALARM triggers must be in UTC). Reading reminders back always yields UTC, so
-`"...Z"` and offset-bearing input come back as `"+00:00"` — semantically identical, not
-byte-identical. See `docs/tools.md` for the two alarm details that don't survive a
-read-back-and-write-again cycle.
+date raises an error. Absolute reminders are stored in UTC per RFC 5545, but reading reminders
+back formats them in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
+See `docs/tools.md` for details.
 
-**Date/time semantics** (applies to `start_datum`, `faellig_datum`, and absolute
+> **BREAKING CHANGE**: Server timezone handling uses a single configurable default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC-hardcoded behavior.
+
+**Date/time semantics** (applies to `start_datum`, `faellig_datum`, `start`, `ende`, and absolute
 `erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
 (`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
-offset) is interpreted as UTC.
+offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
+Returned timestamps carry the default timezone's offset (e.g. `+02:00`).
 
 ### `update_task(list_name, task_uid, ...)`
 

@@ -1184,13 +1184,13 @@ def test_create_event_saves_serialized_vevent(service, principal):
     assert uid in ical_text
 
 
-def test_create_event_without_named_zone_has_no_vtimezone(service, principal):
+def test_create_event_with_explicit_offset_has_no_vtimezone(service, principal):
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     principal.calendars.return_value = [event_cal]
 
     service.create_event(
         "Termine",
-        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00"),
+        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00+00:00"),
     )
 
     _, kwargs = event_cal.save_event.call_args
@@ -1331,9 +1331,9 @@ def test_list_events_with_bounds_uses_time_range_search(service, principal):
     service.list_events(von="2026-07-01", bis="2026-07-31")
 
     _, kwargs = event_cal.search.call_args
-    assert kwargs["start"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    assert kwargs["start"] == datetime(2026, 7, 1, tzinfo=ZoneInfo("Europe/Berlin"))
     # date-only `bis` is inclusive: the exclusive filter end is the next day.
-    assert kwargs["end"] == datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert kwargs["end"] == datetime(2026, 8, 1, tzinfo=ZoneInfo("Europe/Berlin"))
     assert kwargs["event"] is True
     assert kwargs["expand"] is False
 
@@ -1514,8 +1514,8 @@ def test_create_event_from_task_uses_due_datetime(service, principal):
     _, kwargs = event_cal.save_event.call_args
     ical_text = kwargs["ical"]
     assert "SUMMARY:Steuer" in ical_text
-    assert "DTSTART:20260720T140000Z" in ical_text
-    assert "DTEND:20260720T143000Z" in ical_text
+    assert "DTSTART:20260720T120000Z" in ical_text
+    assert "DTEND:20260720T123000Z" in ical_text
     assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
     assert uid
 
@@ -1573,11 +1573,11 @@ def test_get_agenda_combines_events_and_due_tasks(service, principal):
     assert [e["uid"] for e in result["termine"]] == ["event-1"]
     assert [t["uid"] for t in result["aufgaben"]] == ["task-1"]
     assert result["aufgaben"][0]["liste"] == "Privat"
-    # Events were queried with expand=True over exactly that day.
+    # Events were queried with expand=True over exactly that day in default timezone.
     _, kwargs = event_cal.search.call_args
     assert kwargs["expand"] is True
-    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=timezone.utc)
-    assert kwargs["end"] == datetime(2026, 7, 21, tzinfo=timezone.utc)
+    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["end"] == datetime(2026, 7, 21, tzinfo=ZoneInfo("Europe/Berlin"))
 
 
 def test_get_agenda_excludes_tasks_due_other_days(service, principal):
@@ -1595,6 +1595,27 @@ def test_get_agenda_excludes_tasks_due_other_days(service, principal):
 
     assert result["termine"] == []
     assert result["aufgaben"] == []
+
+
+def test_get_agenda_day_window_local_timezone_bounds(service, principal):
+    """A task due at 00:30 local is included in that day's agenda, and a 23:30 local
+    event on the previous day does not leak."""
+    # 2026-07-20 00:30 Europe/Berlin = 2026-07-19 22:30 UTC
+    todo = Todo()
+    todo.add("uid", "task-early-local")
+    todo.add("summary", "Early local task")
+    todo.add("due", datetime(2026, 7, 19, 22, 30, tzinfo=timezone.utc))
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = [todo_obj]
+
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+    assert [t["uid"] for t in result["aufgaben"]] == ["task-early-local"]
 
 
 # ======================================================================
@@ -1812,7 +1833,7 @@ def test_get_free_busy_own_availability_aggregates_and_merges(service, principal
 
     assert result["benutzer"] is None
     assert result["belegt"] == [
-        {"von": "2026-07-20T14:00:00+00:00", "bis": "2026-07-20T15:00:00+00:00"}
+        {"von": "2026-07-20T16:00:00+02:00", "bis": "2026-07-20T17:00:00+02:00"}
     ]
 
 
@@ -1824,10 +1845,10 @@ def test_get_free_busy_own_availability_queries_with_bounds(service, principal):
     service.get_free_busy("2026-07-20", "2026-07-21")
 
     _, kwargs = event_cal.search.call_args
-    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
     # date-only `bis` is inclusive of the whole day, so the exclusive filter
     # end is the start of the *next* day (same convention as list_events).
-    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
     assert kwargs["event"] is True
 
 
@@ -1838,8 +1859,8 @@ def test_get_free_busy_returns_normalized_bounds(service, principal):
 
     result = service.get_free_busy("2026-07-20", "2026-07-21")
 
-    assert result["von"] == "2026-07-20T00:00:00+00:00"
-    assert result["bis"] == "2026-07-22T00:00:00+00:00"
+    assert result["von"] == "2026-07-20T00:00:00+02:00"
+    assert result["bis"] == "2026-07-22T00:00:00+02:00"
 
 
 def test_get_free_busy_own_availability_translates_generic_exception(service, principal):
@@ -1868,12 +1889,12 @@ def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, princip
     result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
 
     args, _ = principal.freebusy_request.call_args
-    assert args[0] == datetime(2026, 7, 20, tzinfo=timezone.utc)
-    assert args[1] == datetime(2026, 7, 22, tzinfo=timezone.utc)
+    assert args[0] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert args[1] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
     assert args[2] == ["mailto:bob@example.com"]
     assert result["benutzer"] == "bob@example.com"
     assert result["belegt"] == [
-        {"von": "2026-07-20T09:00:00+00:00", "bis": "2026-07-20T10:00:00+00:00"}
+        {"von": "2026-07-20T11:00:00+02:00", "bis": "2026-07-20T12:00:00+02:00"}
     ]
 
 
@@ -2268,7 +2289,9 @@ def test_list_trash_parses_items_including_deleted_at_and_type(service, dav_clie
             "titel": "Einkaufen",
             "typ": "aufgabe",
             "kalender": "personal",
-            "geloescht_am": datetime.fromtimestamp(1752000000, tz=timezone.utc).isoformat(),
+            "geloescht_am": mapping.format_datetime_output(
+                datetime.fromtimestamp(1752000000, tz=timezone.utc)
+            ),
         }
     ]
     args, _ = dav_client.request.call_args
@@ -2343,7 +2366,7 @@ def test_list_trash_deleted_at_accepts_iso8601_too(service, dav_client):
 
     result = service.list_trash()
 
-    assert result[0]["geloescht_am"] == "2026-07-10T12:00:00+00:00"
+    assert result[0]["geloescht_am"] == "2026-07-10T14:00:00+02:00"
 
 
 def test_list_trash_not_available_translates_404_to_clean_error(service, dav_client):
