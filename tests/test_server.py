@@ -377,6 +377,35 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
     assert fields.uebergeordnete_aufgabe == "parent-uid"
 
 
+def test_create_task_passes_wiederholung(tools, fake_service):
+    fake_service.create_task.return_value = "new-uid"
+    _run(
+        tools["create_task"].fn(
+            list_name="Personal",
+            titel="Muell rausbringen",
+            faellig_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY;BYDAY=MO",
+        )
+    )
+    args, _ = fake_service.create_task.call_args
+    _, fields = args
+    assert fields.wiederholung == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_update_task_passes_wiederholung(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", wiederholung="FREQ=DAILY"))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.wiederholung == "FREQ=DAILY"
+
+
+def test_update_task_passes_felder_leeren_wiederholung_as_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["wiederholung"]))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.clear == ("wiederholung",)
+
+
 def test_update_task_returns_uid(tools, fake_service):
     result = _run(tools["update_task"].fn("Personal", "task-uid", titel="Neu"))
     assert result == {"uid": "task-uid"}

@@ -116,8 +116,7 @@ non-display alarm action (`EMAIL`/`AUDIO`) written by another client, which beco
 reminder. For reminders this server created itself, the round trip is exact.
 `uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
-otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
-only surfaces whether/how an existing task recurs.
+otherwise `null` — set via `create_task`/`update_task`, see their `wiederholung` parameter.
 `liste` is the display name of the task list containing the task.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
 
@@ -173,8 +172,31 @@ Returns the same dict shape as one entry from `list_tasks` (see above), includin
 | `notizen` | string | no | `DESCRIPTION` |
 | `sichtbarkeit` | string enum | no | `CLASS` |
 | `uebergeordnete_aufgabe` | string (UID) | no | `RELATED-TO;RELTYPE=PARENT` |
+| `wiederholung` | string (raw RRULE) | no | `RRULE`, e.g. `"FREQ=WEEKLY;BYDAY=MO"` |
 
 Returns `{"uid": "<new task uid>"}`.
+
+### Recurrence (`wiederholung`)
+
+`wiederholung` is a raw RFC 5545 `RRULE` string, e.g. `"FREQ=DAILY"` or
+`"FREQ=WEEKLY;BYDAY=MO;COUNT=10"` — the same format `create_event`'s
+`wiederholung` accepts and `list_tasks`/`get_task` return. A value that
+doesn't parse as an RRULE is rejected.
+
+A recurring task needs something to recur *from*: a task that ends up with an
+`RRULE` but **neither** `start_datum` nor `faellig_datum` is rejected with a
+speaking error, rather than silently writing a series no client can resolve.
+This is judged on the task's final state, so it also catches clearing the last
+anchor of a task that was already recurring — even when the call doesn't
+mention `wiederholung` at all.
+
+The value read back is the *canonical* form of what you sent, not a verbatim
+echo: part names come back uppercase and in RFC 5545's own order, so
+`"byday=mo;freq=weekly"` reads back as `"FREQ=WEEKLY;BYDAY=MO"`. Same rule,
+different spelling.
+
+See "Completing a recurring task" under `complete_task` below for what
+happens to the series once the task is marked done.
 
 ### Reminders (`erinnerungen`)
 
@@ -229,6 +251,13 @@ Only fields explicitly present in the call are modified; everything else on the 
   `felder_leeren`).
 - A scalar field left as `None`/omitted is left unchanged. To actually remove a
   property (e.g. delete a due date), list its name in `felder_leeren` instead.
+- `wiederholung`'s anchor requirement (see `create_task`'s "Recurrence"
+  section) is checked against the task's *final* state after this call, not
+  just the fields passed here. So calling `update_task` with only
+  `wiederholung` set succeeds as long as the task already has a `start_datum`
+  or `faellig_datum` from before — but clearing the task's only anchor
+  (`felder_leeren=["faellig_datum"]`) while a recurrence is set or remains is
+  rejected the same way.
 
 ### Clearing fields (`felder_leeren`)
 
@@ -237,7 +266,7 @@ than change. Accepted values:
 
 `"start_datum"`, `"faellig_datum"`, `"prioritaet"`, `"fortschritt_prozent"`, `"ort"`,
 `"url"`, `"tags"`, `"erinnerungen"`, `"notizen"`, `"sichtbarkeit"`,
-`"uebergeordnete_aufgabe"`.
+`"uebergeordnete_aufgabe"`, `"wiederholung"`.
 
 `"titel"` cannot be cleared (a task always needs a title) and is not accepted. Naming
 an unknown field, or naming a field in `felder_leeren` that is *also* given a new
@@ -265,6 +294,34 @@ Marks the task as done: `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPL
 timestamp (current UTC time). Returns `{"uid": "<task_uid>"}`.
 
 Completing a parent task does **not** cascade to its subtasks.
+
+### Completing a recurring task (`wiederholung`)
+
+`complete_task` only ever touches `STATUS`/`COMPLETED`/`PERCENT-COMPLETE` on
+the task itself — it does **not** roll the series forward to a next
+occurrence (no new `DTSTART`/`DUE`, no separate follow-up task object is
+created). This is this server's own observed behaviour, verified by test
+(`test_mapping.py`'s `test_mark_completed_leaves_wiederholung_intact`,
+`test_caldav_client.py`'s `test_complete_task_leaves_rrule_intact`): the
+task's `RRULE` survives completion unchanged, and the task simply comes back
+from `list_tasks`/`get_task` with `status="erledigt"` while still carrying
+its original `wiederholung`.
+
+Practically, **completing a recurring task ends it** as far as this server
+is concerned — to keep a recurring series "going", advance `faellig_datum`
+(via `update_task`) to the next due date yourself instead of calling
+`complete_task`.
+
+Whether the Nextcloud Tasks web app (or another CalDAV client) additionally
+materializes/displays a "next" occurrence once a recurring `VTODO` is marked
+`COMPLETED` this way is **not verified here** — that would require observing
+the app's own client-side behaviour against a live server, which is outside
+what this server's code controls or this test suite checks. An opt-in
+integration test
+(`test_integration.py::test_recurring_task_completion_behaviour_against_a_real_server`,
+gated behind `RUN_INTEGRATION_TESTS=1`) creates a recurring task, completes
+it, and records what comes back from a real server, so this can be confirmed
+independently later.
 
 ---
 

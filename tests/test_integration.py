@@ -69,6 +69,53 @@ def test_full_task_lifecycle(live_service, test_list_name):
         live_service.delete_task(test_list_name, uid)
 
 
+def test_recurring_task_completion_behaviour_against_a_real_server(live_service, test_list_name):
+    """Records what a real Nextcloud server does with a recurring VTODO's
+    RRULE once complete_task is called on it.
+
+    This server's own code (caldav_client.complete_task / mapping.mark_completed)
+    only ever sets STATUS/PERCENT-COMPLETE/COMPLETED and never touches RRULE or
+    creates a new occurrence - see the pure-unit pin in test_caldav_client.py's
+    test_complete_task_leaves_rrule_intact and test_mapping.py's
+    test_mark_completed_leaves_wiederholung_intact for that. What is NOT
+    verified anywhere else in this suite is how a real Nextcloud Tasks
+    server/app treats the resulting object afterwards (e.g. whether the web UI
+    materializes/display a "next" occurrence) - this test only records this
+    server's own round trip against a live CalDAV backend, not the Nextcloud
+    Tasks app's UI behaviour, which remains unverified here.
+    """
+    uid = live_service.create_task(
+        test_list_name,
+        mapping.TaskFields(
+            titel="nextcloud-task-mcp integration test recurring task",
+            faellig_datum="2026-07-20",
+            wiederholung="FREQ=DAILY",
+            notizen="Created by the automated integration test suite; safe to delete.",
+        ),
+    )
+    try:
+        created = live_service.get_task(test_list_name, uid)
+        assert created["wiederholung"] == "FREQ=DAILY"
+
+        live_service.complete_task(test_list_name, uid)
+
+        all_tasks = live_service.list_tasks(test_list_name, only_open=False)
+        completed = next(t for t in all_tasks if t["uid"] == uid)
+        # Recorded, not asserted as "correct" one way or the other: this is
+        # exactly the live-server data point the task description asks to
+        # capture so it can be confirmed later without writing new code.
+        assert completed["status"] == "erledigt"
+        assert completed["wiederholung"] == "FREQ=DAILY"
+
+        open_tasks = live_service.list_tasks(test_list_name, only_open=True)
+        # No second/"next" occurrence is created as a separate open task by
+        # this server - completing a recurring task ends it as far as this
+        # server is concerned (see docs/tools.md).
+        assert not any(t["uid"] != uid and t["titel"] == created["titel"] for t in open_tasks)
+    finally:
+        live_service.delete_task(test_list_name, uid)
+
+
 # ---------------------------------------------------------------------------
 # Calendar / event integration tests (VEVENT)
 # ---------------------------------------------------------------------------
