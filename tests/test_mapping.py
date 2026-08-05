@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from icalendar import Todo
@@ -52,6 +52,7 @@ def test_apply_and_parse_round_trip():
     assert parsed["url"] == "https://example.com/steuer"
     assert set(parsed["tags"]) == {"Finanzen", "Wichtig"}
     assert parsed["notizen"] == "Belege sammeln"
+    assert parsed["erinnerungen"] == []
     assert parsed["uebergeordnete_uid"] is None
 
 
@@ -177,6 +178,168 @@ def test_updating_reminders_replaces_old_alarms():
     _apply(todo, erinnerungen=["-P2D"])
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
+
+
+def test_extract_alarms_round_trip_relative_with_due():
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_extract_alarms_round_trip_relative_with_start_only():
+    todo = _new_todo()
+    _apply(todo, titel="Task", start_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_extract_alarms_round_trip_absolute():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Task",
+        faellig_datum="2026-07-20",
+        erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
+    )
+    parsed = mapping.parse_vtodo(todo)
+    # Note: "...Z" input reads back as "+00:00"
+    assert parsed["erinnerungen"] == [
+        "2026-08-07T09:00:00+00:00",
+        "2026-08-07T09:00:00+00:00",
+    ]
+
+
+def test_extract_alarms_preserves_order():
+    todo = _new_todo()
+    reminders = ["-P1D", "-PT30M", "2026-08-07T09:00:00+00:00"]
+    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=reminders)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == reminders
+
+
+def test_extract_alarms_no_valarm_returns_empty():
+    todo = _new_todo()
+    _apply(todo, titel="Task")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == []
+
+
+def test_extract_alarms_skips_valarm_without_trigger_or_invalid_trigger():
+    from icalendar import Alarm
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
+
+    alarm_without_trigger = Alarm()
+    alarm_without_trigger.add("action", "DISPLAY")
+    todo.add_component(alarm_without_trigger)
+
+    alarm_with_invalid_trigger = Alarm()
+    alarm_with_invalid_trigger.add("action", "DISPLAY")
+    alarm_with_invalid_trigger["trigger"] = "unsupported-trigger"
+    todo.add_component(alarm_with_invalid_trigger)
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Task",
+        faellig_datum="2026-07-20",
+        erinnerungen=["2026-07-19T11:00:00+02:00"],
+    )
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
+
+
+def test_extract_alarms_resolves_foreign_tzid_trigger():
+    """A TRIGGER;TZID=... written by another client is not UTC.
+
+    `icalendar` leaves such a value naive and keeps the zone in the property's
+    parameters, so reading it as UTC would shift the reminder by the zone's
+    offset (two hours for Berlin in July).
+    """
+    from icalendar import Alarm
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+
+    alarm = Alarm()
+    alarm.add("action", "DISPLAY")
+    alarm.add("description", "Reminder")
+    alarm.add("trigger", datetime(2026, 7, 19, 11, 0, 0), parameters={"TZID": "Europe/Berlin"})
+    todo.add_component(alarm)
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
+
+
+def test_extract_alarms_unknown_tzid_falls_back_to_utc():
+    from icalendar import Alarm
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+
+    alarm = Alarm()
+    alarm.add("action", "DISPLAY")
+    alarm.add("description", "Reminder")
+    alarm.add("trigger", datetime(2026, 7, 19, 11, 0, 0), parameters={"TZID": "Mars/Olympus"})
+    todo.add_component(alarm)
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+00:00"]
+
+
+def test_extract_alarms_skips_date_valued_and_repeated_triggers():
+    """Neither wire form is one this server writes, but foreign clients do."""
+    from icalendar import Alarm
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
+
+    date_trigger = Alarm()
+    date_trigger.add("action", "DISPLAY")
+    date_trigger.add("trigger", date(2026, 7, 19))
+    todo.add_component(date_trigger)
+
+    repeated_trigger = Alarm()
+    repeated_trigger.add("action", "DISPLAY")
+    repeated_trigger.add("trigger", timedelta(minutes=-30))
+    repeated_trigger.add("trigger", timedelta(minutes=-60))
+    todo.add_component(repeated_trigger)
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_extract_alarms_does_not_preserve_related_anchor():
+    """Documented, deliberate fidelity loss: `erinnerungen` has no RELATED slot.
+
+    A foreign alarm anchored to DTSTART on a task that also has a DUE reads
+    back as a bare duration, and writing it back re-anchors it to DUE (see
+    `build_alarm`). Pinned here so the limitation can't drift unnoticed.
+    """
+    todo = _new_todo()
+    _apply(
+        todo, titel="Task", start_datum="2026-07-15T09:00:00", faellig_datum="2026-07-20T10:00:00"
+    )
+    todo.add_component(mapping.build_alarm("-PT30M", "Task", has_due=False, has_start=True))
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+
+    rewritten = _new_todo()
+    _apply(
+        rewritten,
+        titel="Task",
+        start_datum="2026-07-15T09:00:00",
+        faellig_datum="2026-07-20T10:00:00",
+        erinnerungen=["-PT30M"],
+    )
+    alarm = next(c for c in rewritten.subcomponents if c.name == "VALARM")
+    assert alarm.get("trigger").params["RELATED"] == "END"
 
 
 def test_parent_uid_set_and_extracted():

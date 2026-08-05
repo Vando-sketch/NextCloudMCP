@@ -56,6 +56,7 @@ def test_apply_and_parse_round_trip():
     assert parsed["ort"] == "Konferenzraum"
     assert parsed["beschreibung"] == "Sprint-Planung"
     assert set(parsed["tags"]) == {"Arbeit", "Wichtig"}
+    assert parsed["erinnerungen"] == []
     assert parsed["status"] == "bestätigt"
     assert parsed["sichtbarkeit"] == "privat"
     assert parsed["url"] == "https://example.com/meeting"
@@ -260,6 +261,62 @@ def test_invalid_reminder_raises_event_error():
     event = _new_event()
     with pytest.raises(InvalidEventDataError):
         _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["quatsch"])
+
+
+def test_parse_vevent_erinnerungen_relative_round_trip():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["-PT30M"])
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_parse_vevent_erinnerungen_absolute_round_trip():
+    event = _new_event()
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
+    )
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == [
+        "2026-08-07T09:00:00+00:00",
+        "2026-08-07T09:00:00+00:00",
+    ]
+
+
+def test_parse_vevent_erinnerungen_preserves_order():
+    event = _new_event()
+    reminders = ["-P1D", "-PT30M", "2026-08-07T09:00:00+00:00"]
+    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=reminders)
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == reminders
+
+
+def test_parse_vevent_erinnerungen_no_valarm_returns_empty():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == []
+
+
+def test_parse_vevent_erinnerungen_skips_valarm_without_trigger_or_invalid_trigger():
+    from icalendar import Alarm
+
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["-PT30M"])
+
+    alarm_without_trigger = Alarm()
+    alarm_without_trigger.add("action", "DISPLAY")
+    event.add_component(alarm_without_trigger)
+
+    alarm_with_invalid_trigger = Alarm()
+    alarm_with_invalid_trigger.add("action", "DISPLAY")
+    alarm_with_invalid_trigger["trigger"] = "unsupported-trigger"
+    event.add_component(alarm_with_invalid_trigger)
+
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == ["-PT30M"]
 
 
 # --- status / visibility labels ---

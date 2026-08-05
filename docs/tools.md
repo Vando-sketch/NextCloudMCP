@@ -84,6 +84,7 @@ Result — one dict per task:
     "ort": "Zuhause",
     "url": "https://example.com/steuer",
     "tags": ["Finanzen", "Wichtig"],
+    "erinnerungen": ["-P1D"],
     "notizen": "Belege sammeln",
     "uebergeordnete_uid": null,
     "wiederholung": null
@@ -91,6 +92,17 @@ Result — one dict per task:
 ]
 ```
 
+`erinnerungen` lists all alarms set on the task as relative duration strings (e.g. `"-P1D"`,
+`"-PT30M"`) or absolute ISO 8601 datetimes with offset (e.g. `"2026-08-07T09:00:00+00:00"`),
+matching the format `create_task`/`update_task` accepts. Absolute values always read back in
+UTC, so `"...Z"` and `"...+02:00"` input come back as `"+00:00"` — semantically identical,
+not byte-identical.
+
+Two details of an alarm have no slot in this format and are therefore lost when a read-back
+value is written again: whether a relative reminder was anchored to the due date or the start
+date (writing it back re-derives that from the task's own dates — `faellig_datum` wins), and a
+non-display alarm action (`EMAIL`/`AUDIO`) written by another client, which becomes a display
+reminder. For reminders this server created itself, the round trip is exact.
 `uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
@@ -156,7 +168,7 @@ Each entry is either:
   (`TRIGGER;RELATED=END`) when the task has one, otherwise to `start_datum`
   (`RELATED=START`). A relative reminder on a task with neither date is an error.
 - an **absolute** ISO 8601 datetime, e.g. `"2026-07-19T09:00:00+02:00"`. Stored as a UTC
-  `TRIGGER;VALUE=DATE-TIME` (values without an offset are assumed to already be UTC).
+  `TRIGGER;VALUE=DATE-TIME` (values without an offset are assumed to already be UTC; input ending in `"...Z"` reads back as `"+00:00"` - semantically identical, not byte-identical).
 
 Example call:
 
@@ -330,6 +342,7 @@ event started long before. Results are sorted by `start`. One event dict:
   "ort": "Konferenzraum",
   "beschreibung": "Sprint-Planung",
   "tags": ["Arbeit"],
+  "erinnerungen": ["-PT30M"],
   "status": "bestätigt",
   "sichtbarkeit": null,
   "wiederholung": "FREQ=WEEKLY;BYDAY=MO",

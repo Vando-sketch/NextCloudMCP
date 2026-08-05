@@ -14,6 +14,7 @@ from .mapping import (
     _extract_categories,
     _set,
     build_alarm,
+    extract_alarms,
     parse_datetime_input,
     visibility_label_to_ical,
 )
@@ -657,6 +658,7 @@ def parse_vevent(component) -> dict[str, Any]:
         "ort": _text(component, "location"),
         "beschreibung": _text(component, "description"),
         "tags": _extract_categories(component),
+        "erinnerungen": extract_alarms(component),
         "status": ical_status_to_label(str(status) if status is not None else None),
         "sichtbarkeit": (
             _ICAL_CLASS_TO_LABEL.get(str(class_value).upper()) if class_value is not None else None

@@ -415,6 +415,72 @@ def _extract_rrule(component) -> str | None:
     return rrule.to_ical().decode()
 
 
+def extract_alarms(component) -> list[str]:
+    """Extract VALARM subcomponents from an iCalendar component as reminder strings.
+
+    Returns each alarm's TRIGGER in the string format accepted by create_task /
+    create_event:
+    - Relative trigger (timedelta): RFC 5545 duration string, e.g. "-PT30M", "-P1D",
+      serialized via `vDuration`.
+    - Absolute trigger (datetime): ISO 8601 string with offset, e.g.
+      "2026-08-07T09:00:00+00:00". RFC 5545 requires absolute triggers to be
+      UTC, and this server only ever writes them that way - but other clients
+      do emit `TRIGGER;VALUE=DATE-TIME;TZID=Europe/Berlin:...`, which
+      `icalendar` hands back as a *naive* datetime with the zone left in the
+      property's parameters. Reading that as UTC would silently shift the
+      reminder by the zone's offset, so the TZID parameter is resolved via
+      `zoneinfo` when present; a naive value without any TZID is assumed to be
+      UTC (B2), and an unknown TZID name falls back to UTC rather than
+      dropping the alarm.
+
+    Alarms appear in the returned list in the order they are defined in the
+    component. A VALARM without a TRIGGER, or with a TRIGGER value that is neither
+    a timedelta nor a datetime (e.g. malformed or unsupported trigger types),
+    is skipped silently (a foreign client's odd alarm must never break a listing).
+
+    Two properties of an alarm deliberately do NOT survive this string form,
+    because `erinnerungen` has no slot for them: the TRIGGER's RELATED
+    parameter (START vs END) and a foreign ACTION (EMAIL/AUDIO). Writing an
+    extracted reminder back re-derives RELATED from the component's own
+    DUE/DTSTART (see `build_alarm`) and always writes ACTION=DISPLAY - which
+    reproduces this server's own alarms exactly, but can re-anchor an alarm a
+    different client wrote. VALARM DURATION/REPEAT (alarm self-repetition) is
+    not modelled either.
+    """
+    alarms: list[str] = []
+    for sub in getattr(component, "subcomponents", []):
+        if getattr(sub, "name", None) != "VALARM":
+            continue
+        prop = sub.get("trigger")
+        if prop is None:
+            continue
+        dt_val = getattr(prop, "dt", prop)
+        if isinstance(dt_val, timedelta):
+            alarms.append(vDuration(dt_val).to_ical().decode())
+        elif isinstance(dt_val, datetime):
+            if dt_val.tzinfo is None:
+                dt_val = dt_val.replace(tzinfo=_trigger_zone(prop))
+            alarms.append(dt_val.astimezone(timezone.utc).isoformat())
+    return alarms
+
+
+def _trigger_zone(prop: Any) -> timezone | ZoneInfo:
+    """The zone a naive absolute TRIGGER value is expressed in.
+
+    Only ever the TZID parameter another client attached to the property, or
+    UTC when there is none (or the name isn't one `zoneinfo` knows - a
+    reminder at the wrong-but-plausible hour beats dropping it silently).
+    """
+    params = getattr(prop, "params", {}) or {}
+    tzid = params.get("TZID")
+    if not tzid:
+        return timezone.utc
+    try:
+        return ZoneInfo(str(tzid))
+    except (ZoneInfoNotFoundError, ValueError):
+        return timezone.utc
+
+
 def parse_vtodo(component) -> dict[str, Any]:
     """Parse an icalendar VTODO component into the server's German task dict."""
     priority = component.get("priority")
@@ -431,6 +497,7 @@ def parse_vtodo(component) -> dict[str, Any]:
         "ort": _get_text(component, "location"),
         "url": _get_text(component, "url"),
         "tags": _extract_categories(component),
+        "erinnerungen": extract_alarms(component),
         "notizen": _get_text(component, "description"),
         "uebergeordnete_uid": _extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
