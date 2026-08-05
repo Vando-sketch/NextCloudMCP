@@ -172,21 +172,15 @@ Returns all available Nextcloud task lists (calendars supporting VTODO) as
 Event-only calendars (e.g. Nextcloud's default "Personal" calendar) are
 excluded — `list_calendars` is their counterpart.
 
-### `list_tasks(list_name, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None)`
+### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
 
-Returns tasks in a list. `nur_offene=True` (default) excludes completed tasks. Each task
+Returns tasks across one, several, or all task lists (`listen_namen=None` queries all lists; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed tasks. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only).
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), and `liste` (the task list's display name).
 
-A date-only `start_datum`/`faellig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
-anything else is a datetime.
-
-`faellig_vor`/`faellig_nach` optionally filter to tasks due before/after a given ISO 8601
-date or datetime (a date-only bound covers the whole day); either one excludes tasks with
-no due date at all. `limit` (must be `> 0`) caps the number of results, applied after any
-due-date filtering. See [`docs/tools.md`](docs/tools.md) for the exact boundary semantics.
+Results are sorted by `faellig_datum` ascending (tasks without a due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact, case-insensitive), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds). `limit` (must be `> 0`) caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
 ### `get_task(list_name, task_uid)`
 

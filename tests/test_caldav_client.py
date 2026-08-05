@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -471,6 +471,7 @@ def test_list_tasks_parses_todos(service, principal):
             "notizen": None,
             "uebergeordnete_uid": None,
             "wiederholung": None,
+            "liste": "Personal",
         }
     ]
 
@@ -480,6 +481,119 @@ def test_list_tasks_list_not_found_raises(service, principal):
 
     with pytest.raises(TaskListNotFoundError):
         service.list_tasks("Nonexistent")
+
+
+def test_list_tasks_no_arguments_queries_all_lists_and_sets_liste(service, principal):
+    cal1 = _make_calendar("List1")
+    cal2 = _make_calendar("List2")
+    principal.calendars.return_value = [cal1, cal2]
+
+    todo1 = Todo()
+    todo1.add("uid", "t1")
+    todo1.add("summary", "Task 1")
+    todo1.add("due", date(2026, 8, 1))
+
+    todo2 = Todo()
+    todo2.add("uid", "t2")
+    todo2.add("summary", "Task 2")
+    todo2.add("due", date(2026, 8, 2))
+
+    t1_obj = MagicMock()
+    t1_obj.icalendar_component = todo1
+    t2_obj = MagicMock()
+    t2_obj.icalendar_component = todo2
+
+    cal1.todos.return_value = [t1_obj]
+    cal2.todos.return_value = [t2_obj]
+
+    result = service.list_tasks(list_names=None)
+    assert len(result) == 2
+    assert result[0]["uid"] == "t1"
+    assert result[0]["liste"] == "List1"
+    assert result[1]["uid"] == "t2"
+    assert result[1]["liste"] == "List2"
+
+
+def test_list_tasks_empty_list_names_returns_empty_without_request(service, principal):
+    result = service.list_tasks(list_names=[])
+    assert result == []
+    principal.calendars.assert_not_called()
+
+
+def test_list_tasks_limit_cuts_after_merge_across_lists(service, principal):
+    cal1 = _make_calendar("List1")
+    cal2 = _make_calendar("List2")
+    principal.calendars.return_value = [cal1, cal2]
+
+    todo1 = Todo()
+    todo1.add("uid", "t1-later")
+    todo1.add("summary", "Task 1")
+    todo1.add("due", date(2026, 8, 10))
+
+    todo2 = Todo()
+    todo2.add("uid", "t2-earlier")
+    todo2.add("summary", "Task 2")
+    todo2.add("due", date(2026, 8, 1))
+
+    t1_obj = MagicMock()
+    t1_obj.icalendar_component = todo1
+    t2_obj = MagicMock()
+    t2_obj.icalendar_component = todo2
+
+    cal1.todos.return_value = [t1_obj]
+    cal2.todos.return_value = [t2_obj]
+
+    result = service.list_tasks(list_names=None, limit=1)
+    assert len(result) == 1
+    assert result[0]["uid"] == "t2-earlier"
+    assert result[0]["liste"] == "List2"
+
+
+def test_list_tasks_all_lists_reaches_both_lists_sharing_a_display_name(service, principal):
+    """Two lists may legitimately carry the same display name.
+
+    The all-lists branch queries the resolved collection objects directly
+    instead of resolving by name, which is the only reason both stay
+    reachable - resolving "Dup" by name is ambiguous on purpose. Pinned here
+    because "simplifying" that branch back to the name-based path would
+    silently turn a full listing into an error.
+    """
+    dup_a = _make_calendar("Dup", "https://cloud.example.com/dav/dup-a/")
+    dup_b = _make_calendar("Dup", "https://cloud.example.com/dav/dup-b/")
+    dup_a.todos.return_value = [_todo_obj("in-a", titel="A", faellig_datum="2026-08-01")]
+    dup_b.todos.return_value = [_todo_obj("in-b", titel="B", faellig_datum="2026-08-02")]
+    principal.calendars.return_value = [dup_a, dup_b]
+
+    result = service.list_tasks(list_names=None)
+
+    assert [t["uid"] for t in result] == ["in-a", "in-b"]
+    assert [t["liste"] for t in result] == ["Dup", "Dup"]
+
+
+def test_list_tasks_named_duplicate_list_is_still_ambiguous(service, principal):
+    dup_a = _make_calendar("Dup", "https://cloud.example.com/dav/dup-a/")
+    dup_b = _make_calendar("Dup", "https://cloud.example.com/dav/dup-b/")
+    principal.calendars.return_value = [dup_a, dup_b]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.list_tasks(list_names=["Dup"])
+
+
+def test_get_agenda_sorts_tasks_by_due_time(service, principal):
+    """Agenda tasks inherit list_tasks' sort - they are no longer in server order."""
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = [
+        _todo_obj("abend", titel="Abends", faellig_datum="2026-07-20T18:00:00"),
+        _todo_obj("frueh", titel="Früh", faellig_datum="2026-07-20T06:00:00"),
+    ]
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [t["uid"] for t in result["aufgaben"]] == ["frueh", "abend"]
+    assert {t["liste"] for t in result["aufgaben"]} == {"Privat"}
 
 
 def test_create_task_saves_ical_and_returns_uid(service, principal):

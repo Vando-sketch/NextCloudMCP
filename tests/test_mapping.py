@@ -865,3 +865,90 @@ def test_filter_tasks_non_positive_limit_raises(limit):
 def test_filter_tasks_invalid_due_bound_raises():
     with pytest.raises(InvalidTaskDataError):
         mapping.filter_tasks([], due_before="not-a-date")
+
+
+def test_filter_tasks_prioritaet():
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch"),
+        dict(_task("2", "2026-07-01"), prioritaet="mittel"),
+        dict(_task("3", "2026-07-01"), prioritaet="niedrig"),
+    ]
+    res = mapping.filter_tasks(tasks, prioritaet="hoch")
+    assert [t["uid"] for t in res] == ["1"]
+
+
+def test_filter_tasks_unknown_prioritaet_raises():
+    with pytest.raises(InvalidTaskDataError, match="Unknown prioritaet 'dringend'"):
+        mapping.filter_tasks([], prioritaet="dringend")
+
+
+def test_filter_tasks_tag():
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Finanzen", "Wichtig"]),
+        dict(_task("2", "2026-07-01"), tags=["Arbeit"]),
+    ]
+    res = mapping.filter_tasks(tasks, tag="finanzen")
+    assert [t["uid"] for t in res] == ["1"]
+
+
+def test_filter_tasks_suchtext():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Milch kaufen", notizen=None),
+        dict(_task("2", "2026-07-01"), titel="Einkauf", notizen="Vollmilch besorgen"),
+        dict(_task("3", "2026-07-01"), titel="Post", notizen="Brief senden"),
+    ]
+    res = mapping.filter_tasks(tasks, suchtext="milch")
+    assert [t["uid"] for t in res] == ["2", "1"]
+
+
+def test_filter_tasks_sorting_due_date_and_no_due_date_and_titel():
+    tasks = [
+        dict(_task("z-due-later", "2026-08-10"), titel="Z Task"),
+        dict(_task("a-due-earlier", "2026-08-01"), titel="A Task"),
+        dict(_task("b-no-due", None), titel="B Task"),
+        dict(_task("a-no-due", None), titel="A Task"),
+    ]
+    res = mapping.filter_tasks(tasks)
+    assert [t["uid"] for t in res] == ["a-due-earlier", "z-due-later", "a-no-due", "b-no-due"]
+
+
+def test_filter_tasks_combination():
+    tasks = [
+        dict(
+            _task("1", "2026-07-10"),
+            prioritaet="hoch",
+            tags=["work"],
+            titel="Bericht schreiben",
+            notizen="Wichtig",
+        ),
+        dict(
+            _task("2", "2026-07-05"),
+            prioritaet="hoch",
+            tags=["work"],
+            titel="Bericht abgeben",
+            notizen="Dringend",
+        ),
+        dict(
+            _task("3", "2026-07-01"),
+            prioritaet="niedrig",
+            tags=["work"],
+            titel="Bericht lesen",
+            notizen="Fine",
+        ),
+        dict(
+            _task("4", "2026-07-02"),
+            prioritaet="hoch",
+            tags=["home"],
+            titel="Bericht zuhause",
+            notizen=None,
+        ),
+    ]
+    res = mapping.filter_tasks(
+        tasks,
+        prioritaet="hoch",
+        tag="WORK",
+        suchtext="bericht",
+        due_before="2026-07-15",
+        limit=1,
+    )
+    assert [t["uid"] for t in res] == ["2"]
