@@ -193,10 +193,14 @@ def build_server(
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
-            prioritaet, fortschritt_prozent, status, ort, url, tags, notizen,
-            uebergeordnete_uid (None unless the task is a subtask), wiederholung
-            (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO", or None if the task
-            doesn't recur; read-only - this server can't create/edit recurrence).
+            prioritaet, fortschritt_prozent, status, ort, url, tags, erinnerungen
+            (list of reminder strings, each either a relative RFC 5545 duration
+            like "-PT30M" or an absolute ISO 8601 datetime like
+            "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
+            accepts), notizen, uebergeordnete_uid (None unless the task is a
+            subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
+            or None if the task doesn't recur; read-only - this server can't
+            create/edit recurrence).
         """
         return await _call(
             caldav_service.list_tasks,
@@ -218,7 +222,8 @@ def build_server(
         Returns:
             A task dict with the same shape as one entry from list_tasks: uid,
             titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
-            status, ort, url, tags, notizen, uebergeordnete_uid, wiederholung.
+            status, ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
+            wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 
@@ -473,7 +478,10 @@ def build_server(
         Returns:
             Event dicts sorted by start, each with keys: uid, titel, start,
             ende (all-day: inclusive last day), ganztaegig, ort, beschreibung,
-            tags, status ("bestätigt"/"vorläufig"/"abgesagt" or None),
+            tags, erinnerungen (list of reminder strings, each either a relative
+            RFC 5545 duration like "-PT30M" or an absolute ISO 8601 datetime
+            like "2026-08-07T09:00:00+00:00", exactly what create_event/update_event
+            accepts), status ("bestätigt"/"vorläufig"/"abgesagt" or None),
             sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
             url, verknuepfte_aufgaben (RELATED-TO links; each entry's
             "beziehung" uses the same values as link_task_to_event's

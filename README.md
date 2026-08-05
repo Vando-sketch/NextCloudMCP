@@ -177,7 +177,7 @@ excluded — `list_calendars` is their counterpart.
 Returns tasks in a list. `nur_offene=True` (default) excludes completed tasks. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
-`notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
+`erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
 `wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only).
 
 A date-only `start_datum`/`faellig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
@@ -215,7 +215,10 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
 `faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
 date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
-RFC 5545, VALARM triggers must be in UTC).
+RFC 5545, VALARM triggers must be in UTC). Reading reminders back always yields UTC, so
+`"...Z"` and offset-bearing input come back as `"+00:00"` — semantically identical, not
+byte-identical. See `docs/tools.md` for the two alarm details that don't survive a
+read-back-and-write-again cycle.
 
 **Date/time semantics** (applies to `start_datum`, `faellig_datum`, and absolute
 `erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
