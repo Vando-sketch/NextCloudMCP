@@ -485,6 +485,24 @@ def test_due_filter_bounds_follow_dst_transition():
     assert elapsed == timedelta(hours=22, minutes=59, seconds=59)
 
 
+def test_local_times_inside_a_dst_gap_or_overlap_resolve_by_fold():
+    """Wall-clock times that don't exist, or exist twice, still resolve.
+
+    On 2026-03-29 Europe/Berlin jumps 02:00 -> 03:00, so "02:30" never
+    happens; on 2026-10-25 it falls back 03:00 -> 02:00, so "02:30" happens
+    twice. `zoneinfo` resolves both with the pre-transition offset
+    (`fold=0`) rather than raising - pinned here because "the server refuses
+    a timestamp twice a year" would be a nasty surprise in production.
+    """
+    nonexistent = mapping.parse_datetime_input("2026-03-29T02:30:00")
+    assert isinstance(nonexistent, datetime)
+    assert nonexistent == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+
+    ambiguous = mapping.parse_datetime_input("2026-10-25T02:30:00")
+    assert isinstance(ambiguous, datetime)
+    assert ambiguous == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+
 def test_absolute_reminder_is_written_to_the_wire_in_utc():
     """RFC 5545 demands a UTC absolute TRIGGER - only the *display* is local."""
     todo = _new_todo()
@@ -789,8 +807,9 @@ def test_filter_tasks_due_before_and_after_combined_is_a_range():
 
 def test_filter_tasks_date_only_due_before_bound_includes_all_day_task_on_boundary():
     # An all-day task due exactly on the faellig_vor date must still be
-    # included: the bound expands to the end of that day (23:59:59 UTC), and
-    # the task's own all-day due date compares as its start-of-day instant.
+    # included: the bound expands to the end of that day (23:59:59 in the
+    # server's default timezone), and the task's own all-day due date
+    # compares as its start-of-day instant.
     tasks = [_task("boundary", "2026-07-20")]
     result = mapping.filter_tasks(tasks, due_before="2026-07-20")
     assert [t["uid"] for t in result] == ["boundary"]

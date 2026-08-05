@@ -119,9 +119,11 @@ Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is 
   "after" anything.
 - Both accept the same ISO 8601 date/datetime formats as `create_task`'s `faellig_datum`. A
   date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `faellig_vor` expands
-  to the end of that day (`23:59:59` UTC), `faellig_nach` to the start of it (`00:00:00`
-  UTC) — so an all-day task due exactly on the boundary date is included by either bound.
-  A datetime bound (with a specific time) is used exactly as given.
+  to the end of that day (`23:59:59`), `faellig_nach` to the start of it (`00:00:00`) — both
+  in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), so an all-day task due exactly
+  on the boundary date is included by either bound. On a day with a daylight-saving change
+  that window is 23 or 25 hours long, as it should be. A datetime bound (with a specific
+  time) is used exactly as given.
 - `faellig_vor` and `faellig_nach` can be combined to select a range.
 - `limit` caps the number of results, applied *after* any due-date filtering. `limit <= 0`
   is an error (`InvalidTaskDataError`).
