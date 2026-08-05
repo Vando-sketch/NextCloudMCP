@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -1197,6 +1197,28 @@ def test_create_event_with_explicit_offset_has_no_vtimezone(service, principal):
     assert "VTIMEZONE" not in kwargs["ical"]
 
 
+def test_create_event_with_naive_start_adds_default_zone_vtimezone(service, principal):
+    """A naive start now means "local time", not UTC - so it needs a VTIMEZONE too.
+
+    Without this the naive path would be uncovered: the explicit-offset test
+    above deliberately asserts the *absence* of a VTIMEZONE, which a
+    regression in `keep_zone` handling would satisfy just as happily.
+    """
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00"),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "BEGIN:VTIMEZONE" in ical_text
+    assert "TZID:Europe/Berlin" in ical_text
+    assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
+
+
 def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal):
     """Regression test: a named-zone DTSTART needs its own VTIMEZONE on the
     wire (RFC 5545 3.6.5), or the TZID it references is dangling."""
@@ -1616,6 +1638,30 @@ def test_get_agenda_day_window_local_timezone_bounds(service, principal):
 
     result = service.get_agenda("2026-07-20")
     assert [t["uid"] for t in result["aufgaben"]] == ["task-early-local"]
+
+
+def test_get_agenda_day_window_spans_dst_transition(service, principal):
+    """The event query window is a real local day, 25 hours long on 2026-10-25.
+
+    Building it by adding a fixed 24 hours would cut the last local hour off
+    the fall-back day - the class of off-by-an-hour bug this whole change is
+    about.
+    """
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    service.get_agenda("2026-10-25")
+
+    _, kwargs = event_cal.search.call_args
+    start, end = kwargs["start"], kwargs["end"]
+    assert start.isoformat() == "2026-10-25T00:00:00+02:00"
+    assert end.isoformat() == "2026-10-26T00:00:00+01:00"
+    # Subtracting two datetimes that share a tzinfo gives the *wall-clock*
+    # difference (24h here), so the real length has to be measured in UTC.
+    assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(hours=25)
 
 
 # ======================================================================

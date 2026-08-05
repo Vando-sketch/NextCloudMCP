@@ -198,6 +198,11 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       evaluated in local time, the way RFC 5545 intends. Explicit numeric offsets
       are unaffected by this flag - they carry no IANA zone to preserve, so they still
       normalize to UTC as before.
+    - A local wall-clock time that a DST change makes nonexistent (the spring
+      gap) or ambiguous (the autumn overlap) is resolved by `zoneinfo`'s
+      default `fold=0`, i.e. with the pre-transition offset, rather than
+      rejected: refusing a timestamp for one hour twice a year would be a
+      worse failure mode than picking the earlier of two plausible instants.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):

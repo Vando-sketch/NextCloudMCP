@@ -763,8 +763,13 @@ def filter_events(
 
 
 def event_busy_interval(component) -> tuple[datetime, datetime] | None:
-    """Return the (start, end) UTC interval a VEVENT occupies, or None if it
-    doesn't count as busy time.
+    """Return the (start, end) instant interval a VEVENT occupies, or None if
+    it doesn't count as busy time.
+
+    Both ends are timezone-aware: a value written without a zone by another
+    client is read in the server's default timezone (`_as_utc`), and an
+    all-day date is expanded from local midnight (`_local_midnight`), so the
+    interval lines up with the day windows the rest of the server builds.
 
     A cancelled event (STATUS=CANCELLED) or a transparent one
     (TRANSP=TRANSPARENT, e.g. Nextcloud's "does not block time" option) is
@@ -819,8 +824,8 @@ def merge_busy_intervals(
     (one ends exactly when the next starts, as with back-to-back meetings)
     are merged into one, the same as overlapping ones - a caller asking "is
     this person busy" gets one contiguous block rather than an artificial
-    seam. Input order doesn't matter; naive datetimes are treated as UTC,
-    same rule as everywhere else in this module.
+    seam. Input order doesn't matter; naive datetimes are read in the
+    server's default timezone, same rule as everywhere else in this module.
     """
     normalized = sorted((_as_utc(start), _as_utc(end)) for start, end in intervals if end > start)
     merged: list[list[datetime]] = []
