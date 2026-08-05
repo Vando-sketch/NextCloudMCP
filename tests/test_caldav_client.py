@@ -3051,3 +3051,244 @@ def test_collection_list_refetched_after_rename(service, principal):
     service.list_task_lists()
 
     assert principal.calendars.call_count == 3
+
+
+# ======================================================================
+# Collection cache TTL - bounded staleness for out-of-band changes
+#
+# `_collections`/`_collection_meta` are invalidated immediately when *this*
+# process creates/renames/deletes a collection (covered above), but a
+# rename/delete made through the Nextcloud web UI (or any other client) is
+# invisible to that invalidation. `_COLLECTION_CACHE_TTL_SECONDS` bounds how
+# long such a change can go unnoticed. The clock is driven via monkeypatch
+# (never time.sleep) by replacing the `monotonic` name `caldav_client`
+# imported into its own module namespace.
+# ======================================================================
+
+
+def test_collection_list_reused_within_ttl_even_as_clock_advances(service, principal, monkeypatch):
+    principal.calendars.return_value = [_make_calendar("Personal")]
+    fake_now = 1_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+
+    service.list_task_lists()
+    fake_now += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS - 1
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_task_lists()
+
+    # Still within the TTL - no second principal.calendars() PROPFIND.
+    assert principal.calendars.call_count == 1
+
+
+def test_collection_renamed_server_side_stops_being_served_under_old_name_after_ttl(
+    service, principal, monkeypatch
+):
+    """A collection renamed outside this process (e.g. in the Nextcloud web UI)
+    is still served under its old name while the cache is fresh, but the next
+    access past the TTL re-fetches and sees the rename - this is what stops a
+    vanished/renamed project from being served forever (the reported bug's
+    root cause)."""
+    old = _make_calendar("CSGO", "https://cloud.example.com/dav/csgo/")
+    fake_now = 10_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    principal.calendars.return_value = [old]
+
+    assert service.list_task_lists() == [
+        {"name": "CSGO", "url": "https://cloud.example.com/dav/csgo/"}
+    ]
+    assert principal.calendars.call_count == 1
+
+    # Renamed server-side (outside this process) - same URL, new name.
+    renamed = _make_calendar("Esports-Archiv", "https://cloud.example.com/dav/csgo/")
+    principal.calendars.return_value = [renamed]
+
+    # Still inside the TTL window: the stale listing is reused.
+    fake_now += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS - 1
+    assert service.list_task_lists() == [
+        {"name": "CSGO", "url": "https://cloud.example.com/dav/csgo/"}
+    ]
+    assert principal.calendars.call_count == 1
+
+    # Past the TTL: the next access re-fetches and the rename is visible.
+    fake_now += 2
+    assert service.list_task_lists() == [
+        {"name": "Esports-Archiv", "url": "https://cloud.example.com/dav/csgo/"}
+    ]
+    assert principal.calendars.call_count == 2
+
+
+def test_reused_display_name_stops_hitting_the_old_collection_after_ttl(
+    service, principal, monkeypatch
+):
+    """The nastiest staleness: a freed-up name handed to a different collection.
+
+    A cache hit on `_calendar_cache` short-circuits resolution entirely, so
+    the collection-list TTL never gets a say. And because the old collection
+    still exists (it was renamed, not deleted), nothing 404s and the
+    stale-cache retry in `_with_collection` never fires either - so before
+    this entry had a TTL of its own, every lookup of the reused name kept
+    answering from the wrong collection for the life of the process.
+    """
+    old = _make_calendar("CSGO", "https://cloud.example.com/dav/csgo-old/")
+    old.todos.return_value = [_todo_obj("from-old", titel="Alt")]
+    fake_now = 20_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    principal.calendars.return_value = [old]
+
+    assert [t["uid"] for t in service.list_tasks(list_names=["CSGO"])] == ["from-old"]
+
+    # Web UI: the old list is renamed away, and a brand-new list takes the
+    # name it just vacated.
+    old.get_display_name.return_value = "CSGO-Archiv"
+    new = _make_calendar("CSGO", "https://cloud.example.com/dav/csgo-new/")
+    new.todos.return_value = [_todo_obj("from-new", titel="Neu")]
+    principal.calendars.return_value = [old, new]
+
+    # Inside the TTL the old entry is still served - bounded staleness.
+    fake_now += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS - 1
+    assert [t["uid"] for t in service.list_tasks(list_names=["CSGO"])] == ["from-old"]
+
+    # Past it, the name resolves to the collection that actually bears it now.
+    fake_now += 2
+    assert [t["uid"] for t in service.list_tasks(list_names=["CSGO"])] == ["from-new"]
+
+
+def test_collection_metadata_reused_within_ttl_then_refetched_after(
+    service, principal, dav_client, monkeypatch
+):
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+    fake_now = 5_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+
+    service.list_task_lists()
+    assert dav_client.request.call_count == 1
+
+    fake_now += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS - 1
+    service.list_task_lists()
+    assert dav_client.request.call_count == 1
+
+    fake_now += 2
+    service.list_task_lists()
+    assert dav_client.request.call_count == 2
+
+
+# ======================================================================
+# get_agenda / list_events / list_tasks / export_calendar cross-check
+#
+# Regression guard for the reported bug: `get_agenda` returned entries for a
+# project ("CSGO") that no other tool (`list_tasks`, `get_task`,
+# `export_calendar`) could find, and on the same day silently dropped a real
+# task due exactly then. Builds an account where a task list and an
+# (unrelated) event calendar share the display name "CSGO" - Nextcloud does
+# not enforce cross-collection name uniqueness, and this is the exact shape
+# of the original incident - then checks `get_agenda` never disagrees with
+# `list_events`/`list_tasks` called directly for the same day, and that every
+# entry is traceable to a real, currently-existing collection.
+# ======================================================================
+
+
+def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_collections(
+    service, principal
+):
+    day = "2026-07-20"
+
+    csgo_tasks = _make_calendar(
+        "CSGO", "https://cloud.example.com/dav/csgo-tasks/", components=["VTODO"]
+    )
+    csgo_events = _make_calendar(
+        "CSGO", "https://cloud.example.com/dav/csgo-events/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [csgo_tasks, csgo_events]
+
+    # A task due at the very start of the local day - the class of task the
+    # reported bug silently dropped from the agenda.
+    early_task = _todo_obj("task-early", titel="Frueh faellig", faellig_datum="2026-07-20T00:30:00")
+    csgo_tasks.todos.return_value = [early_task]
+    csgo_tasks.get_todo_by_uid.return_value = early_task
+
+    all_day = Event()
+    all_day.add("uid", "event-all-day")
+    event_mapping.apply_event_fields(
+        all_day, event_mapping.EventFields(titel="Feiertag", start="2026-07-20", ende="2026-07-20")
+    )
+
+    recurring = Event()
+    recurring.add("uid", "event-recurring")
+    event_mapping.apply_event_fields(
+        recurring,
+        event_mapping.EventFields(
+            titel="Weekly Sync",
+            start="2026-07-20T09:00:00",
+            ende="2026-07-20T10:00:00",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-27T09:00:00"],
+        ),
+    )
+    csgo_events.search.return_value = [_make_event_obj(all_day), _make_event_obj(recurring)]
+    # export_calendar fetches unfiltered via .events() (not the time-range
+    # .search() above), reading each object's full `icalendar_instance` (not
+    # just `icalendar_component`, see `_make_calendar_obj`) - both must
+    # reflect the same two events for the traceability check below.
+    csgo_events.events.return_value = [
+        _make_calendar_obj(_wrap_in_vcalendar(all_day)),
+        _make_calendar_obj(_wrap_in_vcalendar(recurring)),
+    ]
+
+    agenda = service.get_agenda(day)
+    direct_events = service.list_events(von=day, bis=day, expand=True)
+    direct_tasks = service.list_tasks(due_before=day, due_after=day, only_open=True)
+
+    # Same UIDs, whichever way they're queried.
+    assert (
+        {e["uid"] for e in agenda["termine"]}
+        == {e["uid"] for e in direct_events}
+        == {
+            "event-all-day",
+            "event-recurring",
+        }
+    )
+    assert (
+        {t["uid"] for t in agenda["aufgaben"]} == {t["uid"] for t in direct_tasks} == {"task-early"}
+    )
+
+    # Both queries used the exact same day window - not just coincidentally
+    # matching return values.
+    calls = csgo_events.search.call_args_list
+    assert len(calls) == 2
+    assert calls[0].kwargs["start"] == calls[1].kwargs["start"]
+    assert calls[0].kwargs["end"] == calls[1].kwargs["end"]
+    assert calls[0].kwargs["expand"] is True and calls[1].kwargs["expand"] is True
+
+    # get_agenda (unlike list_events/list_tasks) adds quelle_url, naming the
+    # exact collection each entry came from - what makes a duplicate-named
+    # collection's entries traceable instead of a guess.
+    for event in agenda["termine"]:
+        assert event["kalender"] == "CSGO"
+        assert event["quelle_url"] == "https://cloud.example.com/dav/csgo-events/"
+    for task in agenda["aufgaben"]:
+        assert task["liste"] == "CSGO"
+        assert task["quelle_url"] == "https://cloud.example.com/dav/csgo-tasks/"
+
+    # quelle_url is agenda-only - list_events/list_tasks keep their existing
+    # return shape.
+    assert all("quelle_url" not in e for e in direct_events)
+    assert all("quelle_url" not in t for t in direct_tasks)
+
+    # Every event UID get_agenda returned really exists in the named
+    # calendar's own export - not a phantom. (export_calendar resolves a
+    # shared display name to its VEVENT collection first, see
+    # `_resolve_collection_any`, so this reaches "CSGO"'s event calendar
+    # specifically, not the task list of the same name.)
+    exported_events = service.export_calendar("CSGO")["ics"]
+    for event in agenda["termine"]:
+        assert event["uid"] in exported_events
+
+    # The task side is independently confirmed the same way `get_task` would
+    # be used to chase down a suspicious agenda entry: resolving "CSGO" as a
+    # task list (component-specific, so the same-named event calendar next to
+    # it is never in play) and finding the exact task get_agenda reported.
+    for task in agenda["aufgaben"]:
+        found = service.get_task("CSGO", task["uid"])
+        assert found["uid"] == task["uid"]
