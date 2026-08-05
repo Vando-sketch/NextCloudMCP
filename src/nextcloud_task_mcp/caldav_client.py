@@ -1123,35 +1123,57 @@ class CalDavService:
 
     def list_tasks(
         self,
-        list_name: str,
+        list_names: list[str] | str | None = None,
         only_open: bool = True,
         due_before: str | None = None,
         due_after: str | None = None,
+        prioritaet: str | None = None,
+        tag: str | None = None,
+        suchtext: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return tasks in the given list, parsed into German task dicts.
+        """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
 
-        `due_before`/`due_after`/`limit` filter the already-parsed results via
-        `mapping.filter_tasks` (C4) - see its docstring for the exact
-        semantics (date-vs-datetime bound normalization, no-due-date
-        exclusion, and `limit` validation).
+        `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
+        parsed results via `mapping.filter_tasks`. Each task dict gains a "liste"
+        key set to its task list display name.
         """
+        if list_names is not None and not list_names:
+            return []
+
         with self._lock:
 
             def op(calendar: DAVCalendar):
                 return calendar.todos(include_completed=not only_open)
 
-            try:
-                todos = self._with_calendar(list_name, op)
-            except TaskMcpError:
-                raise
-            except caldav_error.NotFoundError as exc:
-                raise TaskListNotFoundError(f"Task list '{list_name}' was not found.") from exc
-            except Exception as exc:
-                raise _translate(exc) from exc
-            tasks = [mapping.parse_vtodo(todo.icalendar_component) for todo in todos]
+            targets = self._task_lists(list_names)
+            tasks: list[dict[str, Any]] = []
+            for name, target_calendar in targets:
+                try:
+                    if list_names is not None:
+                        todos = self._with_collection(name, "VTODO", op)
+                    else:
+                        todos = op(target_calendar)
+                except TaskMcpError:
+                    raise
+                except caldav_error.NotFoundError as exc:
+                    raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
+                except Exception as exc:
+                    raise _translate(exc) from exc
+
+                for todo in todos:
+                    parsed = mapping.parse_vtodo(todo.icalendar_component)
+                    parsed["liste"] = name
+                    tasks.append(parsed)
+
             return mapping.filter_tasks(
-                tasks, due_before=due_before, due_after=due_after, limit=limit
+                tasks,
+                due_before=due_before,
+                due_after=due_after,
+                prioritaet=prioritaet,
+                tag=tag,
+                suchtext=suchtext,
+                limit=limit,
             )
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
@@ -1276,6 +1298,29 @@ class CalDavService:
             return parsed
         day_start = datetime.combine(parsed, time.min, tzinfo=mapping.get_default_timezone())
         return day_start + timedelta(days=1) if exclusive_end else day_start
+
+    def _task_lists(self, list_names: list[str] | str | None) -> list[tuple[str, DAVCalendar]]:
+        """Return (display name, calendar) pairs for the VTODO task lists to query.
+
+        With explicit `list_names`, each is resolved individually (going
+        through the cache); unknown names raise `TaskListNotFoundError`
+        instead of being skipped, so a typo can't silently produce an empty
+        result. With `None`, every VTODO-supporting calendar on the account
+        is returned, freshly listed.
+        """
+        if isinstance(list_names, str):
+            list_names = [list_names]
+        if list_names is not None:
+            return [(name, self._get_collection(name, "VTODO")) for name in list_names]
+
+        calendars = self._list_collections()
+        result: list[tuple[str, DAVCalendar]] = []
+        for calendar in calendars:
+            if not self._supports_component(calendar, "VTODO"):
+                continue
+            name = calendar.get_display_name() or str(calendar.url)
+            result.append((name, calendar))
+        return result
 
     def _event_calendars(self, calendar_names: list[str] | None) -> list[tuple[str, DAVCalendar]]:
         """Return (display name, calendar) pairs for the VEVENT calendars to query.
@@ -1897,14 +1942,12 @@ class CalDavService:
                 calendar_names=calendar_names, von=datum, bis=datum, expand=True
             )
 
-            if list_names is None:
-                list_names = [entry["name"] for entry in self.list_task_lists()]
-            aufgaben: list[dict[str, Any]] = []
-            for name in list_names:
-                tasks = self.list_tasks(name, only_open=True, due_before=datum, due_after=datum)
-                for task in tasks:
-                    task["liste"] = name
-                    aufgaben.append(task)
+            aufgaben = self.list_tasks(
+                list_names=list_names,
+                only_open=True,
+                due_before=datum,
+                due_after=datum,
+            )
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
 

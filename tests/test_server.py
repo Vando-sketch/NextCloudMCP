@@ -300,7 +300,14 @@ def test_list_tasks_passes_nur_offene_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(tools["list_tasks"].fn("Personal", nur_offene=False))
     fake_service.list_tasks.assert_called_once_with(
-        "Personal", only_open=False, due_before=None, due_after=None, limit=None
+        list_names=["Personal"],
+        only_open=False,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        limit=None,
     )
 
 
@@ -308,16 +315,45 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(
         tools["list_tasks"].fn(
-            "Personal", faellig_vor="2026-08-01", faellig_nach="2026-07-01", limit=5
+            listen_namen=["Personal"],
+            faellig_vor="2026-08-01",
+            faellig_nach="2026-07-01",
+            prioritaet="hoch",
+            tag="arbeit",
+            suchtext="test",
+            limit=5,
         )
     )
     fake_service.list_tasks.assert_called_once_with(
-        "Personal",
+        list_names=["Personal"],
         only_open=True,
         due_before="2026-08-01",
         due_after="2026-07-01",
+        prioritaet="hoch",
+        tag="arbeit",
+        suchtext="test",
         limit=5,
     )
+
+
+def test_list_tasks_deprecated_list_name_alias_works(tools, fake_service):
+    fake_service.list_tasks.return_value = []
+    _run(tools["list_tasks"].fn(list_name="Personal"))
+    fake_service.list_tasks.assert_called_once_with(
+        list_names=["Personal"],
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        limit=None,
+    )
+
+
+def test_list_tasks_both_list_name_and_listen_namen_raises_error(tools, fake_service):
+    with pytest.raises(ToolError, match="list_name is the deprecated alias of listen_namen"):
+        _run(tools["list_tasks"].fn(list_name="Personal", listen_namen=["Arbeit"]))
 
 
 def test_create_task_maps_german_params_to_service_call(tools, fake_service):
@@ -799,7 +835,7 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
     started = threading.Event()
     release = threading.Event()
 
-    def blocking_list_tasks(list_name, only_open=True, due_before=None, due_after=None, limit=None):
+    def blocking_list_tasks(*args, **kwargs):
         started.set()
         release.wait(timeout=5)
         return []

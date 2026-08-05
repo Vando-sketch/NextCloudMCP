@@ -61,15 +61,22 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(list_name, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `list_name` | string | yes | Display name of the task list |
+| `listen_namen` | list of strings | no | Task list display names to query; `null` = all task lists |
 | `nur_offene` | boolean | no (default `true`) | Exclude completed tasks |
 | `faellig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
 | `faellig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
+| `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
+| `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
+| `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
 | `limit` | integer | no | Max number of results; must be `> 0` |
+| `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
+
+> **BREAKING CHANGE**: Results are now sorted by `faellig_datum` ascending (tasks without a due date last, then by `titel`), rather than returned in server order.
+> **BREAKING CHANGE**: Every task dict now includes a `"liste"` key containing the task list's display name.
 
 Result — one dict per task:
 
@@ -89,7 +96,8 @@ Result — one dict per task:
     "erinnerungen": ["-P1D"],
     "notizen": "Belege sammeln",
     "uebergeordnete_uid": null,
-    "wiederholung": null
+    "wiederholung": null,
+    "liste": "Privat"
   }
 ]
 ```
@@ -110,10 +118,15 @@ reminder. For reminders this server created itself, the round trip is exact.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
 only surfaces whether/how an existing task recurs.
+`liste` is the display name of the task list containing the task.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
 
-### Filtering (`faellig_vor` / `faellig_nach` / `limit`)
+### Filtering and Sorting
 
+- `listen_namen`: pass a list of list names to query specific task lists, or `null` to query all task lists on the account. `list_name` is a deprecated alias that takes a single list name.
+- `prioritaet`: filters by task priority (`"hoch"`, `"mittel"`, `"niedrig"`). An unknown priority raises an error (`InvalidTaskDataError`).
+- `tag`: exact, case-insensitive match against any entry in `tags`.
+- `suchtext`: case-insensitive substring match over `titel` and `notizen` (skipping `null` values).
 - If either `faellig_vor` or `faellig_nach` is given, tasks with **no** `faellig_datum` at all
   are excluded from the result — a task without a due date can't be judged "before" or
   "after" anything.
@@ -121,11 +134,10 @@ Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is 
   date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `faellig_vor` expands
   to the end of that day (`23:59:59`), `faellig_nach` to the start of it (`00:00:00`) — both
   in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), so an all-day task due exactly
-  on the boundary date is included by either bound. On a day with a daylight-saving change
-  that window is 23 or 25 hours long, as it should be. A datetime bound (with a specific
-  time) is used exactly as given.
+  on the boundary date is included by either bound. A datetime bound (with a specific time) is used exactly as given.
 - `faellig_vor` and `faellig_nach` can be combined to select a range.
-- `limit` caps the number of results, applied *after* any due-date filtering. `limit <= 0`
+- Tasks are sorted by `faellig_datum` ascending (tasks without a due date sort last), then by `titel`.
+- `limit` caps the number of results, applied *last* after merging and sorting across lists. `limit <= 0`
   is an error (`InvalidTaskDataError`).
 
 ---
@@ -608,6 +620,12 @@ date-only `"YYYY-MM-DD"` string; day boundaries are in the server's default time
 `termine` are event dicts (recurring events expanded to that day's
 occurrences, sorted by start); `aufgaben` are open tasks due that day, each
 with an added `"liste"` key naming its task list.
+
+**Breaking change:** `aufgaben` now comes back sorted by `faellig_datum` (then
+by `titel`), not in the order the server happened to return each list — the
+tasks are fetched through `list_tasks`, so they inherit its sort. With
+`listen_namen=None` the tasks of *all* lists are interleaved chronologically
+instead of arriving grouped per list.
 
 ---
 

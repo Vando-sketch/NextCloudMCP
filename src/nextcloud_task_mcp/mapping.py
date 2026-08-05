@@ -571,26 +571,48 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     return datetime.combine(parsed, time_of_day, tzinfo=get_default_timezone())
 
 
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, str]:
+    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
+    due_text = task.get("faellig_datum")
+    titel = str(task.get("titel") or "")
+    if due_text is None:
+        return (1, datetime.max.replace(tzinfo=timezone.utc), titel)
+    return (0, _to_comparable_datetime(due_text, end_of_day=False), titel)
+
+
 def filter_tasks(
     tasks: list[dict[str, Any]],
     *,
     due_before: str | None = None,
     due_after: str | None = None,
+    prioritaet: str | None = None,
+    tag: str | None = None,
+    suchtext: str | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter already-`parse_vtodo`-parsed task dicts by due-date range and/or cap the count (C4).
+    """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
-    `due_before`/`due_after` are ISO 8601 date/datetime strings (same format
-    `parse_datetime_input` accepts elsewhere). When either is given, tasks with
-    no `faellig_datum` (due date) are excluded - a task can't be "due before X"
-    or "due after X" if it has no due date at all. See `_to_comparable_datetime`
-    for how date-vs-datetime bounds/values are normalized for comparison.
+    `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is given,
+    tasks with no `faellig_datum` (due date) are excluded.
+    `prioritaet`: "hoch"/"mittel"/"niedrig", validated against `PRIORITY_LABELS`
+    (unknown value raises `InvalidTaskDataError`).
+    `tag`: exact, case-insensitive match against one `tags` entry.
+    `suchtext`: case-insensitive substring match over `titel` and `notizen`
+    (skipping None values).
 
-    `limit`, if given, must be a positive integer; it caps the number of
-    results returned (applied last, after any due-date filtering).
+    Results are sorted by `faellig_datum` ascending (tasks without a due date last),
+    then by `titel`. `limit`, if given, must be a positive integer and caps the number
+    of results returned, applied last.
     """
     if limit is not None and limit <= 0:
         raise InvalidTaskDataError(f"limit must be greater than 0, got {limit}.")
+
+    if prioritaet is not None:
+        if prioritaet not in PRIORITY_LABELS:
+            raise InvalidTaskDataError(
+                f"Unknown prioritaet '{prioritaet}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
+            )
+        tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
 
     if due_before is not None or due_after is not None:
         before_bound = (
@@ -611,6 +633,24 @@ def filter_tasks(
                 continue
             filtered.append(task)
         tasks = filtered
+
+    if tag is not None:
+        wanted = tag.lower()
+        tasks = [task for task in tasks if any(t.lower() == wanted for t in task.get("tags") or [])]
+
+    if suchtext is not None:
+        needle = suchtext.lower()
+        tasks = [
+            task
+            for task in tasks
+            if any(
+                needle in value.lower()
+                for value in (task.get("titel"), task.get("notizen"))
+                if value is not None
+            )
+        ]
+
+    tasks = sorted(tasks, key=_task_sort_key)
 
     if limit is not None:
         tasks = tasks[:limit]

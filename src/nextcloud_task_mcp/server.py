@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 from . import event_mapping, mapping, notes_mapping
 from .caldav_client import CalDavService
 from .config import Settings, is_local_hostname
-from .errors import TaskMcpError
+from .errors import InvalidTaskDataError, TaskMcpError
 from .notes_client import NotesService
 from .personal_auth import PersonalAuthProvider
 
@@ -169,16 +169,21 @@ def build_server(
 
     @mcp.tool
     async def list_tasks(
-        list_name: str,
+        listen_namen: list[str] | None = None,
         nur_offene: bool = True,
         faellig_vor: str | None = None,
         faellig_nach: str | None = None,
+        prioritaet: str | None = None,
+        tag: str | None = None,
+        suchtext: str | None = None,
         limit: int | None = None,
+        list_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List tasks in a Nextcloud task list.
+        """List tasks across one, several, or all Nextcloud task lists.
 
         Args:
-            list_name: Display name of the task list.
+            listen_namen: Optional list of task list display names to query;
+                None queries every task list on the account.
             nur_offene: If True (default), only return tasks that are not completed.
             faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
@@ -186,11 +191,19 @@ def build_server(
             faellig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
+            prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
+            tag: Optional category/tag filter (exact, case-insensitive match).
+            suchtext: Optional case-insensitive substring filter over title (titel)
+                and notes (notizen).
             limit: Optional maximum number of results to return (must be > 0).
+            list_name: Deprecated alias for `listen_namen` (takes a single list display name).
+                Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
+                is an error.
 
         If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
         (due date) at all are excluded - they can't be judged "before"/"after"
-        anything. `limit` is applied after any due-date filtering.
+        anything. Results are sorted by faellig_datum ascending (tasks without a due date last),
+        then by titel. `limit` is applied last, after merging across lists.
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
@@ -201,14 +214,35 @@ def build_server(
             accepts), notizen, uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
             or None if the task doesn't recur; read-only - this server can't
-            create/edit recurrence).
+            create/edit recurrence), and liste (the display name of the task list
+            containing the task).
         """
+        if list_name is not None and listen_namen is not None:
+
+            def _fail_alias():
+                raise InvalidTaskDataError(
+                    "list_name is the deprecated alias of listen_namen; pass only one"
+                )
+
+            await _call(_fail_alias)
+
+        target_list_names: list[str] | None
+        if list_name is not None:
+            target_list_names = [list_name]
+        elif isinstance(listen_namen, str):
+            target_list_names = [listen_namen]
+        else:
+            target_list_names = listen_namen
+
         return await _call(
             caldav_service.list_tasks,
-            list_name,
+            list_names=target_list_names,
             only_open=nur_offene,
             due_before=faellig_vor,
             due_after=faellig_nach,
+            prioritaet=prioritaet,
+            tag=tag,
+            suchtext=suchtext,
             limit=limit,
         )
 
