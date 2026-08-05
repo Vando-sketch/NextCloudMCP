@@ -8,6 +8,7 @@ import threading
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import datetime, time, timedelta, timezone
+from time import monotonic
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -67,6 +68,19 @@ _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
 # a range that comfortably covers any real-world calendar instead.
 _RANGE_MIN = datetime(1901, 1, 1, tzinfo=timezone.utc)
 _RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+# How long the process-wide collection caches (`_collections`,
+# `_collection_meta`) are served before the next access re-fetches them from
+# Nextcloud, even without any self-made change to invalidate them. Both are
+# otherwise cached for the life of the `CalDavService` (see their docstrings)
+# and invalidated immediately when *this* process creates/renames/deletes a
+# collection - but a rename or delete made through the Nextcloud web UI (or
+# any other client) is invisible to that invalidation, so without a ceiling
+# this process would keep resolving names against a collection list that no
+# longer matches the server, indefinitely. One minute bounds how long such an
+# out-of-band change can go unnoticed while still keeping the common case
+# (several tool calls in one burst) cheap.
+_COLLECTION_CACHE_TTL_SECONDS = 60.0
 
 # The two supported task<->event link semantics, mapped to the RELATED-TO
 # RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
@@ -547,7 +561,23 @@ class CalDavService:
         # calendars (VEVENT) in the same DAV namespace, and the same display
         # name may legitimately exist once per kind. Guarded by `_lock`, like
         # everything else that touches CalDAV state.
-        self._calendar_cache: dict[tuple[str, str], DAVCalendar] = {}
+        #
+        # Entries carry the `monotonic()` reading they were cached at and
+        # expire after `_COLLECTION_CACHE_TTL_SECONDS`, exactly like
+        # `_collections`/`_collection_meta` below - and for a sharper reason
+        # than those two. A cache *hit* here short-circuits resolution
+        # entirely, so their TTL never gets consulted on this path; without
+        # one of its own, a name whose collection changed identity
+        # server-side would be answered from this dict forever. That is not
+        # hypothetical: rename "CSGO" to something else in the Nextcloud web
+        # UI and give a *different*, new collection that freed-up name, and
+        # every explicit lookup of "CSGO" would keep hitting the old
+        # collection - which still exists, so nothing 404s and the
+        # `_with_collection` retry below never fires - serving its contents
+        # under a name that now belongs to someone else. A plain deletion
+        # does self-correct through that retry, but only because the request
+        # fails; name reuse fails silently, which is the worse half.
+        self._calendar_cache: dict[tuple[str, str], tuple[DAVCalendar, float]] = {}
         # Lazily discovered and cached like the calendar cache above (A3's
         # reasoning applies equally here): the caller's own address(es) don't
         # change during the lifetime of one CalDavService, so there is no
@@ -557,22 +587,38 @@ class CalDavService:
         self._own_calendar_user_addresses: list[str] | None = None
         # Per-collection metadata (supported component set + color) keyed by
         # normalized collection href, fetched in ONE Depth-1 PROPFIND over the
-        # calendar-home-set (`_fetch_collection_meta`) and cached for the
-        # process lifetime. This replaces caldav's per-calendar
+        # calendar-home-set (`_fetch_collection_meta`) and cached for up to
+        # `_COLLECTION_CACHE_TTL_SECONDS`. This replaces caldav's per-calendar
         # `get_supported_components()` / calendar-color `get_properties()`
         # calls, which each cost a full PROPFIND - an O(N) round-trip cascade
         # on every listing and every cold name resolution, which was the
-        # dominant source of per-tool-call latency. Invalidated whenever the
-        # set of collections (or a color) changes below. Guarded by `_lock`.
+        # dominant source of per-tool-call latency. Invalidated immediately
+        # whenever the set of collections (or a color) changes below, and
+        # re-fetched unconditionally once the TTL elapses even without such a
+        # change (see `_COLLECTION_CACHE_TTL_SECONDS`). Guarded by `_lock`.
         self._collection_meta: dict[str, dict[str, Any]] | None = None
-        # The resolved `principal.calendars()` list, cached per process. caldav
-        # re-runs home-set discovery *and* the calendar-list PROPFIND (2
-        # round-trips) on every `.calendars()` call and never reuses them, so
-        # every listing/resolution paid them afresh; `get_agenda` alone does it
-        # several times. Cached here and invalidated together with the metadata
-        # above whenever a collection is created/deleted/renamed (or a cached
-        # collection turns out stale mid-request). Guarded by `_lock`.
+        # `monotonic()` timestamp of the last `_collection_meta` fetch, or
+        # None if never fetched. A monotonic clock, not wall-clock time, so a
+        # system clock adjustment (NTP step, DST, manual change) can't make
+        # this cache appear younger or older than it really is.
+        self._collection_meta_fetched_at: float | None = None
+        # The resolved `principal.calendars()` list, cached for up to
+        # `_COLLECTION_CACHE_TTL_SECONDS`. caldav re-runs home-set discovery
+        # *and* the calendar-list PROPFIND (2 round-trips) on every
+        # `.calendars()` call and never reuses them, so every listing/
+        # resolution paid them afresh; `get_agenda` alone does it several
+        # times. Invalidated together with the metadata above whenever a
+        # collection is created/deleted/renamed by this process (or a cached
+        # collection turns out stale mid-request), and re-fetched
+        # unconditionally once the TTL elapses even without such a change -
+        # this is what stops a collection renamed/deleted through the
+        # Nextcloud web UI (invisible to this process's own invalidation)
+        # from being served under a stale name/identity forever. Guarded by
+        # `_lock`.
         self._collections: list[DAVCalendar] | None = None
+        # `monotonic()` timestamp of the last `_collections` fetch, or None if
+        # never fetched (or invalidated). See `_collection_meta_fetched_at`.
+        self._collections_fetched_at: float | None = None
 
     def _get_principal(self) -> DAVPrincipal:
         with self._lock:
@@ -652,11 +698,22 @@ class CalDavService:
         """
         return self._client.url.join(f"calendars/{self._username}/")
 
+    @staticmethod
+    def _cache_expired(fetched_at: float | None) -> bool:
+        """True if a `_collections`/`_collection_meta` cache last (re)fetched at
+        `fetched_at` (a `monotonic()` reading) is past
+        `_COLLECTION_CACHE_TTL_SECONDS`, or was never fetched at all."""
+        return fetched_at is None or monotonic() - fetched_at >= _COLLECTION_CACHE_TTL_SECONDS
+
     def _get_collection_meta(self) -> dict[str, dict[str, Any]]:
-        """The cached per-collection metadata map, fetching it on first use."""
+        """The cached per-collection metadata map, fetching it on first use
+        and re-fetching once it's past `_COLLECTION_CACHE_TTL_SECONDS` old."""
         with self._lock:
-            if self._collection_meta is None:
+            if self._collection_meta is None or self._cache_expired(
+                self._collection_meta_fetched_at
+            ):
                 self._collection_meta = self._fetch_collection_meta()
+                self._collection_meta_fetched_at = monotonic()
             return self._collection_meta
 
     def _fetch_collection_meta(self) -> dict[str, dict[str, Any]]:
@@ -692,24 +749,33 @@ class CalDavService:
         return meta
 
     def _list_collections(self, *, fresh: bool = False) -> list[DAVCalendar]:
-        """The account's collections (`principal.calendars()`), cached per process.
+        """The account's collections (`principal.calendars()`), cached for up
+        to `_COLLECTION_CACHE_TTL_SECONDS`.
 
         Every caller used to invoke `principal.calendars()` directly, which
         caldav answers with two PROPFINDs (calendar-home-set discovery + the
         Depth-1 listing) that it never caches - so every listing and every
-        cold name resolution repaid them. The resolved list is stable for the
-        life of a `CalDavService` except when a collection is created/deleted/
-        renamed here (all of which invalidate the cache) or a cached
-        collection turns out stale mid-request (`_with_collection` invalidates,
-        so the retry's resolution re-fetches), so it is safe to reuse.
-        `fresh=True` forces a re-fetch for the create/rename/update conflict
-        checks, which must not decide "available" from a stale list. Guarded by
-        `_lock`.
+        cold name resolution repaid them. The resolved list is reused across
+        calls except when a collection is created/deleted/renamed here (all
+        of which invalidate the cache), a cached collection turns out stale
+        mid-request (`_with_collection` invalidates, so the retry's
+        resolution re-fetches), or the cache has simply gone past its TTL -
+        the last case is what catches a collection renamed/deleted through
+        the Nextcloud web UI (or any other client), which none of this
+        process's own invalidation hooks can see. `fresh=True` forces a
+        re-fetch regardless of the TTL, for the create/rename/update conflict
+        checks, which must not decide "available" from a stale list. Guarded
+        by `_lock`.
         """
         with self._lock:
-            if fresh or self._collections is None:
+            if (
+                fresh
+                or self._collections is None
+                or self._cache_expired(self._collections_fetched_at)
+            ):
                 try:
                     self._collections = list(self._get_principal().calendars())
+                    self._collections_fetched_at = monotonic()
                 except TaskMcpError:
                     raise
                 except Exception as exc:
@@ -721,7 +787,9 @@ class CalDavService:
         set (or a color) changes, so the next lookup re-fetches. Call under
         `_lock`."""
         self._collections = None
+        self._collections_fetched_at = None
         self._collection_meta = None
+        self._collection_meta_fetched_at = None
 
     def _collection_meta_for(self, calendar: DAVCalendar) -> dict[str, Any] | None:
         return self._get_collection_meta().get(_normalize_collection_href(str(calendar.url)))
@@ -798,15 +866,25 @@ class CalDavService:
             )
         return matches[0]
 
+    def _cache_collection(self, component: str, name: str, calendar: DAVCalendar) -> None:
+        """Remember `name`'s resolved collection, stamped for TTL expiry."""
+        self._calendar_cache[(component, name)] = (calendar, monotonic())
+
     def _resolve_and_cache(self, name: str, component: str) -> DAVCalendar:
         calendar = self._resolve_collection(name, component)
-        self._calendar_cache[(component, name)] = calendar
+        self._cache_collection(component, name, calendar)
         return calendar
 
     def _get_collection(self, name: str, component: str) -> DAVCalendar:
         cached = self._calendar_cache.get((component, name))
         if cached is not None:
-            return cached
+            calendar, cached_at = cached
+            if not self._cache_expired(cached_at):
+                return calendar
+            # Past the TTL, re-resolve rather than trust the entry: the name
+            # may since have been given to a different collection (see the
+            # cache's declaration).
+            del self._calendar_cache[(component, name)]
         return self._resolve_and_cache(name, component)
 
     def _with_collection(self, name: str, component: str, fn: Callable[[DAVCalendar], _T]) -> _T:
@@ -920,7 +998,7 @@ class CalDavService:
             # ambiguity that `_resolve_collection` is supposed to surface.
             for calendar, name in zip(calendars, names, strict=True):
                 if name_counts[name] == 1:
-                    self._calendar_cache[("VTODO", name)] = calendar
+                    self._cache_collection("VTODO", name, calendar)
 
             return [
                 {"name": name, "url": str(calendar.url)}
@@ -976,7 +1054,7 @@ class CalDavService:
                 kind="task list",
             )
 
-            self._calendar_cache[("VTODO", display_name)] = calendar
+            self._cache_collection("VTODO", display_name, calendar)
             self._invalidate_collection_caches()
             return {"name": display_name, "url": str(calendar.url)}
 
@@ -1114,7 +1192,7 @@ class CalDavService:
                 raise _translate(exc) from exc
 
             self._calendar_cache.pop(("VTODO", list_name), None)
-            self._calendar_cache[("VTODO", new_display_name)] = calendar
+            self._cache_collection("VTODO", new_display_name, calendar)
             # The cached collection list holds this object with its now-stale
             # display name, so drop it (component/color metadata is keyed by
             # href and unaffected, but is cleared together for simplicity).
@@ -1142,39 +1220,73 @@ class CalDavService:
             return []
 
         with self._lock:
+            tasks = self._collect_tasks(list_names, only_open)
 
-            def op(calendar: DAVCalendar):
-                return calendar.todos(include_completed=not only_open)
+        result = mapping.filter_tasks(
+            tasks,
+            due_before=due_before,
+            due_after=due_after,
+            prioritaet=prioritaet,
+            tag=tag,
+            suchtext=suchtext,
+            limit=limit,
+        )
+        # "quelle_url" is collected alongside "liste" for `get_agenda`'s
+        # provenance (see `_collect_tasks`), but isn't part of this method's
+        # documented return shape - only `get_agenda` keeps it.
+        for item in result:
+            item.pop("quelle_url", None)
+        return result
 
-            targets = self._task_lists(list_names)
-            tasks: list[dict[str, Any]] = []
-            for name, target_calendar in targets:
-                try:
-                    if list_names is not None:
-                        todos = self._with_collection(name, "VTODO", op)
-                    else:
-                        todos = op(target_calendar)
-                except TaskMcpError:
-                    raise
-                except caldav_error.NotFoundError as exc:
-                    raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
-                except Exception as exc:
-                    raise _translate(exc) from exc
+    def _collect_tasks(
+        self, list_names: list[str] | str | None, only_open: bool
+    ) -> list[dict[str, Any]]:
+        """Query and parse VTODOs from the target task lists.
 
-                for todo in todos:
-                    parsed = mapping.parse_vtodo(todo.icalendar_component)
-                    parsed["liste"] = name
-                    tasks.append(parsed)
+        Shared by `list_tasks` and `get_agenda` so the two can never disagree
+        about which tasks a given (list_names, only_open) selection matches -
+        `get_agenda` applies the exact same query, then its own due-date
+        filter, rather than re-deriving the logic. Each parsed dict carries
+        "liste" (the task list's display name) and "quelle_url" (the CalDAV
+        URL of the specific list it was actually read from - the *resolved*
+        collection, so it reflects a stale-cache retry if one happened, see
+        `_with_collection`). `list_tasks` strips "quelle_url" before
+        returning; `get_agenda` keeps it, since that's what makes a returned
+        task traceable to one specific list even when two lists share a
+        display name (the failure mode this was added for).
 
-            return mapping.filter_tasks(
-                tasks,
-                due_before=due_before,
-                due_after=due_after,
-                prioritaet=prioritaet,
-                tag=tag,
-                suchtext=suchtext,
-                limit=limit,
-            )
+        Must be called with `self._lock` held, like every other CalDAV op.
+        An explicit empty `list_names` list needs no special-casing here: it
+        already means "these zero lists" to `_task_lists`, so the loop below
+        simply iterates zero targets and returns `[]`.
+        """
+
+        def op(calendar: DAVCalendar) -> tuple[list[Any], str]:
+            todos = calendar.todos(include_completed=not only_open)
+            return list(todos), str(calendar.url)
+
+        targets = self._task_lists(list_names)
+        tasks: list[dict[str, Any]] = []
+        for name, target_calendar in targets:
+            try:
+                if list_names is not None:
+                    todos, source_url = self._with_collection(name, "VTODO", op)
+                else:
+                    todos, source_url = op(target_calendar)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            for todo in todos:
+                parsed = mapping.parse_vtodo(todo.icalendar_component)
+                parsed["liste"] = name
+                parsed["quelle_url"] = source_url
+                tasks.append(parsed)
+
+        return tasks
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
         """Create a new task in the given list and return its UID."""
@@ -1384,7 +1496,7 @@ class CalDavService:
                     }
                 )
                 if sum(1 for entry in result if entry["name"] == name) == 1:
-                    self._calendar_cache[("VEVENT", name)] = calendar
+                    self._cache_collection("VEVENT", name, calendar)
             # Drop cache entries that turned out to be ambiguous after all.
             counts: dict[str, int] = {}
             for entry in result:
@@ -1439,7 +1551,7 @@ class CalDavService:
                 except Exception as exc:
                     raise _translate(exc) from exc
 
-            self._calendar_cache[("VEVENT", display_name)] = calendar
+            self._cache_collection("VEVENT", display_name, calendar)
             self._invalidate_collection_caches()
             return {"name": display_name, "url": str(calendar.url), "farbe": farbe}
 
@@ -1531,7 +1643,7 @@ class CalDavService:
 
             final_name = new_display_name if new_display_name is not None else calendar_name
             self._calendar_cache.pop(("VEVENT", calendar_name), None)
-            self._calendar_cache[("VEVENT", final_name)] = calendar
+            self._cache_collection("VEVENT", final_name, calendar)
             # A color change is reflected in the cached metadata, so drop it.
             self._invalidate_collection_caches()
             return {"name": final_name, "url": str(calendar.url), "farbe": farbe}
@@ -1556,6 +1668,41 @@ class CalDavService:
         `suchtext`/`tag`/`limit` filter the parsed results client-side via
         `event_mapping.filter_events`.
         """
+        with self._lock:
+            events = self._collect_events(calendar_names, von, bis, expand)
+
+        result = event_mapping.filter_events(events, suchtext=suchtext, tag=tag, limit=limit)
+        # "quelle_url" is collected alongside "kalender" for `get_agenda`'s
+        # provenance (see `_collect_events`), but isn't part of this method's
+        # documented return shape - only `get_agenda` keeps it.
+        for item in result:
+            item.pop("quelle_url", None)
+        return result
+
+    def _collect_events(
+        self,
+        calendar_names: list[str] | None,
+        von: str | None,
+        bis: str | None,
+        expand: bool,
+    ) -> list[dict[str, Any]]:
+        """Query and parse VEVENTs from the target calendars.
+
+        Shared by `list_events` and `get_agenda` so the two can never
+        disagree about which events a given (calendar_names, von, bis,
+        expand) selection matches - `get_agenda` applies the exact same
+        query rather than re-deriving the logic. Each parsed dict carries
+        "kalender" (the calendar's display name) and "quelle_url" (the
+        CalDAV URL of the specific calendar it was actually read from - the
+        *resolved* collection, so it reflects a stale-cache retry if one
+        happened, see `_with_collection`). `list_events` strips "quelle_url"
+        before returning; `get_agenda` keeps it, since that's what makes a
+        returned event traceable to one specific calendar even when two
+        calendars share a display name (the failure mode this was added
+        for).
+
+        Must be called with `self._lock` held, like every other CalDAV op.
+        """
         start_bound = self._range_bound(von, exclusive_end=False)
         end_bound = self._range_bound(bis, exclusive_end=True)
         if expand and (start_bound is None or end_bound is None):
@@ -1563,47 +1710,48 @@ class CalDavService:
                 "Expanding recurring events requires both von and bis bounds."
             )
 
-        with self._lock:
-
-            def op(calendar: DAVCalendar):
-                if start_bound is None and end_bound is None:
-                    return calendar.events()
+        def op(calendar: DAVCalendar) -> tuple[list[Any], str]:
+            if start_bound is None and end_bound is None:
+                results = calendar.events()
+            else:
                 # caldav's search/expand path is only well-defined with
                 # both ends present; widen an omitted side instead of
                 # passing None through (see _RANGE_MIN/_RANGE_MAX).
-                return calendar.search(
+                results = calendar.search(
                     start=start_bound or _RANGE_MIN,
                     end=end_bound or _RANGE_MAX,
                     event=True,
                     expand=expand,
                 )
+            return list(results), str(calendar.url)
 
-            targets = self._event_calendars(calendar_names)
-            events: list[dict[str, Any]] = []
-            for name, target_calendar in targets:
-                try:
-                    if calendar_names is not None:
-                        # Named calendars go through the cache-aware path so a
-                        # stale cache entry is re-resolved once (A3).
-                        objs = self._with_collection(name, "VEVENT", op)
-                    else:
-                        # The all-calendars case just listed everything fresh;
-                        # querying the object directly also keeps two
-                        # same-named calendars both reachable here.
-                        objs = op(target_calendar)
-                except TaskMcpError:
-                    raise
-                except caldav_error.NotFoundError as exc:
-                    raise CalendarNotFoundError(f"Calendar '{name}' was not found.") from exc
-                except Exception as exc:
-                    raise _translate(exc) from exc
+        targets = self._event_calendars(calendar_names)
+        events: list[dict[str, Any]] = []
+        for name, target_calendar in targets:
+            try:
+                if calendar_names is not None:
+                    # Named calendars go through the cache-aware path so a
+                    # stale cache entry is re-resolved once (A3).
+                    objs, source_url = self._with_collection(name, "VEVENT", op)
+                else:
+                    # The all-calendars case just listed everything fresh;
+                    # querying the object directly also keeps two
+                    # same-named calendars both reachable here.
+                    objs, source_url = op(target_calendar)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise CalendarNotFoundError(f"Calendar '{name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
 
-                for obj in objs:
-                    parsed = event_mapping.parse_vevent(obj.icalendar_component)
-                    parsed["kalender"] = name
-                    events.append(parsed)
+            for obj in objs:
+                parsed = event_mapping.parse_vevent(obj.icalendar_component)
+                parsed["kalender"] = name
+                parsed["quelle_url"] = source_url
+                events.append(parsed)
 
-            return event_mapping.filter_events(events, suchtext=suchtext, tag=tag, limit=limit)
+        return events
 
     def get_event(self, calendar_name: str, event_uid: str) -> dict[str, Any]:
         """Return a single event, parsed into the server's German event dict."""
@@ -1930,6 +2078,16 @@ class CalDavService:
         string; day boundaries are local days in the server's default timezone
         (`MCP_DEFAULT_TIMEZONE`), consistent with the rule used everywhere else
         in this server, and applied identically to the events and the tasks.
+
+        Unlike `list_events`/`list_tasks`, every returned entry also carries a
+        "quelle_url" key - the CalDAV URL of the exact collection (calendar or
+        task list) it came from, alongside the existing "kalender"/"liste"
+        display name. A display name alone can't tell two same-named
+        collections apart (Nextcloud doesn't enforce uniqueness), so it's not
+        enough to trace a surprising agenda entry back to a real collection;
+        the URL is unambiguous. This is what makes a future "agenda shows
+        something no other tool can find" report traceable to one specific
+        collection instead of a guess.
         """
         parsed = mapping.parse_datetime_input(datum)
         if isinstance(parsed, datetime):
@@ -1938,15 +2096,18 @@ class CalDavService:
             )
 
         with self._lock:
-            termine = self.list_events(
-                calendar_names=calendar_names, von=datum, bis=datum, expand=True
-            )
+            raw_events = self._collect_events(calendar_names, datum, datum, expand=True)
+            termine = event_mapping.filter_events(raw_events, suchtext=None, tag=None, limit=None)
 
-            aufgaben = self.list_tasks(
-                list_names=list_names,
-                only_open=True,
+            raw_tasks = self._collect_tasks(list_names, only_open=True)
+            aufgaben = mapping.filter_tasks(
+                raw_tasks,
                 due_before=datum,
                 due_after=datum,
+                prioritaet=None,
+                tag=None,
+                suchtext=None,
+                limit=None,
             )
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
