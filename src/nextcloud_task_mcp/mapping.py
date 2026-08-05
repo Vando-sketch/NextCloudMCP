@@ -8,7 +8,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from icalendar import Alarm, vDuration
+from icalendar import Alarm, vDuration, vRecur
 
 from .errors import InvalidTaskDataError
 
@@ -44,6 +44,7 @@ _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
     "notizen": ("notizen", "description"),
     "sichtbarkeit": ("sichtbarkeit", "class"),
     "uebergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
+    "wiederholung": ("wiederholung", "rrule"),
 }
 
 
@@ -52,7 +53,7 @@ class TaskFields:
     """The optional task fields shared by create_task/update_task, in one place.
 
     This is the single definition of the (previously hand-copied five times,
-    C3) 13-field task parameter list. The MCP tool functions in `server.py`
+    C3) task parameter list. The MCP tool functions in `server.py`
     keep their own flat, German, umlaut-bearing parameter lists - that's the
     LLM-facing tool contract - and build a `TaskFields` internally; everything
     below that layer (`CalDavService`, `apply_task_fields`) works with this
@@ -77,6 +78,7 @@ class TaskFields:
     notizen: str | None = None
     sichtbarkeit: str | None = None
     uebergeordnete_aufgabe: str | None = None
+    wiederholung: str | None = None
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
@@ -244,6 +246,51 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
 
 
+def parse_rrule_text(text: str) -> vRecur:
+    """Validate and parse raw RFC 5545 RRULE text (e.g. "FREQ=WEEKLY;BYDAY=MO").
+
+    Shared by tasks (VTODO RRULE) and events (`event_mapping._parse_rrule`,
+    a thin wrapper that re-raises as `InvalidEventDataError`) - one parser,
+    one error message, for both. `vRecur.from_ical` silently *skips* parts
+    without '=' instead of raising, so completely unparseable input yields an
+    empty rule - treated as invalid here as well, since an empty RRULE is
+    never what the caller meant.
+    """
+    stripped = text.strip()
+    try:
+        recur = vRecur.from_ical(stripped)
+    except Exception:
+        recur = None
+    if not recur:
+        raise InvalidTaskDataError(
+            f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
+            "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
+        )
+    return recur
+
+
+def _check_rrule_anchor(todo) -> None:
+    """A recurring VTODO needs a DTSTART or DUE to recur from.
+
+    Runs after all clears/sets in `apply_task_fields`, so it validates the
+    component's *final* state - the same rule
+    `event_mapping._check_start_end_consistency` follows for DTSTART/DTEND.
+    That matters for `update_task`: a call that only sets `wiederholung` must
+    be checked against whatever DTSTART/DUE the stored task already has, not
+    just the fields passed in this call, so it isn't rejected merely because
+    the anchor wasn't repeated here - and, symmetrically, an update that both
+    sets `wiederholung` and clears the task's only anchor in the same call
+    must still be rejected.
+    """
+    if "rrule" not in todo:
+        return
+    if "dtstart" not in todo and "due" not in todo:
+        raise InvalidTaskDataError(
+            "wiederholung requires the task to have a start_datum or "
+            "faellig_datum to recur from; neither is set."
+        )
+
+
 def _set(component, name: str, value: Any, parameters: dict[str, str] | None = None) -> None:
     """Set a property to exactly one value, replacing any existing one.
 
@@ -383,6 +430,8 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
             fields.uebergeordnete_aufgabe,
             parameters={"RELTYPE": "PARENT"},
         )
+    if fields.wiederholung is not None:
+        _set(todo, "rrule", parse_rrule_text(fields.wiederholung))
 
     if fields.erinnerungen is not None:
         todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
@@ -393,6 +442,8 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
             todo.add_component(
                 build_alarm(spec, title_for_alarm, has_due=has_due, has_start=has_start)
             )
+
+    _check_rrule_anchor(todo)
 
 
 def mark_completed(todo) -> None:
@@ -446,11 +497,11 @@ def _extract_parent_uid(component) -> str | None:
 def _extract_rrule(component) -> str | None:
     """Return the task's RRULE as raw RFC 5545 text (e.g. "FREQ=WEEKLY;BYDAY=MO"), or None.
 
-    Read-only (C5): this server has no way to create/edit recurrence, only
-    surface whether/how a task already recurs. `icalendar` exposes RRULE as a
-    `vRecur` property; `.to_ical()` serializes it back to the same textual form
-    RFC 5545 (and Nextcloud Tasks) uses, rather than exposing icalendar's
-    internal dict representation.
+    `icalendar` exposes RRULE as a `vRecur` property; `.to_ical()` serializes
+    it back to the same textual form RFC 5545 (and Nextcloud Tasks) uses,
+    rather than exposing icalendar's internal dict representation. This is
+    the read side of `wiederholung` - see `parse_rrule_text`/`TaskFields.wiederholung`
+    for the write side (`create_task`/`update_task`).
     """
     rrule = component.get("rrule")
     if rrule is None:

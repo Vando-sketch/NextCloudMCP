@@ -178,7 +178,8 @@ Returns tasks across one, several, or all task lists (`listen_namen=None` querie
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), and `liste` (the task list's display name).
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — settable via
+`create_task`/`update_task`), and `liste` (the task list's display name).
 
 Results are sorted by `faellig_datum` ascending (tasks without a due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact, case-insensitive), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds). `limit` (must be `> 0`) caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
@@ -204,6 +205,7 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | `notizen` | `DESCRIPTION` | |
 | `sichtbarkeit` | `CLASS` | `"öffentlich"`→PUBLIC, `"privat"`→PRIVATE, `"vertraulich"`→CONFIDENTIAL |
 | `uebergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
+| `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO"`; requires the task to have a `start_datum` or `faellig_datum` (existing or set in the same call) to recur from |
 
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
@@ -230,12 +232,20 @@ To remove a property entirely (e.g. delete a due date), list its field name in t
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
 leaves it unchanged. Accepted names: `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
-`uebergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
-cleared in the same call. See [`docs/tools.md`](docs/tools.md) for details and examples.
+`uebergeordnete_aufgabe`, `wiederholung` (`titel` cannot be cleared). A field can't be
+both set and cleared in the same call; `wiederholung`'s anchor requirement is checked
+against the task's final state, so clearing the task's only `start_datum`/`faellig_datum`
+while a recurrence is set or remains is rejected too. See [`docs/tools.md`](docs/tools.md)
+for details and examples.
 
 ### `complete_task(list_name, task_uid)`
 
-Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp.
+Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp. This does
+**not** roll a recurring task's series forward — the task's `wiederholung` (`RRULE`) is
+left untouched, so completing a recurring task ends it as far as this server is
+concerned; advance `faellig_datum` instead to keep a series going. This is this server's
+own verified behaviour (see `docs/tools.md`'s `complete_task` section) — how the
+Nextcloud Tasks app itself displays a completed recurring task is not verified here.
 
 ### `delete_task(list_name, task_uid)`
 

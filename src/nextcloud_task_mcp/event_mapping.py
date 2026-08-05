@@ -18,6 +18,7 @@ from .mapping import (
     format_datetime_output,
     get_default_timezone,
     parse_datetime_input,
+    parse_rrule_text,
     visibility_label_to_ical,
 )
 
@@ -276,23 +277,17 @@ def _local_midnight(value: date) -> datetime:
 
 
 def _parse_rrule(text: str) -> vRecur:
-    """Validate and parse raw RFC 5545 RRULE text (e.g. "FREQ=WEEKLY;BYDAY=MO").
+    """`mapping.parse_rrule_text`, re-raised as the event-side error class.
 
-    `vRecur.from_ical` silently *skips* parts without '=' instead of raising,
-    so completely unparseable input yields an empty rule - treated as invalid
-    here as well, since an empty RRULE is never what the caller meant.
+    The shared parser lives in `mapping.py` (tasks and events use the exact
+    same RFC 5545 RRULE grammar); callers of the event tools should only ever
+    see `InvalidEventDataError`, so the task-side error is translated here
+    with the same message - same pattern as `_parse_datetime` above.
     """
-    stripped = text.strip()
     try:
-        recur = vRecur.from_ical(stripped)
-    except Exception:
-        recur = None
-    if not recur:
-        raise InvalidEventDataError(
-            f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
-            "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
-        )
-    return recur
+        return parse_rrule_text(text)
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
 
 
 def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:

@@ -213,8 +213,8 @@ def build_server(
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
             accepts), notizen, uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            or None if the task doesn't recur; read-only - this server can't
-            create/edit recurrence), and liste (the display name of the task list
+            or None if the task doesn't recur - see create_task/update_task
+            to set it), and liste (the display name of the task list
             containing the task).
         """
         if list_name is not None and listen_namen is not None:
@@ -277,6 +277,7 @@ def build_server(
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
+        wiederholung: str | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -297,6 +298,10 @@ def build_server(
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
+            wiederholung: Optional recurrence rule as raw RFC 5545 RRULE text,
+                e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE. Requires the task to
+                have a start_datum or faellig_datum (in this same call) to
+                recur from - a task with neither is rejected.
 
         Date/time semantics for start_datum and faellig_datum: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
@@ -326,6 +331,7 @@ def build_server(
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+            wiederholung=wiederholung,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -346,6 +352,7 @@ def build_server(
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
+        wiederholung: str | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
@@ -358,14 +365,18 @@ def build_server(
                 semantics also match create_task: a "YYYY-MM-DD" value creates an
                 all-day entry, and naive datetimes are interpreted in the
                 server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin).
+                wiederholung's anchor requirement (start_datum or faellig_datum)
+                is checked against the task's final state, so setting only
+                wiederholung succeeds as long as the task already has a
+                start_datum or faellig_datum from before this call.
             felder_leeren: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
                 Accepted values: "start_datum", "faellig_datum", "prioritaet",
                 "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
-                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe". "titel"
-                cannot be cleared. Naming an unknown field, or naming a field
-                here that is *also* given a new value in the same call, is an
-                error.
+                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe",
+                "wiederholung". "titel" cannot be cleared. Naming an unknown
+                field, or naming a field here that is *also* given a new
+                value in the same call, is an error.
 
         Returns:
             {"uid": task_uid} on success.
@@ -383,6 +394,7 @@ def build_server(
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+            wiederholung=wiederholung,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)
