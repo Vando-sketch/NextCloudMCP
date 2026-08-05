@@ -68,6 +68,7 @@ def build_server(
     `service`/`notes_service` can be injected for testing; default to a real
     CalDavService/NotesService built from `settings`.
     """
+    mapping.set_default_timezone(settings.default_timezone)
     allowed_redirect_domains = settings.oauth_allowed_redirect_domains
     if allowed_redirect_domains is None and not is_local_hostname(
         urlparse(settings.public_base_url).hostname
@@ -267,7 +268,8 @@ def build_server(
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
         (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
         datetime; a *naive* datetime (no UTC offset, e.g.
-        "2026-07-20T14:00:00") is interpreted as UTC. A datetime may instead
+        "2026-07-20T14:00:00") is interpreted in the server's default timezone
+        (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin). A datetime may instead
         be followed by a space and an IANA timezone name, e.g.
         "2026-07-20T14:00:00 Europe/Berlin" - the correct offset (standard or
         daylight time) is then resolved for that specific date, so callers
@@ -320,7 +322,8 @@ def build_server(
             (all other args): Same meaning and mapping as in create_task; a field
                 left as None is left unchanged on the existing task. Date/time
                 semantics also match create_task: a "YYYY-MM-DD" value creates an
-                all-day entry, and naive datetimes are interpreted as UTC.
+                all-day entry, and naive datetimes are interpreted in the
+                server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin).
             felder_leeren: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
                 Accepted values: "start_datum", "faellig_datum", "prioritaet",
@@ -472,8 +475,9 @@ def build_server(
                 their individual occurrences within [von, bis] (both bounds
                 required); each occurrence carries wiederholung_von.
 
-        Naive datetimes (no UTC offset) are interpreted as UTC, like everywhere
-        else in this server.
+        Naive datetimes (no UTC offset) are interpreted in the server's default
+        timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin), like everywhere else
+        in this server.
 
         Returns:
             Event dicts sorted by start, each with keys: uid, titel, start,
@@ -540,7 +544,8 @@ def build_server(
             kalender_name: Display name of the target event calendar.
             titel: Event title (VEVENT SUMMARY).
             start: ISO 8601 start -> DTSTART. Exactly "YYYY-MM-DD" creates an
-                all-day event; naive datetimes are interpreted as UTC. A
+                all-day event; naive datetimes are interpreted in the server's default
+                timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin). A
                 datetime may instead be followed by a space and an IANA
                 timezone name (e.g. "2026-07-20T14:00:00 Europe/Berlin") to
                 have the correct standard/daylight offset resolved for that
@@ -835,7 +840,8 @@ def build_server(
 
         Args:
             datum: The day as a date-only "YYYY-MM-DD" string. Day boundaries
-                are UTC, consistent with the naive-input-is-UTC rule used
+                are constructed in the server's default timezone (`MCP_DEFAULT_TIMEZONE`,
+                default Europe/Berlin), consistent with the naive-input rule used
                 everywhere else in this server.
             kalender_namen: Optional list of event calendars to include;
                 None means all.
@@ -864,7 +870,8 @@ def build_server(
 
         Args:
             von: ISO 8601 start of the range. Naive datetimes are interpreted
-                as UTC; a date-only value means the start of that day.
+                in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin);
+                a date-only value means the start of that day.
             bis: ISO 8601 end of the range. A date-only value includes that
                 entire day.
             benutzer: Optional Nextcloud user id or email of another account

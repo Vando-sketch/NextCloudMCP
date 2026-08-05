@@ -6,10 +6,12 @@ import asyncio
 import threading
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastmcp.exceptions import ToolError
 
+from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import (
@@ -892,6 +894,26 @@ def test_build_server_wires_access_token_expiry_seconds_through(settings, fake_s
     mcp = build_server(public_settings, service=fake_service)
     assert isinstance(mcp.auth, PersonalAuthProvider)
     assert mcp.auth.access_token_expiry_seconds == 5678
+
+
+# --- Default timezone wired through to the mapping layer ---
+#
+# `build_server` is the only place that connects the configured zone to the
+# mapping modules, and every other test runs with the shipped default - so
+# without this test, deleting that one line would leave the suite green while
+# MCP_DEFAULT_TIMEZONE silently stopped working in production.
+
+
+def test_build_server_wires_default_timezone_through(settings, fake_service):
+    public_settings = replace(settings, default_timezone="America/New_York")
+    build_server(public_settings, service=fake_service)
+    assert mapping.get_default_timezone() == ZoneInfo("America/New_York")
+
+
+def test_build_server_applies_shipped_default_timezone(settings, fake_service):
+    mapping.set_default_timezone("UTC")
+    build_server(settings, service=fake_service)
+    assert mapping.get_default_timezone() == ZoneInfo(Settings.default_timezone)
 
 
 # --- main(): access-log-disabled security control must not silently regress (E7) ---

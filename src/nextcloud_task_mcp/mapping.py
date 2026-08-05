@@ -80,6 +80,45 @@ class TaskFields:
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
+_DEFAULT_TIMEZONE: ZoneInfo = ZoneInfo("Europe/Berlin")
+
+
+def set_default_timezone(zone: str | ZoneInfo) -> None:
+    """Set the server-wide default timezone."""
+    global _DEFAULT_TIMEZONE
+    if isinstance(zone, str):
+        _DEFAULT_TIMEZONE = ZoneInfo(zone)
+    else:
+        _DEFAULT_TIMEZONE = zone
+
+
+def get_default_timezone() -> ZoneInfo:
+    """Return the server-wide default timezone (defaults to Europe/Berlin)."""
+    return _DEFAULT_TIMEZONE
+
+
+def format_datetime_output(value: date | datetime | None) -> str | None:
+    """Format a date or datetime object for output in the server's default timezone.
+
+    - `None` returns `None`.
+    - A bare `date` (and not `datetime`) returns "YYYY-MM-DD".
+    - A `datetime` is converted to `get_default_timezone()` (a naive datetime is
+      treated as already in `get_default_timezone()`) and formatted as ISO 8601
+      with offset (e.g. "2026-08-07T14:00:00+02:00").
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=get_default_timezone())
+        else:
+            value = value.astimezone(get_default_timezone())
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
 def priority_label_to_ical(label: str) -> int:
     """Map a German priority label to an RFC 5545 PRIORITY value (1-9)."""
     try:
@@ -130,11 +169,9 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       Python 3.11+ (basic format, week dates, ...) are deliberately NOT
       treated as all-day here - only the canonical extended form is.
     - Anything else is parsed as a `datetime`. A *naive* datetime (no UTC
-      offset) is interpreted as UTC (B2) - the same rule already used for
-      absolute VALARM triggers, so the same-looking input is no longer
-      interpreted two different ways depending on which property it ends up
-      in. An *explicit* UTC offset (e.g. "+02:00") is converted to UTC rather
-      than kept as-is: `icalendar` serializes a fixed-offset `tzinfo` as
+      offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`,
+      default Europe/Berlin). An *explicit* UTC offset (e.g. "+02:00") is converted to
+      UTC rather than kept as-is: `icalendar` serializes a fixed-offset `tzinfo` as
       `DTSTART;TZID="UTC+02:00":...` without ever emitting the matching
       VTIMEZONE component the TZID reference requires, so CalDAV clients that
       don't recognize the (nonstandard) TZID fall back to interpreting the
@@ -150,16 +187,17 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       CET vs. CEST) applies on a given day - a fixed numeric offset picked
       once and reused year-round is wrong for half the year in any zone
       that observes DST.
-    - `keep_zone=True` changes that last case only: instead of converting
-      to UTC, the returned datetime keeps its `zoneinfo.ZoneInfo` tzinfo.
-      Collapsing to a fixed UTC instant is correct for a one-off value, but
+    - `keep_zone=True` changes how naive input and IANA timezone input are returned:
+      instead of converting to UTC, naive input gets the server's default
+      `ZoneInfo` attached and explicit IANA timezone input keeps its `zoneinfo.ZoneInfo`
+      tzinfo. Collapsing to a fixed UTC instant is correct for a one-off value, but
       wrong for anything that repeats on wall-clock time (an RRULE) - a
       recurring "09:00 Europe/Berlin" stored as a fixed UTC instant keeps
       that UTC instant across a DST transition, so it displays as 08:00 or
       10:00 local for half the year. Keeping the zone lets the RRULE be
-      evaluated in local time, the way RFC 5545 intends. Naive input and
-      explicit numeric offsets are unaffected by this flag - they carry no
-      IANA zone to preserve, so they still normalize to UTC as before.
+      evaluated in local time, the way RFC 5545 intends. Explicit numeric offsets
+      are unaffected by this flag - they carry no IANA zone to preserve, so they still
+      normalize to UTC as before.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):
@@ -194,7 +232,8 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
             dt = dt.replace(tzinfo=zone)
             return dt if keep_zone else dt.astimezone(timezone.utc)
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=get_default_timezone())
+            return dt if keep_zone else dt.astimezone(timezone.utc)
         return dt.astimezone(timezone.utc)
 
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
@@ -220,10 +259,9 @@ def _parse_absolute_trigger(spec: str) -> datetime | None:
     except ValueError:
         return None
     # RFC 5545 requires absolute VALARM triggers to be expressed in UTC;
-    # a naive input is assumed to already be UTC (same rule as
-    # `parse_datetime_input`, B2).
+    # a naive input is interpreted in the default timezone then converted to UTC.
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=get_default_timezone())
     return dt.astimezone(timezone.utc)
 
 
@@ -369,7 +407,7 @@ def _format_date_property(component, name: str) -> str | None:
     if prop is None:
         return None
     value = getattr(prop, "dt", prop)
-    return value.isoformat()
+    return format_datetime_output(value)
 
 
 def _extract_categories(component) -> list[str]:
@@ -423,7 +461,7 @@ def extract_alarms(component) -> list[str]:
     - Relative trigger (timedelta): RFC 5545 duration string, e.g. "-PT30M", "-P1D",
       serialized via `vDuration`.
     - Absolute trigger (datetime): ISO 8601 string with offset, e.g.
-      "2026-08-07T09:00:00+00:00". RFC 5545 requires absolute triggers to be
+      "2026-08-07T09:00:00+02:00". RFC 5545 requires absolute triggers to be
       UTC, and this server only ever writes them that way - but other clients
       do emit `TRIGGER;VALUE=DATE-TIME;TZID=Europe/Berlin:...`, which
       `icalendar` hands back as a *naive* datetime with the zone left in the
@@ -431,7 +469,7 @@ def extract_alarms(component) -> list[str]:
       reminder by the zone's offset, so the TZID parameter is resolved via
       `zoneinfo` when present; a naive value without any TZID is assumed to be
       UTC (B2), and an unknown TZID name falls back to UTC rather than
-      dropping the alarm.
+      dropping the alarm. Output is formatted in the server's default timezone.
 
     Alarms appear in the returned list in the order they are defined in the
     component. A VALARM without a TRIGGER, or with a TRIGGER value that is neither
@@ -460,7 +498,9 @@ def extract_alarms(component) -> list[str]:
         elif isinstance(dt_val, datetime):
             if dt_val.tzinfo is None:
                 dt_val = dt_val.replace(tzinfo=_trigger_zone(prop))
-            alarms.append(dt_val.astimezone(timezone.utc).isoformat())
+            formatted = format_datetime_output(dt_val)
+            if formatted is not None:
+                alarms.append(formatted)
     return alarms
 
 
@@ -505,14 +545,13 @@ def parse_vtodo(component) -> dict[str, Any]:
 
 
 def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
-    """Parse a `list_tasks` due-filter value/stored due value into a comparable UTC datetime.
+    """Parse a `list_tasks` due-filter/stored due value into a comparable datetime.
 
-    Reuses `parse_datetime_input`, so a naive datetime is already normalized to
-    UTC per the same rule used everywhere else (B2). A bare `date` result (an
+    Reuses `parse_datetime_input`. A bare `date` result (an
     all-day due date, or an all-day filter bound) has no time component to
-    compare directly, so it's expanded to a single instant within that day:
-    start-of-day (00:00:00 UTC) when `end_of_day` is False, end-of-day
-    (23:59:59 UTC) when True. Callers use `end_of_day=True` only for the
+    compare directly, so it's expanded to a single instant within that day in
+    the default timezone: start-of-day (00:00:00) when `end_of_day` is False,
+    end-of-day (23:59:59) when True. Callers use `end_of_day=True` only for the
     `faellig_vor` (due-before) bound, so a date-only bound like "2026-07-20"
     still includes tasks due at any time on the 20th; `faellig_nach`
     (due-after) bounds and the tasks' own stored due values use
@@ -524,7 +563,7 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     if isinstance(parsed, datetime):
         return parsed
     time_of_day = time(23, 59, 59) if end_of_day else time.min
-    return datetime.combine(parsed, time_of_day, tzinfo=timezone.utc)
+    return datetime.combine(parsed, time_of_day, tzinfo=get_default_timezone())
 
 
 def filter_tasks(

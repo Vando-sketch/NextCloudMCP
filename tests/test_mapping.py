@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from icalendar import Todo
@@ -203,16 +204,16 @@ def test_extract_alarms_round_trip_absolute():
         erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
     )
     parsed = mapping.parse_vtodo(todo)
-    # Note: "...Z" input reads back as "+00:00"
+    # Note: absolute reminders are formatted in default timezone (Europe/Berlin, +02:00 in August)
     assert parsed["erinnerungen"] == [
-        "2026-08-07T09:00:00+00:00",
-        "2026-08-07T09:00:00+00:00",
+        "2026-08-07T11:00:00+02:00",
+        "2026-08-07T11:00:00+02:00",
     ]
 
 
 def test_extract_alarms_preserves_order():
     todo = _new_todo()
-    reminders = ["-P1D", "-PT30M", "2026-08-07T09:00:00+00:00"]
+    reminders = ["-P1D", "-PT30M", "2026-08-07T11:00:00+02:00"]
     _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=reminders)
     parsed = mapping.parse_vtodo(todo)
     assert parsed["erinnerungen"] == reminders
@@ -244,7 +245,7 @@ def test_extract_alarms_skips_valarm_without_trigger_or_invalid_trigger():
     assert parsed["erinnerungen"] == ["-PT30M"]
 
 
-def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
+def test_extract_alarms_absolute_with_offset_formats_in_default_timezone():
     todo = _new_todo()
     _apply(
         todo,
@@ -253,16 +254,11 @@ def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
         erinnerungen=["2026-07-19T11:00:00+02:00"],
     )
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
+    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_extract_alarms_resolves_foreign_tzid_trigger():
-    """A TRIGGER;TZID=... written by another client is not UTC.
-
-    `icalendar` leaves such a value naive and keeps the zone in the property's
-    parameters, so reading it as UTC would shift the reminder by the zone's
-    offset (two hours for Berlin in July).
-    """
+    """A TRIGGER;TZID=... written by another client is resolved and formatted in default zone."""
     from icalendar import Alarm
 
     todo = _new_todo()
@@ -275,7 +271,7 @@ def test_extract_alarms_resolves_foreign_tzid_trigger():
     todo.add_component(alarm)
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
+    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_extract_alarms_unknown_tzid_falls_back_to_utc():
@@ -291,7 +287,7 @@ def test_extract_alarms_unknown_tzid_falls_back_to_utc():
     todo.add_component(alarm)
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+00:00"]
+    assert parsed["erinnerungen"] == ["2026-07-19T13:00:00+02:00"]
 
 
 def test_extract_alarms_skips_date_valued_and_repeated_triggers():
@@ -403,11 +399,99 @@ def test_non_canonical_date_strings_are_not_treated_as_all_day(text):
 # --- Naive datetimes are UTC (B2) ---
 
 
-def test_naive_datetime_input_is_interpreted_as_utc():
+def test_naive_datetime_input_is_interpreted_in_default_timezone():
+    # July date (summer): Europe/Berlin is +02:00 -> UTC 12:00
+    summer = mapping.parse_datetime_input("2026-07-20T14:00:00")
+    assert isinstance(summer, datetime)
+    assert summer.tzinfo == timezone.utc
+    assert summer == datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+
+    # January date (winter): Europe/Berlin is +01:00 -> UTC 13:00
+    winter = mapping.parse_datetime_input("2026-01-20T14:00:00")
+    assert isinstance(winter, datetime)
+    assert winter.tzinfo == timezone.utc
+    assert winter == datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)
+
+    # keep_zone=True attaches default ZoneInfo
+    summer_keep = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(summer_keep, datetime)
+    assert summer_keep.tzinfo == ZoneInfo("Europe/Berlin")
+    assert summer_keep == datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+
+
+def test_set_default_timezone_utc_reproduces_old_expectations():
+    mapping.set_default_timezone("UTC")
     result = mapping.parse_datetime_input("2026-07-20T14:00:00")
-    assert isinstance(result, datetime)  # narrows away the `date` half of the return type
+    assert isinstance(result, datetime)
     assert result.tzinfo == timezone.utc
     assert result.hour == 14
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T14:00:00")
+    res = mapping.parse_vtodo(todo)
+    assert res["faellig_datum"] == "2026-07-20T14:00:00+00:00"
+
+
+def test_naive_datetime_round_trip():
+    """Write a naive datetime, read it back: same wall-clock time with local offset."""
+    todo = _new_todo()
+    _apply(todo, titel="Roundtrip", faellig_datum="2026-07-20T14:00:00")
+    res = mapping.parse_vtodo(todo)
+    assert res["faellig_datum"] == "2026-07-20T14:00:00+02:00"
+
+
+def test_naive_datetime_round_trip_in_winter():
+    """The output offset is resolved per date, not frozen at the summer one."""
+    todo = _new_todo()
+    _apply(todo, titel="Roundtrip", faellig_datum="2026-01-20T14:00:00")
+    res = mapping.parse_vtodo(todo)
+    assert res["faellig_datum"] == "2026-01-20T14:00:00+01:00"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        (date(2026, 7, 20), "2026-07-20"),
+        (datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc), "2026-07-20T14:00:00+02:00"),
+        (datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc), "2026-01-20T14:00:00+01:00"),
+        # A floating (naive) value from a foreign client is already local.
+        (datetime(2026, 7, 20, 14, 0), "2026-07-20T14:00:00+02:00"),
+        # An explicit foreign zone is converted, not passed through.
+        (
+            datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("America/New_York")),
+            "2026-07-20T20:00:00+02:00",
+        ),
+    ],
+)
+def test_format_datetime_output(value, expected):
+    assert mapping.format_datetime_output(value) == expected
+
+
+def test_due_filter_bounds_follow_dst_transition():
+    """The spring-forward day is 23 hours long, and the bounds must know it.
+
+    Local midnight on 2026-03-29 is 23:00 UTC the previous day (CET, +01:00);
+    local end-of-day is already CEST (+02:00). A frozen offset would place one
+    of the two bounds an hour off and silently drop or add tasks.
+    """
+    start = mapping._to_comparable_datetime("2026-03-29", end_of_day=False)
+    end = mapping._to_comparable_datetime("2026-03-29", end_of_day=True)
+    assert start.utcoffset() == timedelta(hours=1)
+    assert end.utcoffset() == timedelta(hours=2)
+    # Compared as instants (subtracting two datetimes sharing one ZoneInfo
+    # would compare wall clocks and hide the missing hour).
+    elapsed = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+    assert elapsed == timedelta(hours=22, minutes=59, seconds=59)
+
+
+def test_absolute_reminder_is_written_to_the_wire_in_utc():
+    """RFC 5545 demands a UTC absolute TRIGGER - only the *display* is local."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["2026-07-19T11:00:00"])
+    ical_text = todo.to_ical().decode()
+    assert "TRIGGER;VALUE=DATE-TIME:20260719T090000Z" in ical_text
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_named_timezone_input_resolves_dst_offset_for_the_date():
@@ -436,17 +520,8 @@ def test_unknown_timezone_name_falls_back_to_plain_datetime_error():
 
 
 def test_offset_datetime_input_is_normalized_to_utc():
-    """An explicit offset must survive as the same instant, but stored in UTC.
-
-    `icalendar` serializes a fixed-offset tzinfo (e.g. "+02:00") as
-    DTSTART;TZID="UTC+02:00":... without ever writing the matching
-    VTIMEZONE component that TZID requires - CalDAV clients that don't
-    recognize it fall back to their local zone, shifting the moment (and
-    often the calendar day). Normalizing to UTC here means it's written
-    with a plain "Z" suffix instead, which every client understands.
-    """
     result = mapping.parse_datetime_input("2026-07-20T14:00:00+02:00")
-    assert isinstance(result, datetime)  # narrows away the `date` half of the return type
+    assert isinstance(result, datetime)
     assert result.tzinfo == timezone.utc
     assert result == datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 

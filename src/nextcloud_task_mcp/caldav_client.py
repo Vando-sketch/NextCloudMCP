@@ -421,11 +421,13 @@ def _parse_deleted_at(raw: str | None) -> str | None:
     if not text:
         return None
     try:
-        return datetime.fromtimestamp(int(text), tz=timezone.utc).isoformat()
+        dt = datetime.fromtimestamp(int(text), tz=timezone.utc)
+        return mapping.format_datetime_output(dt)
     except (ValueError, OverflowError, OSError):
         pass
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return mapping.format_datetime_output(dt)
     except ValueError:
         return None
 
@@ -1264,14 +1266,15 @@ class CalDavService:
         start of the *next* day (for `bis`, making a date-only upper bound
         inclusive of the whole day - the resulting datetime is used as the
         exclusive end of a CalDAV time-range filter). Naive datetimes are
-        interpreted as UTC, matching `parse_datetime_input` everywhere else.
+        interpreted in the server's default timezone, matching
+        `parse_datetime_input` everywhere else.
         """
         if value is None:
             return None
         parsed = mapping.parse_datetime_input(value)
         if isinstance(parsed, datetime):
             return parsed
-        day_start = datetime.combine(parsed, time.min, tzinfo=timezone.utc)
+        day_start = datetime.combine(parsed, time.min, tzinfo=mapping.get_default_timezone())
         return day_start + timedelta(days=1) if exclusive_end else day_start
 
     def _event_calendars(self, calendar_names: list[str] | None) -> list[tuple[str, DAVCalendar]]:
@@ -1879,8 +1882,9 @@ class CalDavService:
         plain server-side composition: a time-range event query (recurring
         events expanded to that day's occurrences) plus a due-date-filtered
         task listing per VTODO list. `datum` must be a date-only "YYYY-MM-DD"
-        string; day boundaries are UTC, consistent with the naive-input-is-UTC
-        rule used everywhere else in this server.
+        string; day boundaries are local days in the server's default timezone
+        (`MCP_DEFAULT_TIMEZONE`), consistent with the rule used everywhere else
+        in this server, and applied identically to the events and the tasks.
         """
         parsed = mapping.parse_datetime_input(datum)
         if isinstance(parsed, datetime):
@@ -1937,10 +1941,16 @@ class CalDavService:
                 merged = self._free_busy_for_user(benutzer, start_bound, end_bound)
 
         return {
-            "von": start_bound.isoformat(),
-            "bis": end_bound.isoformat(),
+            "von": mapping.format_datetime_output(start_bound),
+            "bis": mapping.format_datetime_output(end_bound),
             "benutzer": benutzer,
-            "belegt": [{"von": start.isoformat(), "bis": end.isoformat()} for start, end in merged],
+            "belegt": [
+                {
+                    "von": mapping.format_datetime_output(start),
+                    "bis": mapping.format_datetime_output(end),
+                }
+                for start, end in merged
+            ],
         }
 
     def _own_free_busy(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
