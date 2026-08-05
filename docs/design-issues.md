@@ -1,7 +1,15 @@
 # Design: Issues #1–#9
 
-Entwurf vor Implementierung. Ein Issue = ein Branch = ein PR. Reihenfolge nach
-Priorität und Abhängigkeit: #1 → #9 → #3 → #2 → #4 → #6 → #5 → #7 → #8.
+Entwurf vor Implementierung, am 2026-08-05 bestätigt. Ein Issue = ein Branch =
+ein PR. Reihenfolge nach Priorität und Abhängigkeit:
+#1 → #3 → #9 → #4 → #6 → #2 → #5 → #7 → #8
+(#9 baut auf der neuen `list_tasks`-Signatur aus #3 auf).
+
+Bestätigte Entscheidungen: Batch-Operationen (#7) werden umgesetzt; der
+vierwertige Task-`status` (#6) ist als Breaking Change akzeptiert;
+`get_agenda` rechnet künftig standardmäßig in `Europe/Berlin` (#9);
+Live-Zugangsdaten für #8/#9 werden nachgereicht, bis dahin gilt alles
+unit-getestet und die Live-Verifikation läuft separat nach.
 
 Gemeinsame Regeln: deutsche Parameter- und Rückgabenamen, Datums-/Zeitsemantik
 unverändert, sprechende Fehler aus `errors.py`, jedes geänderte Tool bekommt
@@ -454,11 +462,13 @@ verschiedene Auflösungspfade nehmen.
 - Neue TTL (60 s, Konstante) auf `_collections`/`_collection_meta`, damit
   externe Änderungen spätestens nach einer Minute sichtbar sind; die
   bestehende sofortige Invalidierung bei eigenen Änderungen bleibt — beseitigt H3.
-- Neuer optionaler Parameter `zeitzone: str | None = None` für `get_agenda`
-  (IANA-Name). `None` = UTC, also **unverändertes** Verhalten für bestehende
-  Aufrufe; mit `"Europe/Berlin"` wird das Tagesfenster lokal gebildet und für
-  Termine *und* Aufgaben identisch angewandt — beseitigt H1, ohne die
-  dokumentierte Datums-/Zeitsemantik anzufassen.
+- Neuer Parameter `zeitzone: str = "Europe/Berlin"` für `get_agenda`
+  (IANA-Name, `"UTC"` stellt das alte Verhalten wieder her). Das Tagesfenster
+  wird in dieser Zone gebildet und für Termine *und* Aufgaben identisch
+  angewandt — beseitigt H1.
+  **Breaking Change** (im PR explizit): die Tagesgrenzen von `get_agenda` sind
+  nicht mehr UTC. Betroffen ist nur dieses eine Tool; die allgemeine
+  Datums-/Zeitsemantik (Eingabe-Parsing) bleibt unangetastet.
 - Jeder Agenda-Eintrag trägt seine Herkunft: Termine bereits `kalender`,
   Aufgaben `liste` — zusätzlich `quelle_url` (Collection-URL), damit ein
   Phantom künftig sofort einer Collection zuzuordnen ist.
@@ -473,7 +483,8 @@ get_agenda(datum)["termine"]  == list_events(von=datum, bis=datum, expand=True)
 get_agenda(datum)["aufgaben"] == list_tasks(faellig_vor=datum, faellig_nach=datum, nur_offene=True)
 ```
 
-für dasselbe Tagesfenster (UTC und `Europe/Berlin`), und `export_calendar`
+für dasselbe Tagesfenster (`Europe/Berlin` als Default und `UTC` explizit),
+und `export_calendar`
 enthält jedes zurückgegebene UID. Zusätzlich: Cache-TTL-Test (nach Ablauf wird
 neu aufgelöst) und ein Test, dass eine in der Web-UI verschwundene Collection
 nicht mehr in der Agenda auftaucht.
