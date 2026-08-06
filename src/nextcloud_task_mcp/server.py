@@ -184,7 +184,14 @@ def build_server(
         Args:
             listen_namen: Optional list of task list display names to query;
                 None queries every task list on the account.
-            nur_offene: If True (default), only return tasks that are not completed.
+            nur_offene: If True (default), only return tasks that are not
+                completed - "not completed" here means STATUS is neither
+                COMPLETED nor CANCELLED (and no COMPLETED timestamp is set):
+                a task with status="abgesagt" is excluded just like one with
+                status="erledigt", it is not treated as "still open". This is
+                the caldav library's own three-way "pending" query
+                (`Calendar.todos(include_completed=...)`), not something this
+                server layers on top.
             faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
                 tasks due at any time on that day.
@@ -207,7 +214,9 @@ def build_server(
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
-            prioritaet, fortschritt_prozent, status, ort, url, tags, erinnerungen
+            prioritaet, fortschritt_prozent, status ("offen"/"in-arbeit"/
+            "erledigt"/"abgesagt" - see update_task's status parameter to set
+            it), ort, url, tags, erinnerungen
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
@@ -353,6 +362,7 @@ def build_server(
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
         wiederholung: str | None = None,
+        status: str | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
@@ -369,6 +379,17 @@ def build_server(
                 is checked against the task's final state, so setting only
                 wiederholung succeeds as long as the task already has a
                 start_datum or faellig_datum from before this call.
+            status: Optional "offen" / "in-arbeit" / "erledigt" / "abgesagt" ->
+                STATUS. "erledigt" behaves like complete_task (also sets
+                PERCENT-COMPLETE=100 and the COMPLETED timestamp); "offen" is
+                the reopen path for a task completed by mistake (removes
+                COMPLETED and resets PERCENT-COMPLETE to 0); "in-arbeit" and
+                "abgesagt" only set STATUS. If this call also passes
+                fortschritt_prozent, that explicit value wins over whatever
+                percentage status would otherwise derive. An unknown value is
+                a speaking error naming the accepted labels; nothing is
+                written to the task in that case. Not accepted in
+                felder_leeren - set status="offen" to reopen a task instead.
             felder_leeren: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
                 Accepted values: "start_datum", "faellig_datum", "prioritaet",
@@ -395,6 +416,7 @@ def build_server(
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
             wiederholung=wiederholung,
+            status=status,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)
@@ -403,6 +425,10 @@ def build_server(
     @mcp.tool
     async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
+
+        A task completed by mistake can be reopened afterwards with
+        update_task's status="offen" (removes COMPLETED, resets
+        PERCENT-COMPLETE to 0) - there is no separate "uncomplete" tool.
 
         Args:
             list_name: Display name of the task list containing the task.
@@ -843,11 +869,15 @@ def build_server(
         task_uid: str,
         kalender_name: str,
         start: str | None = None,
-        dauer_minuten: int = 60,
+        dauer_minuten: int | None = None,
+        ende: str | None = None,
+        beschreibung: str | None = None,
+        erinnerungen: list[str] | None = None,
+        sichtbarkeit: str | None = None,
     ) -> dict[str, str]:
         """Create a calendar event from an existing task (timeboxing) and link them.
 
-        Title, notes, location and tags are copied from the task. The event is
+        Title, location and tags are copied from the task. The event is
         linked back to the task via RELATED-TO (the "zeitblock" semantics of
         link_task_to_event); the task itself is not modified. The new event's
         verknuepfte_aufgaben will show this task with beziehung "zeitblock",
@@ -859,9 +889,23 @@ def build_server(
             kalender_name: Display name of the calendar for the new event.
             start: Optional ISO 8601 start for the event; defaults to the
                 task's faellig_datum (due date). Fails if neither is given. A
-                date-only start produces a one-day all-day event.
-            dauer_minuten: Event duration in minutes (default 60); ignored for
-                all-day events.
+                date-only start produces a one-day all-day event, and then
+                ende (if given) must also be a date - see create_event's
+                start/ende consistency rule.
+            dauer_minuten: Event duration in minutes; ignored for all-day
+                events. Mutually exclusive with ende - giving both is an
+                error naming both. With neither given, the event runs 60
+                minutes.
+            ende: Optional explicit ISO 8601 end for the event, as an
+                alternative to dauer_minuten (giving both is an error).
+            beschreibung: Optional event description. Left as None (the
+                default), the task's notizen are copied as before; an
+                explicit "" sets an empty description instead of inheriting
+                notizen.
+            erinnerungen: Optional reminders for the new event, same format
+                as create_event's erinnerungen -> VALARM.
+            sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" for
+                the new event -> CLASS.
 
         Returns:
             {"uid": the new event's UID, "task_uid": task_uid}.
@@ -873,6 +917,10 @@ def build_server(
             kalender_name,
             start,
             dauer_minuten,
+            ende,
+            beschreibung,
+            erinnerungen,
+            sichtbarkeit,
         )
         return {"uid": new_uid, "task_uid": task_uid}
 

@@ -2020,17 +2020,44 @@ class CalDavService:
         task_uid: str,
         calendar_name: str,
         start: str | None = None,
-        dauer_minuten: int = 60,
+        dauer_minuten: int | None = None,
+        ende: str | None = None,
+        beschreibung: str | None = None,
+        erinnerungen: list[str] | None = None,
+        sichtbarkeit: str | None = None,
     ) -> str:
         """Create a calendar event from an existing task (timeboxing) and link them.
 
-        Title, notes, location and tags are copied from the task; the event
-        starts at `start` (or, if omitted, the task's due date/time) and runs
-        for `dauer_minuten`. A date-only start produces a one-day all-day
-        event instead. The new event carries RELATED-TO;RELTYPE=PARENT with
-        the task's UID (the "zeitblock" link semantics).
+        Title, location and tags are always copied from the task; the event
+        starts at `start` (or, if omitted, the task's due date/time). A
+        date-only start produces a one-day all-day event instead - `ende`
+        must then also be a date, or absent (both left to `create_event`'s
+        own `_check_start_end_consistency`, not duplicated here).
+
+        The event's length is `ende` (an explicit end) XOR `dauer_minuten` (a
+        length in minutes from `start`) - passing both is rejected, since
+        they'd disagree about where the event ends. With neither, the event
+        runs 60 minutes (`dauer_minuten` defaults to `None` rather than `60`
+        so a call passing neither can tell "not given" from "given as 60" -
+        both currently behave the same way, but only the former is meant to
+        keep doing so if the default ever changes). `dauer_minuten` is
+        ignored for an all-day start, same as before.
+
+        `beschreibung` overrides the task's `notizen` for the event's
+        description; `None` (the default) inherits `notizen` unchanged, while
+        an explicit `""` clears it - `is not None`, not truthiness, decides
+        which happened. `erinnerungen`/`sichtbarkeit` pass straight through
+        to the new event.
+
+        The new event carries RELATED-TO;RELTYPE=PARENT with the task's UID
+        (the "zeitblock" link semantics).
         """
-        if dauer_minuten <= 0:
+        if ende is not None and dauer_minuten is not None:
+            raise InvalidEventDataError(
+                "ende and dauer_minuten cannot both be given; pass at most one to "
+                "control how long the event runs."
+            )
+        if dauer_minuten is not None and dauer_minuten <= 0:
             raise InvalidEventDataError(f"dauer_minuten must be > 0, got {dauer_minuten}.")
 
         with self._lock:
@@ -2044,21 +2071,30 @@ class CalDavService:
                 )
 
             parsed_start = mapping.parse_datetime_input(start_spec)
+            start_value = parsed_start.isoformat()
             if isinstance(parsed_start, datetime):
-                ende = (parsed_start + timedelta(minutes=dauer_minuten)).isoformat()
-                start_value = parsed_start.isoformat()
+                if ende is not None:
+                    ende_value = ende
+                else:
+                    effective_minutes = dauer_minuten if dauer_minuten is not None else 60
+                    ende_value = (parsed_start + timedelta(minutes=effective_minutes)).isoformat()
             else:
-                # All-day due date -> one-day all-day event (inclusive end).
-                start_value = parsed_start.isoformat()
-                ende = start_value
+                # All-day due date -> one-day all-day event (inclusive end),
+                # unless an explicit ende overrides it; dauer_minuten has no
+                # meaning for an all-day event and is ignored either way.
+                ende_value = ende if ende is not None else start_value
+
+            beschreibung_value = beschreibung if beschreibung is not None else task.get("notizen")
 
             fields = event_mapping.EventFields(
                 titel=task.get("titel") or "Aufgabe",
                 start=start_value,
-                ende=ende,
-                beschreibung=task.get("notizen"),
+                ende=ende_value,
+                beschreibung=beschreibung_value,
                 ort=task.get("ort"),
                 tags=task.get("tags") or None,
+                erinnerungen=erinnerungen,
+                sichtbarkeit=sichtbarkeit,
                 verknuepfte_aufgabe=task_uid,
             )
             return self.create_event(calendar_name, fields)
