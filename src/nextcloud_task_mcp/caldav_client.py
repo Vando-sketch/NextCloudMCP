@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
 import threading
@@ -82,6 +83,15 @@ _RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
 # out-of-band change can go unnoticed while still keeping the common case
 # (several tool calls in one burst) cheap.
 _COLLECTION_CACHE_TTL_SECONDS = 60.0
+
+# One tool call should stay one bounded unit of work: a caller asking to touch
+# thousands of events is better served by several calls it can check in between.
+_BATCH_UID_LIMIT = 200
+
+# A date-only string is what makes an event all-day (see `parse_datetime_input`).
+_ALL_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# Far enough in the past that no realistic `ende` can land before it.
+_PROBE_START = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # The two supported task<->event link semantics, mapped to the RELATED-TO
 # RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
@@ -470,20 +480,21 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
     return None, None
 
 
-def _dedup_names(names: list[str] | None) -> list[str] | None:
-    """Drop repeated collection names, keeping the given order.
+def _dedup_strings(values: list[str] | None) -> list[str] | None:
+    """Drop repeats, keeping the given order.
 
-    A name listed twice would otherwise have its collection read twice, and
-    `list_tags` would count every tag in it twice.
+    A collection name listed twice would have its collection read twice and
+    make `list_tags` count every tag in it twice; an event UID listed twice
+    would be written or deleted twice and reported twice.
     """
-    if names is None:
+    if values is None:
         return None
     seen: set[str] = set()
     unique: list[str] = []
-    for name in names:
-        if name not in seen:
-            seen.add(name)
-            unique.append(name)
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
     return unique
 
 
@@ -2005,6 +2016,177 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
+    @staticmethod
+    def _validate_event_patch(fields: event_mapping.EventFields) -> None:
+        """Reject an empty or invalid patch before a single event is written.
+
+        A batch must not stop halfway because the 40th event was the first to
+        reveal a bad RRULE, so the patch is applied to a throwaway VEVENT
+        first: every check `apply_event_fields` performs - unknown
+        `felder_leeren` names, setting and clearing the same field, bad
+        status/visibility/RRULE/date, an attendee without an email - happens
+        there, on nothing. The probe carries a DTSTART because relative
+        reminders validate against its presence.
+
+        The probe's DTSTART deliberately matches the patch's own `ende` kind
+        and lies far in the past: `apply_event_fields` checks DTSTART against
+        DTEND, so a timed probe would reject an all-day `ende` that every
+        real all-day event in the batch would have accepted. Whether the
+        patch actually fits a *given* event is per-event and is reported per
+        UID, not here.
+        """
+        patch_fields = [f.name for f in dataclasses.fields(fields) if f.name != "clear"]
+        if not fields.clear and all(getattr(fields, name) is None for name in patch_fields):
+            raise InvalidEventDataError(
+                "No fields to update given - set at least one field, or name one in felder_leeren."
+            )
+
+        probe = Event()
+        if fields.start is None:
+            # With `start` in the patch, `apply_event_fields` sets DTSTART on
+            # the probe itself before it validates anything against it.
+            all_day_end = fields.ende is not None and _ALL_DAY_RE.match(fields.ende) is not None
+            probe.add("dtstart", date(1970, 1, 1) if all_day_end else _PROBE_START)
+        event_mapping.apply_event_fields(probe, fields)
+
+    def _batch_over_events(
+        self,
+        calendar_name: str,
+        event_uids: list[str],
+        operation: Callable[[DAVCalendar, str], None],
+    ) -> dict[str, Any]:
+        """Run `operation` per UID, reporting outcomes instead of aborting on the first failure.
+
+        A batch is only useful if one bad UID doesn't discard the work done
+        for the others, so a failure that belongs to a single event (unknown
+        UID, edit conflict) becomes an entry in `ergebnisse` and the loop
+        continues. Anything saying the whole call is broken - bad
+        credentials, transport failure, the calendar itself gone - still
+        propagates, because continuing would just produce one identical
+        error per UID.
+
+        The calendar is resolved once for the whole batch. If that cached
+        collection turns out to be stale, resolution is refreshed once (the
+        same recovery `_with_collection` does per call) rather than reporting
+        every UID as missing.
+        """
+        if not event_uids:
+            raise InvalidEventDataError(
+                "event_uids must not be empty - name at least one event to act on."
+            )
+        unique_uids = _dedup_strings(event_uids) or []
+        if len(unique_uids) > _BATCH_UID_LIMIT:
+            raise InvalidEventDataError(
+                f"A batch takes at most {_BATCH_UID_LIMIT} event UIDs, got {len(unique_uids)}. "
+                "Split the call into several smaller ones."
+            )
+
+        with self._lock:
+            try:
+                calendar = self._get_collection(calendar_name, "VEVENT")
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise CalendarNotFoundError(f"Calendar '{calendar_name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            refreshed = False
+            results: list[dict[str, Any]] = []
+            succeeded = 0
+            failed = 0
+
+            for uid in unique_uids:
+                try:
+                    try:
+                        operation(calendar, uid)
+                    except caldav_error.NotFoundError:
+                        if refreshed:
+                            raise
+                        # Either this one event is gone or the whole cached
+                        # collection is stale - re-resolve once and retry, so
+                        # a stale cache can't turn into "all 60 UIDs missing".
+                        refreshed = True
+                        self._calendar_cache.pop(("VEVENT", calendar_name), None)
+                        self._invalidate_collection_caches()
+                        calendar = self._resolve_and_cache(calendar_name, "VEVENT")
+                        operation(calendar, uid)
+                except caldav_error.NotFoundError:
+                    results.append(
+                        {"uid": uid, "status": "fehler", "fehler": f"Event '{uid}' was not found."}
+                    )
+                    failed += 1
+                except Exception as exc:
+                    translated = exc if isinstance(exc, TaskMcpError) else _translate(exc)
+                    if isinstance(translated, TaskConflictError):
+                        # `_translate` phrases this one for tasks.
+                        reason = (
+                            f"Event '{uid}' was modified by another client since it was last "
+                            "read (conflicting edit). Re-read it and retry."
+                        )
+                    elif isinstance(translated, InvalidEventDataError):
+                        # The patch itself was validated up front, so this is
+                        # about *this* event - typically an all-day event
+                        # meeting a timed patch. One mismatched event must not
+                        # abort a batch that is already half written.
+                        reason = str(translated)
+                    else:
+                        raise translated from exc
+                    results.append({"uid": uid, "status": "fehler", "fehler": reason})
+                    failed += 1
+                    continue
+                else:
+                    results.append({"uid": uid, "status": "ok"})
+                    succeeded += 1
+
+            return {
+                "kalender_name": calendar_name,
+                "erfolgreich": succeeded,
+                "fehlgeschlagen": failed,
+                "ergebnisse": results,
+            }
+
+    def update_events(
+        self, calendar_name: str, event_uids: list[str], fields: event_mapping.EventFields
+    ) -> dict[str, Any]:
+        """Apply one field patch to several events of a calendar.
+
+        The patch is validated before the first write (`_validate_event_patch`),
+        so a rejected patch leaves every event untouched instead of stopping
+        halfway through the batch. Per-event outcomes follow
+        `_batch_over_events`.
+        """
+        self._validate_event_patch(fields)
+
+        with self._lock:
+            # Looked up once for the whole batch - it costs a principal
+            # request and is the same address for every event.
+            own_organizer = self._get_own_organizer_address() if fields.teilnehmer else None
+
+            def operation(calendar: DAVCalendar, uid: str) -> None:
+                event_obj = calendar.event_by_uid(uid)
+                event_mapping.apply_event_fields(
+                    event_obj.icalendar_component, fields, own_organizer=own_organizer
+                )
+                _sync_vtimezones(event_obj.icalendar_instance, event_obj.icalendar_component)
+                event_obj.save()
+
+            return self._batch_over_events(calendar_name, event_uids, operation)
+
+    def delete_events(self, calendar_name: str, event_uids: list[str]) -> dict[str, Any]:
+        """Permanently delete several events of a calendar.
+
+        Irreversible from this API's point of view, like `delete_event`, and
+        a batch multiplies the damage a wrong UID list does - callers should
+        confirm with the user first. Per-event outcomes follow
+        `_batch_over_events`.
+        """
+
+        def operation(calendar: DAVCalendar, uid: str) -> None:
+            calendar.event_by_uid(uid).delete()
+
+        return self._batch_over_events(calendar_name, event_uids, operation)
+
     def delete_event(self, calendar_name: str, event_uid: str) -> None:
         """Permanently delete an event."""
         with self._lock:
@@ -2559,9 +2741,9 @@ class CalDavService:
             # An empty list means "none of that kind" to both collectors, so it
             # needs no special case here - unlike `None`, which means "all".
             events = self._collect_events(
-                _dedup_names(calendar_names), von=None, bis=None, expand=False
+                _dedup_strings(calendar_names), von=None, bis=None, expand=False
             )
-            tasks = self._collect_tasks(_dedup_names(list_names), only_open=False)
+            tasks = self._collect_tasks(_dedup_strings(list_names), only_open=False)
 
             # Folded for counting - "Arbeit" and "arbeit" are one tag to
             # Nextcloud's UI too - but every spelling is kept so the reported

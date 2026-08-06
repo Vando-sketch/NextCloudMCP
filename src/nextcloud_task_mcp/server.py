@@ -780,6 +780,90 @@ def build_server(
         return {"uid": event_uid}
 
     @mcp.tool
+    async def update_events(
+        kalender_name: str,
+        event_uids: list[str],
+        titel: str | None = None,
+        start: str | None = None,
+        ende: str | None = None,
+        ort: str | None = None,
+        beschreibung: str | None = None,
+        tags: list[str] | None = None,
+        status: str | None = None,
+        sichtbarkeit: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
+        erinnerungen: list[str] | None = None,
+        url: str | None = None,
+        verknuepfte_aufgabe: str | None = None,
+        teilnehmer: list[dict[str, Any]] | None = None,
+        felder_leeren: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update multiple events in a calendar with the same field patch.
+
+        The patch is validated up front before any writes take place. If the patch
+        is invalid or empty, the call fails immediately and no events are changed.
+
+        Args:
+            kalender_name: Display name of the calendar containing the events.
+            event_uids: List of event UIDs to update. Max 200 UIDs per call.
+                Empty list is rejected. Duplicate UIDs are deduplicated while
+                preserving order.
+            (all other args): Same meaning and mapping as in update_event; fields left
+                as None are left unchanged. To clear fields, pass their names in
+                felder_leeren.
+
+        Returns:
+            Dict containing kalender_name, erfolgreich count, fehlgeschlagen count,
+            and ergebnisse list with per-UID statuses.
+        """
+        fields = event_mapping.EventFields(
+            titel=titel,
+            start=start,
+            ende=ende,
+            ort=ort,
+            beschreibung=beschreibung,
+            tags=tags,
+            status=status,
+            sichtbarkeit=sichtbarkeit,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
+            erinnerungen=erinnerungen,
+            url=url,
+            verknuepfte_aufgabe=verknuepfte_aufgabe,
+            teilnehmer=teilnehmer,
+            clear=tuple(felder_leeren) if felder_leeren else (),
+        )
+        res: dict[str, Any] = await _call(
+            caldav_service.update_events, kalender_name, event_uids, fields
+        )
+        return res
+
+    @mcp.tool
+    async def delete_events(kalender_name: str, event_uids: list[str]) -> dict[str, Any]:
+        """Permanently delete multiple events from a calendar.
+
+        WARNING: this is irreversible from this server's point of view, and a
+        batch multiplies the damage a wrong UID list does. Confirm the list
+        with the user before calling this.
+
+        A UID that does not exist is reported as a failed entry; the other
+        events are still deleted.
+
+        Args:
+            kalender_name: Display name of the calendar containing the events.
+            event_uids: List of event UIDs to delete. Max 200 UIDs per call.
+                Empty list is rejected. Duplicate UIDs are deduplicated while
+                preserving order.
+
+        Returns:
+            Dict containing kalender_name, erfolgreich count, fehlgeschlagen count,
+            and ergebnisse list with per-UID statuses.
+        """
+        res: dict[str, Any] = await _call(caldav_service.delete_events, kalender_name, event_uids)
+        return res
+
+    @mcp.tool
     async def move_event(kalender_name: str, event_uid: str, ziel_kalender: str) -> dict[str, str]:
         """Verschiebt einen Kalendereintrag in einen anderen Kalender.
 

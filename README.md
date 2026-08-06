@@ -289,7 +289,9 @@ the full reference.
 | `get_event(kalender_name, event_uid)` | Single event by UID |
 | `create_event(kalender_name, titel, start, ...)` | Full event creation: all-day or timed, `ort`, `beschreibung`, `tags`, `status` (`"bestätigt"`/`"vorläufig"`/`"abgesagt"`), `sichtbarkeit`, recurrence (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE), reminders (`erinnerungen` → VALARM), `url`, task link (`verknuepfte_aufgabe`) |
 | `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
+| `update_events(kalender_name, event_uids, ...)` | Batch update up to 200 events with the same field patch; patch validated up front |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
+| `delete_events(kalender_name, event_uids)` | Batch delete up to 200 events from a calendar |
 | `move_event(kalender_name, event_uid, ziel_kalender)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete |
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
 | `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |

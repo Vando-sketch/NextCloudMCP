@@ -1708,6 +1708,249 @@ def test_delete_event_deletes(service, principal):
     event_obj.delete.assert_called_once_with()
 
 
+# --- update_events and delete_events ---
+
+
+def test_update_events_all_succeed(service, principal):
+    obj1 = _make_event_obj()
+    obj2 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: obj1 if uid == "u1" else obj2
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events(
+        "Termine",
+        ["u1", "u2"],
+        event_mapping.EventFields(ort="Büro"),
+    )
+
+    assert res == {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [
+            {"uid": "u1", "status": "ok"},
+            {"uid": "u2", "status": "ok"},
+        ],
+    }
+    assert obj1.save.called
+    assert obj2.save.called
+
+
+def test_update_events_partial_failure_unknown_uid(service, principal):
+    obj1 = _make_event_obj()
+    obj3 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+
+    def side_effect(uid):
+        if uid == "u2":
+            raise caldav_error.NotFoundError()
+        return obj1 if uid == "u1" else obj3
+
+    event_cal.event_by_uid.side_effect = side_effect
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events(
+        "Termine",
+        ["u1", "u2", "u3"],
+        event_mapping.EventFields(ort="Büro"),
+    )
+
+    assert res == {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 1,
+        "ergebnisse": [
+            {"uid": "u1", "status": "ok"},
+            {"uid": "u2", "status": "fehler", "fehler": "Event 'u2' was not found."},
+            {"uid": "u3", "status": "ok"},
+        ],
+    }
+
+
+def test_update_events_deduplication(service, principal):
+    obj1 = _make_event_obj()
+    obj2 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: obj1 if uid == "u1" else obj2
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events(
+        "Termine",
+        ["u1", "u2", "u1"],
+        event_mapping.EventFields(ort="Büro"),
+    )
+
+    assert res["erfolgreich"] == 2
+    assert res["ergebnisse"] == [
+        {"uid": "u1", "status": "ok"},
+        {"uid": "u2", "status": "ok"},
+    ]
+
+
+def test_update_events_empty_uids_rejected(service):
+    with pytest.raises(InvalidEventDataError, match="must not be empty"):
+        service.update_events("Termine", [], event_mapping.EventFields(ort="Büro"))
+
+
+def test_update_events_over_200_uids_rejected(service):
+    uids = [f"u-{i}" for i in range(201)]
+    with pytest.raises(InvalidEventDataError, match="at most 200 event UIDs"):
+        service.update_events("Termine", uids, event_mapping.EventFields(ort="Büro"))
+
+
+def test_update_events_invalid_patch_bad_rrule_no_write(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(InvalidEventDataError):
+        service.update_events(
+            "Termine",
+            ["u1"],
+            event_mapping.EventFields(wiederholung="FREQ=INVALID"),
+        )
+
+    event_cal.event_by_uid.assert_not_called()
+
+
+def test_update_events_invalid_patch_unknown_felder_leeren_no_write(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(InvalidEventDataError):
+        service.update_events(
+            "Termine",
+            ["u1"],
+            event_mapping.EventFields(clear=("unknown_field",)),
+        )
+
+    event_cal.event_by_uid.assert_not_called()
+
+
+def test_update_events_empty_patch_rejected(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(InvalidEventDataError, match="No fields to update given"):
+        service.update_events("Termine", ["u1"], event_mapping.EventFields())
+
+    event_cal.event_by_uid.assert_not_called()
+
+
+def test_update_events_auth_failure_propagates(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = caldav_error.AuthorizationError()
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(AuthenticationFailedError):
+        service.update_events("Termine", ["u1"], event_mapping.EventFields(ort="Büro"))
+
+
+def test_delete_events_all_succeed(service, principal):
+    obj1 = _make_event_obj()
+    obj2 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: obj1 if uid == "u1" else obj2
+    principal.calendars.return_value = [event_cal]
+
+    res = service.delete_events("Termine", ["u1", "u2"])
+
+    assert res == {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [
+            {"uid": "u1", "status": "ok"},
+            {"uid": "u2", "status": "ok"},
+        ],
+    }
+    obj1.delete.assert_called_once_with()
+    obj2.delete.assert_called_once_with()
+
+
+def test_delete_events_partial_failure(service, principal):
+    obj1 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+
+    def side_effect(uid):
+        if uid == "u2":
+            raise caldav_error.NotFoundError()
+        return obj1
+
+    event_cal.event_by_uid.side_effect = side_effect
+    principal.calendars.return_value = [event_cal]
+
+    res = service.delete_events("Termine", ["u1", "u2"])
+
+    assert res == {
+        "kalender_name": "Termine",
+        "erfolgreich": 1,
+        "fehlgeschlagen": 1,
+        "ergebnisse": [
+            {"uid": "u1", "status": "ok"},
+            {"uid": "u2", "status": "fehler", "fehler": "Event 'u2' was not found."},
+        ],
+    }
+    obj1.delete.assert_called_once_with()
+
+
+def test_delete_events_deduplication(service, principal):
+    obj1 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = obj1
+    principal.calendars.return_value = [event_cal]
+
+    res = service.delete_events("Termine", ["u1", "u1", "u1"])
+
+    assert res["erfolgreich"] == 1
+    assert len(res["ergebnisse"]) == 1
+    obj1.delete.assert_called_once_with()
+
+
+def test_delete_events_empty_uids_rejected(service):
+    with pytest.raises(InvalidEventDataError, match="must not be empty"):
+        service.delete_events("Termine", [])
+
+
+def test_delete_events_over_200_uids_rejected(service):
+    uids = [f"u-{i}" for i in range(201)]
+    with pytest.raises(InvalidEventDataError, match="at most 200 event UIDs"):
+        service.delete_events("Termine", uids)
+
+
+def test_update_events_conflict_recorded_per_uid(service, principal):
+    obj1 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    obj1.save.side_effect = caldav_error.ETagMismatchError()
+    event_cal.event_by_uid.return_value = obj1
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events("Termine", ["u1"], event_mapping.EventFields(ort="Büro"))
+
+    assert res["fehlgeschlagen"] == 1
+    assert res["ergebnisse"][0]["status"] == "fehler"
+    assert "conflicting edit" in res["ergebnisse"][0]["fehler"].lower()
+
+
+def test_delete_events_stops_when_the_server_refuses_a_delete(service, principal):
+    """caldav's DELETE is unconditional, so a failure here is the server refusing.
+
+    Unlike an unknown UID, that says nothing about this one event - it is a
+    reason to stop deleting rather than to work through the rest of the list.
+    """
+    obj1 = _make_event_obj()
+    obj2 = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    obj1.delete.side_effect = caldav_error.ConsistencyError("server said no")
+    event_cal.event_by_uid.side_effect = lambda uid: obj1 if uid == "u1" else obj2
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError):
+        service.delete_events("Termine", ["u1", "u2"])
+
+    obj2.delete.assert_not_called()
+
+
 # --- list_events ---
 
 
@@ -4728,3 +4971,103 @@ def test_list_tags_sorts_ties_case_insensitively(service, principal):
         {"tag": "apfel", "anzahl": 1},
         {"tag": "Zebra", "anzahl": 1},
     ]
+
+
+def test_update_events_recovers_from_a_stale_collection_cache(service, principal):
+    """A cached calendar gone stale must not report every UID as missing."""
+    obj1 = _make_event_obj()
+    obj2 = _make_event_obj()
+    stale_cal = _make_calendar("Termine", components=["VEVENT"])
+    stale_cal.event_by_uid.side_effect = caldav_error.NotFoundError()
+    fresh_cal = _make_calendar("Termine", components=["VEVENT"])
+    fresh_cal.event_by_uid.side_effect = lambda uid: obj1 if uid == "u1" else obj2
+
+    principal.calendars.side_effect = [[stale_cal], [fresh_cal], [fresh_cal]]
+
+    res = service.update_events("Termine", ["u1", "u2"], event_mapping.EventFields(ort="Büro"))
+
+    assert res["erfolgreich"] == 2
+    assert res["fehlgeschlagen"] == 0
+    assert fresh_cal.event_by_uid.call_count == 2
+
+
+def test_delete_events_refreshes_the_collection_at_most_once(service, principal):
+    """Otherwise every missing UID would cost a fresh listing of all collections."""
+    obj = _make_event_obj()
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+
+    def side_effect(uid):
+        if uid.startswith("gone"):
+            raise caldav_error.NotFoundError()
+        return obj
+
+    event_cal.event_by_uid.side_effect = side_effect
+    principal.calendars.return_value = [event_cal]
+
+    res = service.delete_events("Termine", ["gone", "gone-too", "da"])
+
+    assert [entry["status"] for entry in res["ergebnisse"]] == ["fehler", "fehler", "ok"]
+    # One refresh for the first miss, none afterwards: two listings in total.
+    assert principal.calendars.call_count == 2
+
+
+def test_update_events_accepts_an_all_day_ende_without_a_start(service, principal):
+    """Patching only `ende` on all-day events must not be rejected up front."""
+    all_day = Event()
+    all_day.add("uid", "ganztag")
+    all_day.add("dtstart", date(2026, 8, 3))
+    all_day.add("dtend", date(2026, 8, 4))
+    event_obj = _make_event_obj(all_day)
+
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = event_obj
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events(
+        "Termine", ["ganztag"], event_mapping.EventFields(ende="2026-08-05")
+    )
+
+    assert res["erfolgreich"] == 1
+    # Inclusive last day 2026-08-05 is stored as the exclusive 2026-08-06.
+    assert all_day.decoded("dtend") == date(2026, 8, 6)
+
+
+def test_update_events_reports_a_patch_that_does_not_fit_one_event(service, principal):
+    """A timed `ende` cannot apply to an all-day event - that is that event's problem.
+
+    Aborting here would leave the events already written in the batch changed
+    and the rest untouched, with no report of where it stopped.
+    """
+    timed = _make_vevent(uid="timed")
+    all_day = Event()
+    all_day.add("uid", "ganztag")
+    all_day.add("dtstart", date(2026, 8, 3))
+
+    objs = {"timed": _make_event_obj(timed), "ganztag": _make_event_obj(all_day)}
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: objs[uid]
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events(
+        "Termine",
+        ["ganztag", "timed"],
+        event_mapping.EventFields(ende="2026-08-10T12:00:00+02:00"),
+    )
+
+    assert res["erfolgreich"] == 1
+    assert res["fehlgeschlagen"] == 1
+    assert res["ergebnisse"][0]["uid"] == "ganztag"
+    assert "all-day" in res["ergebnisse"][0]["fehler"]
+    assert res["ergebnisse"][1] == {"uid": "timed", "status": "ok"}
+    objs["timed"].save.assert_called_once()
+    objs["ganztag"].save.assert_not_called()
+
+
+def test_update_events_conflict_message_speaks_of_events(service, principal):
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = TaskConflictError("stale copy")
+    principal.calendars.return_value = [event_cal]
+
+    res = service.update_events("Termine", ["u1"], event_mapping.EventFields(ort="Büro"))
+
+    assert "Event 'u1' was modified by another client" in res["ergebnisse"][0]["fehler"]
