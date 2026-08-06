@@ -634,6 +634,40 @@ replaces the whole list and would overwrite everyone else's replies too.
 
 ---
 
+## `update_events(kalender_name, event_uids, ...)`
+
+Batch updates up to 200 events in a single calendar with the same field patch.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the calendar containing the events |
+| `event_uids` | array of strings | yes | UIDs of events to update (max 200) |
+| (all other parameters) | | no | Same optional fields and `felder_leeren` options as `update_event` |
+
+Returns:
+```json
+{
+  "kalender_name": "Termine",
+  "erfolgreich": 58,
+  "fehlgeschlagen": 2,
+  "ergebnisse": [
+    {"uid": "uid1", "status": "ok"},
+    {"uid": "uid2", "status": "fehler", "fehler": "Event 'uid2' was not found."}
+  ]
+}
+```
+
+Contract and behaviour:
+- **Up-front patch validation guarantee**: The field patch is validated ONCE up front (invalid RRULE, unknown `felder_leeren` entry, invalid status, empty patch, etc.) and fails hard before modifying any event. If the patch is invalid, zero events are written.
+- **Patch vs. individual event**: Whether the patch *fits* a given event is per-event - a timed `ende` cannot apply to an all-day event, for instance. Such an event is reported as a failed entry; the batch is not aborted.
+- **Calendar resolution**: Resolved once for the entire call, not per UID.
+- **Deduplication**: Duplicate UIDs in `event_uids` are deduplicated while preserving the order of first occurrence.
+- **Limit**: Maximum 200 UIDs per call. Passing more than 200 UIDs or an empty list raises an error.
+- **Partial-failure contract**: A failure on a single UID (e.g. event not found or ETag conflict) does not abort the batch; each UID gets its own entry in `ergebnisse`, and the order matches `event_uids` after deduplication. Server-wide errors (auth failure, missing calendar, connection error) propagate as exceptions immediately.
+- **Stale cache**: If the cached calendar has gone stale, resolution is refreshed once for the whole batch instead of reporting every UID as missing.
+
+---
+
 ## `respond_to_event(kalender_name, event_uid, antwort, kommentar=None)`
 
 Replies to a calendar invitation: finds **your own** `ATTENDEE` entry on the
@@ -660,6 +694,39 @@ send any mail itself.
 ## `delete_event(kalender_name, event_uid)`
 
 Permanently deletes the event.
+
+---
+
+## `delete_events(kalender_name, event_uids)`
+
+Batch deletes up to 200 events from a single calendar.
+
+> **Irreversible**, and a batch multiplies the damage a wrong UID list does. Confirm the list with the user before calling this.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the calendar containing the events |
+| `event_uids` | array of strings | yes | UIDs of events to delete (max 200) |
+
+Returns:
+```json
+{
+  "kalender_name": "Termine",
+  "erfolgreich": 2,
+  "fehlgeschlagen": 0,
+  "ergebnisse": [
+    {"uid": "uid1", "status": "ok"},
+    {"uid": "uid2", "status": "ok"}
+  ]
+}
+```
+
+Contract and behaviour:
+- **Calendar resolution**: Resolved once for the entire call.
+- **Deduplication**: Duplicate UIDs in `event_uids` are deduplicated so each event is deleted at most once, preserving the order of first occurrence.
+- **Limit**: Maximum 200 UIDs per call. Passing more than 200 UIDs or an empty list raises an error.
+- **Partial-failure contract**: Each UID gets its own entry in `ergebnisse`. Per-UID errors (event not found) are recorded in `ergebnisse`, while server-wide errors (auth failure, missing calendar, connection error) propagate as exceptions immediately.
+- **Stale cache**: If the cached calendar has gone stale, resolution is refreshed once for the whole batch instead of reporting every UID as missing.
 
 ---
 
