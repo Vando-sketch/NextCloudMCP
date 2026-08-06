@@ -92,17 +92,34 @@ Result — one dict per task:
 ]
 ```
 
-`erinnerungen` lists all alarms set on the task as relative duration strings (e.g. `"-P1D"`,
+`erinnerungen` lists the task's alarms as relative duration strings (e.g. `"-P1D"`,
 `"-PT30M"`) or absolute ISO 8601 datetimes with offset (e.g. `"2026-08-07T09:00:00+00:00"`),
-matching the format `create_task`/`update_task` accepts. Absolute values always read back in
-UTC, so `"...Z"` and `"...+02:00"` input come back as `"+00:00"` — semantically identical,
-not byte-identical.
+matching the format `create_task`/`update_task` accepts. Reading a reminder and writing it
+back is safe: the alarm is recognized as already present and left exactly as it is.
 
-Two details of an alarm have no slot in this format and are therefore lost when a read-back
-value is written again: whether a relative reminder was anchored to the due date or the start
-date (writing it back re-derives that from the task's own dates — `faellig_datum` wins), and a
-non-display alarm action (`EMAIL`/`AUDIO`) written by another client, which becomes a display
-reminder. For reminders this server created itself, the round trip is exact.
+Two things about the strings themselves:
+
+- Durations come back in their canonical spelling, so `"-P1W"` reads back as `"-P7D"` and
+  `"-PT90M"` as `"-PT1H30M"` — the same trigger, a different string.
+- Absolute values keep the timezone they were stored in, and `"...Z"` input reads back as
+  `"+00:00"` — again the same instant, not the same characters.
+
+**What is *not* listed.** Only alarms whose trigger this format can express appear here.
+An alarm is left out when it is anchored differently from the anchor a write would give it
+(a start-anchored alarm on a task that has a `faellig_datum`, since writing `"-PT30M"` back
+anchors it to the due date), when its trigger is a bare date, a repeated property or missing
+entirely, or when its timezone name resolves to no zone this server knows (common Windows
+and Evolution zone names do resolve). Such alarms still exist on the task and are **never
+touched by a write** — passing `erinnerungen` replaces only the reminders you can see. To
+remove every alarm including those, clear `"erinnerungen"` via `felder_leeren`.
+
+**What a write does not carry over.** For the alarms that *are* listed, the string form has
+no slot for a non-display action (`EMAIL`/`AUDIO`), an `ATTACH`, or `DURATION`/`REPEAT`
+(alarm self-repetition). Those survive as long as that reminder stays in the list you write
+back; changing a reminder's *time* replaces the alarm with a plain display one. For a
+guaranteed verbatim round trip of everything — including a foreign client's alarms and their
+dismissed state — use `export_calendar`/`import_ics`.
+
 `uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
@@ -167,8 +184,13 @@ Each entry is either:
   before), `"-PT15M"` (15 minutes before). Anchored to `faellig_datum`
   (`TRIGGER;RELATED=END`) when the task has one, otherwise to `start_datum`
   (`RELATED=START`). A relative reminder on a task with neither date is an error.
+  The leading `-` is what makes it fire *before* the date: a positive duration
+  (`"PT30M"`) is valid and means half an hour *after* it.
 - an **absolute** ISO 8601 datetime, e.g. `"2026-07-19T09:00:00+02:00"`. Stored as a UTC
-  `TRIGGER;VALUE=DATE-TIME` (values without an offset are assumed to already be UTC; input ending in `"...Z"` reads back as `"+00:00"` - semantically identical, not byte-identical).
+  `TRIGGER;VALUE=DATE-TIME` (values without an offset are assumed to already be UTC).
+
+Passing the same reminder twice — including two spellings of the same trigger, e.g.
+`"-P1W"` and `"-P7D"` — creates one alarm, not two.
 
 Example call:
 
@@ -205,9 +227,12 @@ plus):
 Only fields explicitly present in the call are modified; everything else on the task
 (including fields this server doesn't model) is preserved. Two things to know:
 
-- Passing `erinnerungen` **replaces all existing reminders** with the new list. Pass
-  `[]` to remove all reminders (equivalent to clearing `"erinnerungen"` via
-  `felder_leeren`).
+- Passing `erinnerungen` **replaces the reminders `list_tasks` shows** with the new list.
+  A reminder that is already there is left untouched (keeping the dismissed state and any
+  detail this format has no slot for), one that is missing from the list is removed, and an
+  alarm the task carries but `erinnerungen` cannot express (see `list_tasks`) is never
+  touched. Pass `[]` to remove the visible reminders; clearing `"erinnerungen"` via
+  `felder_leeren` removes *every* alarm, including the ones that were never listed.
 - A scalar field left as `None`/omitted is left unchanged. To actually remove a
   property (e.g. delete a due date), list its name in `felder_leeren` instead.
 
@@ -407,7 +432,7 @@ mapping:
 | `sichtbarkeit` | `CLASS` | same values as tasks |
 | `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO;COUNT=10"` |
 | `ausnahme_daten` | `EXDATE` | list of ISO dates/datetimes: occurrences of the series to skip |
-| `erinnerungen` | `VALARM` | relative durations (e.g. `"-PT30M"`) trigger before `start`; absolute ISO datetimes as-is |
+| `erinnerungen` | `VALARM` | relative durations (e.g. `"-PT30M"`) trigger before `start`; absolute ISO datetimes as-is. Same read/write rules as tasks — see `list_tasks` |
 | `url` | `URL` | |
 | `verknuepfte_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of a task this event reserves time for |
 | `teilnehmer` | `ATTENDEE` (one per entry) | list of attendee dicts, see below |
@@ -459,9 +484,14 @@ Example:
 ## `update_event(kalender_name, event_uid, ...)`
 
 Same fields as `create_event`, all optional. Only fields you pass are changed;
-`erinnerungen` and `ausnahme_daten` replace all existing entries, and so does
-`teilnehmer` — passing it **replaces the entire attendee list**, it does not
-add to it. `felder_leeren` removes properties entirely — accepted names:
+`ausnahme_daten` replaces all existing entries, and so does `teilnehmer` —
+passing it **replaces the entire attendee list**, it does not add to it.
+`erinnerungen` replaces the reminders `list_events` shows, on the same terms
+as `update_task` (reminders already present stay untouched, alarms the format
+cannot express are never touched). A reminder anchored to the *end* of an
+event is one of those: it has no `erinnerungen` spelling, since writing
+`"-PT30M"` back would anchor it to the start and move it by the event's whole
+duration. `felder_leeren` removes properties entirely — accepted names:
 `ende`, `ort`, `beschreibung`, `tags`, `status`, `sichtbarkeit`,
 `wiederholung`, `ausnahme_daten`, `erinnerungen`, `url`,
 `verknuepfte_aufgabe`, `teilnehmer` (`titel` and `start` cannot be cleared; a
@@ -809,6 +839,11 @@ containing every task/event in it.
 Built with a single `PRODID`/`VERSION` header; a recurring event/task and its
 override instances are kept together, and `VTIMEZONE` components are
 de-duplicated by `TZID`.
+
+This pair is the lossless path for anything the German field names don't
+model. `VALARM`s in particular go out and come back verbatim — action,
+`ATTACH`, `DURATION`/`REPEAT`, the `RELATED` anchor and the dismissed state
+(`ACKNOWLEDGED`) included — where `erinnerungen` only carries a trigger time.
 
 ### `import_ics(kalender_name, ics)`
 
