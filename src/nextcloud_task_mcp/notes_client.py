@@ -115,6 +115,10 @@ class NotesService:
         response = await self._request("GET", f"notes/{notiz_id}")
         return parse_note(response.json())
 
+    async def delete_note(self, notiz_id: int) -> None:
+        """Permanently delete a note by id."""
+        await self._request("DELETE", f"notes/{notiz_id}")
+
     async def create_note(self, fields: NoteFields) -> dict[str, Any]:
         """Create a new note and return it, parsed like `get_note`."""
         if fields.titel is None:
