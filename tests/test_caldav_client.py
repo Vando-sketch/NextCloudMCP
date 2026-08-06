@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -4473,3 +4474,257 @@ def test_move_fallback_reports_unreadable_source_before_writing(
 
     target.save_event.assert_not_called()
     event_obj.delete.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# list_tags
+# ------------------------------------------------------------------
+
+
+def _make_tag_event_obj(categories: list[str]) -> MagicMock:
+    event = Event()
+    event.add("uid", f"e-{uuid.uuid4().hex[:6]}")
+    event.add("summary", "Event")
+    event.add("dtstart", datetime(2026, 8, 1, 10, 0, tzinfo=timezone.utc))
+    if categories:
+        event.add("categories", categories)
+    obj = MagicMock()
+    obj.icalendar_component = event
+    return obj
+
+
+def _make_tag_todo_obj(categories: list[str], completed: bool = False) -> MagicMock:
+    todo = Todo()
+    todo.add("uid", f"t-{uuid.uuid4().hex[:6]}")
+    todo.add("summary", "Task")
+    if completed:
+        todo.add("status", "COMPLETED")
+        todo.add("completed", datetime.now(timezone.utc))
+    if categories:
+        todo.add("categories", categories)
+    obj = MagicMock()
+    obj.icalendar_component = todo
+    return obj
+
+
+def test_list_tags_aggregation_sorting_and_case_folding(service, principal):
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_events, cal_tasks]
+
+    cal_events.events.return_value = [
+        _make_tag_event_obj(["Arbeit", "CLI-Tool"]),
+        _make_tag_event_obj(["arbeit"]),
+        # "Zukunft" is seen before "Doku" and sorts after it, so the
+        # alphabetical tie-break has to do real work for the two counts of 1.
+        _make_tag_event_obj(["Zukunft"]),
+    ]
+    cal_tasks.todos.return_value = [
+        _make_tag_todo_obj(["CLI-Tool", "arbeit"]),
+        _make_tag_todo_obj(["Doku"]),
+    ]
+
+    result = service.list_tags(calendar_names=None, list_names=None)
+
+    assert result == [
+        # "arbeit" twice, "Arbeit" once: the majority spelling is reported.
+        {"tag": "arbeit", "anzahl": 3},
+        {"tag": "CLI-Tool", "anzahl": 2},
+        {"tag": "Doku", "anzahl": 1},
+        {"tag": "Zukunft", "anzahl": 1},
+    ]
+
+
+def test_list_tags_reported_spelling_does_not_depend_on_read_order(service, principal):
+    """Two identical calls must not disagree because the server reordered things."""
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [cal_events]
+
+    minority_first = [
+        _make_tag_event_obj(["ARBEIT"]),
+        _make_tag_event_obj(["Arbeit"]),
+        _make_tag_event_obj(["Arbeit"]),
+    ]
+    cal_events.events.return_value = minority_first
+    assert service.list_tags(list_names=[]) == [{"tag": "Arbeit", "anzahl": 3}]
+
+    cal_events.events.return_value = list(reversed(minority_first))
+    assert service.list_tags(list_names=[]) == [{"tag": "Arbeit", "anzahl": 3}]
+
+
+def test_list_tags_breaks_spelling_ties_alphabetically(service, principal):
+    """Equally common spellings still have to resolve to one stable answer."""
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [cal_events]
+
+    cal_events.events.return_value = [
+        _make_tag_event_obj(["arbeit"]),
+        _make_tag_event_obj(["Arbeit"]),
+    ]
+
+    assert service.list_tags(list_names=[]) == [{"tag": "Arbeit", "anzahl": 2}]
+
+
+def test_list_tags_only_calendars_or_only_lists(service, principal):
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_events, cal_tasks]
+
+    cal_events.events.return_value = [_make_tag_event_obj(["EventTag"])]
+    cal_tasks.todos.return_value = [_make_tag_todo_obj(["TaskTag"])]
+
+    events_only = service.list_tags(calendar_names=["Termine"], list_names=[])
+    assert events_only == [{"tag": "EventTag", "anzahl": 1}]
+
+    tasks_only = service.list_tags(calendar_names=[], list_names=["Aufgaben"])
+    assert tasks_only == [{"tag": "TaskTag", "anzahl": 1}]
+
+    both = service.list_tags(calendar_names=["Termine"], list_names=["Aufgaben"])
+    assert len(both) == 2
+
+
+def test_list_tags_empty_list_vs_none_behaviour(service, principal):
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_events, cal_tasks]
+
+    cal_events.events.return_value = [_make_tag_event_obj(["EventTag"])]
+    cal_tasks.todos.return_value = [_make_tag_todo_obj(["TaskTag"])]
+
+    # both [] -> returns [] without asking server
+    assert service.list_tags(calendar_names=[], list_names=[]) == []
+    cal_events.events.assert_not_called()
+    cal_tasks.todos.assert_not_called()
+
+    # calendar_names=None, list_names=[] -> all calendars, no lists
+    res_cal_only = service.list_tags(calendar_names=None, list_names=[])
+    assert res_cal_only == [{"tag": "EventTag", "anzahl": 1}]
+
+    # calendar_names=[], list_names=None -> no calendars, all lists
+    res_tasks_only = service.list_tags(calendar_names=[], list_names=None)
+    assert res_tasks_only == [{"tag": "TaskTag", "anzahl": 1}]
+
+
+def test_list_tags_dual_component_collection_counted_once(service, principal):
+    cal_mixed = _make_calendar(
+        "Mixed", "https://cloud.example.com/dav/mixed/", components=["VEVENT", "VTODO"]
+    )
+    principal.calendars.return_value = [cal_mixed]
+
+    cal_mixed.events.return_value = [_make_tag_event_obj(["SharedTag"])]
+    cal_mixed.todos.return_value = [_make_tag_todo_obj(["SharedTag"])]
+
+    result = service.list_tags(calendar_names=None, list_names=None)
+    assert result == [{"tag": "SharedTag", "anzahl": 2}]
+
+
+def test_list_tags_includes_completed_tasks(service, principal):
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_tasks]
+
+    cal_tasks.todos.return_value = [
+        _make_tag_todo_obj(["CompletedTag"], completed=True),
+        _make_tag_todo_obj(["OpenTag"], completed=False),
+    ]
+
+    result = service.list_tags(calendar_names=None, list_names=None)
+    cal_tasks.todos.assert_called_with(include_completed=True)
+    assert len(result) == 2
+    tags_found = {r["tag"] for r in result}
+    assert "CompletedTag" in tags_found
+    assert "OpenTag" in tags_found
+
+
+def test_list_tags_no_tags_returns_empty(service, principal):
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_events, cal_tasks]
+
+    cal_events.events.return_value = [_make_tag_event_obj([])]
+    cal_tasks.todos.return_value = [_make_tag_todo_obj([])]
+
+    assert service.list_tags(calendar_names=None, list_names=None) == []
+
+
+def test_list_tags_unknown_calendar_name_raises(service, principal):
+    principal.calendars.return_value = []
+    with pytest.raises(CalendarNotFoundError):
+        service.list_tags(calendar_names=["UnknownCal"])
+
+
+def test_list_tags_unknown_task_list_name_raises(service, principal):
+    principal.calendars.return_value = []
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tags(list_names=["UnknownList"])
+
+
+def test_list_tags_accepts_single_string_arguments(service, principal):
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_events, cal_tasks]
+
+    cal_events.events.return_value = [_make_tag_event_obj(["StringCal"])]
+    cal_tasks.todos.return_value = [_make_tag_todo_obj(["StringList"])]
+
+    # Pass strings instead of lists
+    result = service.list_tags(calendar_names="Termine", list_names="Aufgaben")
+    assert len(result) == 2
+
+
+def test_list_tags_repeated_name_does_not_double_count(service, principal):
+    """A name listed twice must not read its collection twice."""
+    cal_tasks = _make_calendar(
+        "Aufgaben", "https://cloud.example.com/dav/aufgaben/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [cal_tasks]
+
+    cal_tasks.todos.return_value = [_make_tag_todo_obj(["Doppelt"])]
+
+    result = service.list_tags(calendar_names=[], list_names=["Aufgaben", "Aufgaben"])
+
+    assert result == [{"tag": "Doppelt", "anzahl": 1}]
+    assert cal_tasks.todos.call_count == 1
+
+
+def test_list_tags_sorts_ties_case_insensitively(service, principal):
+    """A capitalized tag must not jump ahead of every lowercase one."""
+    cal_events = _make_calendar(
+        "Termine", "https://cloud.example.com/dav/termine/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [cal_events]
+
+    cal_events.events.return_value = [
+        _make_tag_event_obj(["Zebra"]),
+        _make_tag_event_obj(["apfel"]),
+    ]
+
+    assert service.list_tags(list_names=[]) == [
+        {"tag": "apfel", "anzahl": 1},
+        {"tag": "Zebra", "anzahl": 1},
+    ]
