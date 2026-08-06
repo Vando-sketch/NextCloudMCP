@@ -507,6 +507,23 @@ def build_server(
         return {"uid": task_uid}
 
     @mcp.tool
+    async def move_task(list_name: str, task_uid: str, ziel_liste: str) -> dict[str, str]:
+        """Verschiebt eine Aufgabe in eine andere Aufgabenliste.
+
+        Args:
+            list_name: Anzeige-Name der Quell-Aufgabenliste.
+            task_uid: UID der zu verschiebenden Aufgabe.
+            ziel_liste: Anzeige-Name der Ziel-Aufgabenliste.
+
+        Returns:
+            {"uid": ..., "von": Quell-Liste, "nach": Ziel-Liste,
+            "methode": "MOVE" | "kopiert"}
+        """
+
+        res: dict[str, str] = await _call(caldav_service.move_task, list_name, task_uid, ziel_liste)
+        return res
+
+    @mcp.tool
     async def list_calendars() -> list[dict[str, Any]]:
         """List all Nextcloud event calendars (VEVENT); task-only lists are excluded.
 
@@ -817,6 +834,25 @@ def build_server(
         """
         await _call(caldav_service.delete_event, kalender_name, event_uid)
         return {"uid": event_uid}
+
+    @mcp.tool
+    async def move_event(kalender_name: str, event_uid: str, ziel_kalender: str) -> dict[str, str]:
+        """Verschiebt einen Kalendereintrag in einen anderen Kalender.
+
+        Args:
+            kalender_name: Anzeige-Name des Quell-Kalenders.
+            event_uid: UID des zu verschiebenden Kalendereintrags.
+            ziel_kalender: Anzeige-Name des Ziel-Kalenders.
+
+        Returns:
+            {"uid": ..., "von": Quell-Kalender, "nach": Ziel-Kalender,
+            "methode": "MOVE" | "kopiert"}
+        """
+
+        res: dict[str, str] = await _call(
+            caldav_service.move_event, kalender_name, event_uid, ziel_kalender
+        )
+        return res
 
     @mcp.tool
     async def respond_to_event(

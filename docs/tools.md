@@ -530,6 +530,40 @@ Returns `{"uid": "<task_uid>"}`.
 
 ---
 
+## `move_task(list_name, task_uid, ziel_liste)`
+
+Moves a task (VTODO) from one task list to another.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_name` | string | yes | Display name of the source task list |
+| `task_uid` | string | yes | UID of the task to move |
+| `ziel_liste` | string | yes | Display name of the target task list |
+
+Behaviour:
+- Resolves source and target task lists. Target must support VTODO tasks; if the target exists but does not accept tasks (e.g. an events-only calendar), an error is raised naming both target and component kind before any object is touched.
+- Target is resolved BEFORE touching the source task object.
+- If source == target (same collection URL), returns no-op success immediately with `"methode": "MOVE"`.
+- Preferred path: issues a CalDAV `MOVE` request on the object's URL with `Destination` and `Overwrite: F`, preserving server-side URL identity, UID, ETags, and all properties.
+- Fallback path: if the server rejects `MOVE` with HTTP 403, 405, 409, 501, or 502, the entire calendar object (carrying UID, VTIMEZONEs, VALARMs, RRULE, EXDATE, RELATED-TO, etc.) is copied into the target list with `save_todo` (guarded with `no_overwrite`), verified by re-fetching, and only then is the source task deleted. The fallback NEVER deletes the source before a verified write.
+- If an object with that UID already exists in the target collection, the operation is refused (HTTP 412 or pre-check on fallback) with a speaking error.- The read-back check compares instances, not just the UID: for a recurring object the master and every `RECURRENCE-ID` override must be present in the target, otherwise the copy is reported as incomplete and the original is kept.
+
+Result shape:
+
+```json
+{
+  "uid": "0f8ba4a4-...",
+  "von": "Privat",
+  "nach": "Arbeit",
+  "methode": "MOVE"
+}
+```
+
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+
+---
+
+
 ## Task-list management
 
 ### `create_task_list(display_name)`
@@ -802,6 +836,40 @@ send any mail itself.
 Permanently deletes the event.
 
 ---
+
+## `move_event(kalender_name, event_uid, ziel_kalender)`
+
+Moves an event (VEVENT) from one calendar to another.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_name` | string | yes | Display name of the source calendar |
+| `event_uid` | string | yes | UID of the event to move |
+| `ziel_kalender` | string | yes | Display name of the target calendar |
+
+Behaviour:
+- Resolves source and target calendars. Target must support VEVENT events; if the target exists but does not accept events (e.g. a tasks-only list), an error is raised naming both target and component kind before any object is touched.
+- Target is resolved BEFORE touching the source event object.
+- If source == target (same collection URL), returns no-op success immediately with `"methode": "MOVE"`.
+- Preferred path: issues a CalDAV `MOVE` request on the object's URL with `Destination` and `Overwrite: F`, preserving server-side URL identity, UID, ETags, and all properties.
+- Fallback path: if the server rejects `MOVE` with HTTP 403, 405, 409, 501, or 502, the entire calendar object (carrying UID, VTIMEZONEs, VALARMs, RRULE, EXDATE, RELATED-TO, etc.) is copied into the target calendar with `save_event` (guarded with `no_overwrite`), verified by re-fetching, and only then is the source event deleted. The fallback NEVER deletes the source before a verified write.
+- If an object with that UID already exists in the target collection, the operation is refused (HTTP 412 or pre-check on fallback) with a speaking error.- The read-back check compares instances, not just the UID: for a recurring object the master and every `RECURRENCE-ID` override must be present in the target, otherwise the copy is reported as incomplete and the original is kept.
+
+Result shape:
+
+```json
+{
+  "uid": "event-uid",
+  "von": "QuellKalender",
+  "nach": "ZielKalender",
+  "methode": "MOVE"
+}
+```
+
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+
+---
+
 
 ## `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")`
 
