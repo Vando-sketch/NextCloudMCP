@@ -10,7 +10,7 @@ Values for enum-like fields:
 |---|---|
 | `prioritaet` | `"hoch"`, `"mittel"`, `"niedrig"` |
 | `sichtbarkeit` | `"öffentlich"`, `"privat"`, `"vertraulich"` |
-| `status` (in task results) | `"offen"`, `"erledigt"` |
+| `status` (tasks; `update_task`'s `status` parameter and its result key) | `"offen"`, `"in-arbeit"`, `"erledigt"`, `"abgesagt"` |
 | `status` (events) | `"bestätigt"`, `"vorläufig"`, `"abgesagt"` |
 | `beziehung` (`link_task_to_event`) | `"zeitblock"`, `"voraussetzung"` |
 | `farbe` | `"#RRGGBB"` or `"#RRGGBBAA"` |
@@ -20,6 +20,12 @@ Values for enum-like fields:
 | `typ` (`share_calendar`/`list_calendar_shares`) | `"benutzer"`, `"gruppe"` |
 | `status` (`list_calendar_shares`) | `"akzeptiert"`, `"ausstehend"`, `"abgelehnt"`, `"ungueltig"`, `"geloescht"`, or a raw lowercased status the server reported |
 | `typ` (`list_trash`) | `"aufgabe"`, `"termin"`, or `null` |
+
+> **BREAKING CHANGE**: Task `status` now has **four** possible values instead of two -
+> `"offen"`, `"in-arbeit"`, `"erledigt"`, `"abgesagt"` - and is settable via `update_task`'s
+> new `status` parameter (see below). Any code that only checked for `"offen"`/`"erledigt"`
+> should treat `"in-arbeit"`/`"abgesagt"` as "not erledigt" rather than assuming those are
+> the only two values.
 
 Dates are ISO 8601 strings. Rules applying everywhere a date/datetime is
 accepted (`start_datum`, `faellig_datum`, `start`, `ende`, `von`, `bis`,
@@ -66,7 +72,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `listen_namen` | list of strings | no | Task list display names to query; `null` = all task lists |
-| `nur_offene` | boolean | no (default `true`) | Exclude completed tasks |
+| `nur_offene` | boolean | no (default `true`) | Exclude completed *and* cancelled tasks (see note below) |
 | `faellig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
 | `faellig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
 | `limit` | integer | no | Max number of results; must be `> 0` |
@@ -82,6 +88,14 @@ A bare `list_tasks()` queries **every** task list on the account — one request
 per list — and returns every open task in all of them. Narrow it with
 `listen_namen`, a due-date bound or `limit` unless the whole account really is
 what you want.
+
+`nur_offene=True` (the default) does **not** just exclude `status="erledigt"` -
+it excludes `status="abgesagt"` too. This isn't a choice this server layers on
+top: it's the underlying `caldav` library's own three-way "pending" query
+(`Calendar.todos(include_completed=...)`), which treats any `VTODO` whose
+`STATUS` is `COMPLETED` *or* `CANCELLED` (or that has a `COMPLETED` timestamp
+set at all) as not-pending. A cancelled task is therefore **not** treated as
+"still open" - pass `nur_offene=False` to see it.
 
 Result — one dict per task:
 
@@ -382,6 +396,7 @@ plus):
 |---|---|---|---|
 | `list_name` | string | yes | Task list containing the task |
 | `task_uid` | string | yes | UID of the task to change |
+| `status` | string enum | no | `"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"` -> `STATUS` (see below) |
 | `felder_leeren` | list of strings | no | Field names to clear (see below) |
 
 Only fields explicitly present in the call are modified; everything else on the task
@@ -402,6 +417,36 @@ Only fields explicitly present in the call are modified; everything else on the 
   or `faellig_datum` from before — but clearing the task's only anchor
   (`felder_leeren=["faellig_datum"]`) while a recurrence is set or remains is
   rejected the same way.
+
+### Status (`status`)
+
+**BREAKING CHANGE**: `status` used to be an implicit, read-only two-value field
+(`"offen"`/`"erledigt"`, derived solely from `complete_task`). It is now settable
+directly via `update_task`, with two more values:
+
+- `"erledigt"` behaves exactly like `complete_task`: sets `STATUS:COMPLETED`,
+  `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp.
+- `"offen"` is the **reopen** path — for a task completed by mistake, or one you
+  want to resume: removes the `COMPLETED` timestamp and resets `PERCENT-COMPLETE`
+  to `0`.
+- `"in-arbeit"` and `"abgesagt"` set `STATUS` (`IN-PROCESS`/`CANCELLED`
+  respectively) and keep whatever `PERCENT-COMPLETE` was recorded. Like
+  `"offen"`, they also drop a `COMPLETED` timestamp left over from an earlier
+  completion — without that, the task would report its new status while
+  staying invisible to `nur_offene=True`, which filters on the presence of
+  that timestamp (see the note under `list_tasks`).
+- If the same call *also* passes `fortschritt_prozent`, that explicit value wins
+  over whatever percentage `status` would otherwise derive — `status` is applied
+  first internally, then `fortschritt_prozent` (if given) overwrites it. So
+  `{"status": "erledigt", "fortschritt_prozent": 55}` ends up at `55`%, not `100`%.
+- An unknown value is a speaking error listing the four accepted labels; nothing is
+  written to the task in that case (no partial update).
+- `status` is **not** accepted in `felder_leeren` — there is nothing to "clear";
+  set `status="offen"` to reopen a task instead.
+
+Note the interaction with `nur_offene` above: setting `status="abgesagt"` removes
+the task from `list_tasks`'s default (`nur_offene=True`) results, the same as
+`"erledigt"` does.
 
 ### Clearing fields (`felder_leeren`)
 
@@ -440,6 +485,9 @@ Returns `{"uid": "<task_uid>"}`.
 
 Marks the task as done: `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED`
 timestamp (current UTC time). Returns `{"uid": "<task_uid>"}`.
+
+A task completed by mistake can be reopened with `update_task(status="offen")` (see
+the "Status" section above) — there is no separate "uncomplete" tool.
 
 Completing a parent task does **not** cascade to its subtasks.
 
@@ -818,22 +866,47 @@ event dicts with the same shape as `list_events` entries, each with an added
 
 ---
 
-## `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=60)`
+## `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)`
 
 Timeboxing: creates an event from an existing task and links the two (the
-`"zeitblock"` semantics above). `titel`, `notizen`→`beschreibung`,
-`ort` and `tags` are copied; the task itself is not modified.
+`"zeitblock"` semantics above). `titel`, `ort` and `tags` are always copied
+from the task; the task itself is not modified.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `start` | string (ISO 8601) | no | Defaults to the task's `faellig_datum`; fails if the task has neither |
+| `dauer_minuten` | integer | no | Event length in minutes from `start`; mutually exclusive with `ende` |
+| `ende` | string (ISO 8601) | no | Explicit event end, as an alternative to `dauer_minuten` |
+| `beschreibung` | string | no | Event description; `None` (default) inherits the task's `notizen`, `""` sets an empty description |
+| `erinnerungen` | list of strings | no | Same format as `create_event`'s `erinnerungen` -> `VALARM` |
+| `sichtbarkeit` | string enum | no | Same as tasks/events -> `CLASS` |
 
 - `start` defaults to the task's `faellig_datum`; if the task has none, the
   call fails and you must pass `start` explicitly.
-- A datetime start produces an event of `dauer_minuten` length; a date-only
-  start produces a one-day all-day event (`dauer_minuten` is ignored).
+- A date-only `start` produces a one-day all-day event; `ende` must then also
+  be a date (or omitted) — this is the same start/end consistency check
+  `create_event` uses, not a separate rule. A datetime `start` produces an
+  event of `dauer_minuten` length instead.
 - `dauer_minuten` is a real duration: a block that spans a daylight-saving
   change stays that many minutes long, rather than following the wall clock.
+  It has no effect on an all-day start — the event stays a one-day all-day
+  event unless `ende` gives it a later **date**. A *datetime* `ende` on an
+  all-day start is rejected with the same start/end type error `create_event`
+  raises (`start and ende must both be all-day dates or both be datetimes`),
+  not silently ignored.
+- `ende` and `dauer_minuten` are mutually exclusive — passing both is an error
+  naming both parameters. With **neither** given, the event runs 60 minutes
+  (unchanged from before this parameter split; `dauer_minuten` now defaults to
+  `None` rather than `60` purely so a call can tell "not given" apart from
+  "given as 60" — existing calls that only ever passed `dauer_minuten`
+  continue to behave identically).
 - The event is anchored to a timezone the same way `create_event` anchors one:
   a `start` naming an IANA zone keeps it, a numeric offset is stored as UTC,
   and a start taken from the task's `faellig_datum` (which is a bare instant —
   tasks store no zone) is anchored in the server's default timezone.
+- `beschreibung`: use `None` vs. `""` deliberately — `None` inherits the
+  task's `notizen` (the original behavior), an explicit `""` clears the
+  description instead of inheriting anything.
 
 Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
 
@@ -1146,6 +1219,10 @@ All failures come back as short, single-line MCP tool errors, for example:
   this task between your last read and this write; re-fetch it with `list_tasks` and
   retry the change.
 - `Unknown prioritaet 'dringend'. Expected one of: hoch, mittel, niedrig.`
+- `Unknown status 'fertig'. Expected one of: offen, in-arbeit, erledigt, abgesagt.` —
+  `update_task`'s `status` parameter; nothing is written to the task.
+- `ende and dauer_minuten cannot both be given; pass at most one to control how long
+  the event runs.` — `create_event_from_task`.
 - `Could not parse Erinnerung '1 Tag vorher': expected an ISO 8601 duration like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime.`
 - `Unknown felder_leeren entry/entries: telefonnummer. Expected one of: start_datum,
   faellig_datum, prioritaet, fortschritt_prozent, ort, url, tags, erinnerungen, notizen,

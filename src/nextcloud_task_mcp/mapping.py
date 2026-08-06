@@ -21,6 +21,18 @@ VISIBILITY_LABELS: dict[str, str] = {
     "privat": "PRIVATE",
     "vertraulich": "CONFIDENTIAL",
 }
+# RFC 5545 VTODO STATUS values <-> the German labels `update_task`'s `status`
+# parameter and `list_tasks`/`get_task`'s `status` result key use. "erledigt"
+# and "offen" existed before this map did (as the two-valued collapse
+# `parse_vtodo` used to do); "in-arbeit"/"abgesagt" are new. See
+# `task_status_label_to_ical`/`parse_vtodo` for the write/read sides.
+TASK_STATUS_LABELS: dict[str, str] = {
+    "offen": "NEEDS-ACTION",
+    "in-arbeit": "IN-PROCESS",
+    "erledigt": "COMPLETED",
+    "abgesagt": "CANCELLED",
+}
+_ICAL_TASK_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in TASK_STATUS_LABELS.items()}
 
 # Matches exactly "YYYY-MM-DD" (length 10). `date.fromisoformat` on Python
 # 3.11+ also accepts other forms (basic format, week dates, ...) that we do
@@ -78,6 +90,14 @@ class TaskFields:
 
     `ausnahme_daten`, when set, *replaces* the task's full EXDATE set (not an
     append), mirroring `EventFields.ausnahme_daten` down to the validation.
+
+    `status` (only settable via `update_task`, not `create_task` - a task is
+    always created open) is one of `TASK_STATUS_LABELS`: `"erledigt"` mirrors
+    `complete_task` (STATUS/PERCENT-COMPLETE/COMPLETED), `"offen"` is the
+    reopen path (removes COMPLETED, resets PERCENT-COMPLETE to 0), and
+    `"in-arbeit"`/`"abgesagt"` only set STATUS. If `fortschritt_prozent` is
+    also given in the same call, its explicit value wins over whatever
+    `status` would otherwise derive - see `apply_task_fields`'s write order.
     """
 
     titel: str | None = None
@@ -94,6 +114,7 @@ class TaskFields:
     uebergeordnete_aufgabe: str | None = None
     wiederholung: str | None = None
     ausnahme_daten: list[str] | None = None
+    status: str | None = None
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
@@ -268,6 +289,16 @@ def ical_priority_to_label(value: int | None) -> str | None:
     if 6 <= value <= 9:
         return "niedrig"
     return None
+
+
+def task_status_label_to_ical(label: str) -> str:
+    """Map a German task status label to an RFC 5545 VTODO STATUS value."""
+    try:
+        return TASK_STATUS_LABELS[label]
+    except KeyError:
+        raise InvalidTaskDataError(
+            f"Unknown status '{label}'. Expected one of: {', '.join(TASK_STATUS_LABELS)}."
+        ) from None
 
 
 def visibility_label_to_ical(label: str) -> str:
@@ -1040,7 +1071,9 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     listed in `fields.clear` are removed from the component entirely (B3);
     clearing and setting the same field in one call, or naming an unknown
     field (including "titel", which cannot be cleared), raises
-    `InvalidTaskDataError`.
+    `InvalidTaskDataError`. "status" is deliberately absent from `_CLEAR_SPECS`
+    - setting `status="offen"` is the documented reset path, so there is
+    nothing left to clear.
 
     `start_datum`/`faellig_datum` keep the zone they name and are otherwise
     written in the zone the task's DTSTART already uses (`_anchored`), exactly
@@ -1101,6 +1134,31 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         _set(todo, "due", due_value)
     if fields.prioritaet is not None:
         _set(todo, "priority", priority_label_to_ical(fields.prioritaet))
+    if fields.status is not None:
+        # Runs *before* the fortschritt_prozent block below, deliberately:
+        # "erledigt"/"offen" both derive a PERCENT-COMPLETE value (100/0) as
+        # a side effect, but an explicit fortschritt_prozent in the same call
+        # must win over that derived value - writing status first and letting
+        # fortschritt_prozent's own `_set` run after is what makes the later
+        # write stick.
+        if fields.status == "erledigt":
+            mark_completed(todo)
+        else:
+            _set(todo, "status", task_status_label_to_ical(fields.status))
+            # A COMPLETED timestamp left behind by an earlier completion would
+            # outlive the status change and hide the task: caldav's pending
+            # filter (`todos(include_completed=False)`, used by nur_offene and
+            # by get_agenda) drops any VTODO that merely *has* a COMPLETED
+            # property, whatever its STATUS says. A task moved back to
+            # "in-arbeit" would then read as in progress and still be missing
+            # from every open-task listing, so no non-completed status may
+            # leave one behind.
+            if "completed" in todo:
+                del todo["completed"]
+            if fields.status == "offen":
+                # Reopening also undoes the 100% `mark_completed` wrote;
+                # "in-arbeit"/"abgesagt" keep whatever progress was recorded.
+                _set(todo, "percent-complete", 0)
     if fields.fortschritt_prozent is not None:
         if not 0 <= fields.fortschritt_prozent <= 100:
             raise InvalidTaskDataError(
@@ -1343,7 +1401,16 @@ def _trigger_zone(prop: Any) -> timezone | ZoneInfo | None:
 
 
 def parse_vtodo(component) -> dict[str, Any]:
-    """Parse an icalendar VTODO component into the server's German task dict."""
+    """Parse an icalendar VTODO component into the server's German task dict.
+
+    "status" is one of `TASK_STATUS_LABELS` ("offen"/"in-arbeit"/"erledigt"/
+    "abgesagt"). A missing STATUS property reads as "offen" per RFC 5545's own
+    default (NEEDS-ACTION); a STATUS value this server doesn't know (a foreign
+    client's extension, or a typo written directly via another CalDAV client)
+    also reads as "offen" rather than raising - this is a read path, and a
+    liberal one, same stance as `ical_role_to_label`/`RELTYPE_LABELS` on the
+    event side: an unrecognized value must never break a listing.
+    """
     priority = component.get("priority")
     percent = component.get("percent-complete")
     status = str(component.get("status", "NEEDS-ACTION")).upper()
@@ -1354,7 +1421,7 @@ def parse_vtodo(component) -> dict[str, Any]:
         "faellig_datum": _format_date_property(component, "due"),
         "prioritaet": ical_priority_to_label(int(priority)) if priority is not None else None,
         "fortschritt_prozent": int(percent) if percent is not None else 0,
-        "status": "erledigt" if status == "COMPLETED" else "offen",
+        "status": _ICAL_TASK_STATUS_TO_LABEL.get(status, "offen"),
         "ort": _get_text(component, "location"),
         "url": _get_text(component, "url"),
         "tags": _extract_categories(component),
