@@ -1056,6 +1056,37 @@ def build_server(
         )
 
     @mcp.tool
+    async def list_tags(
+        kalender_namen: list[str] | None = None,
+        listen_namen: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregierte Tags (CATEGORIES) und Häufigkeit über Sammlungen abrufen.
+
+        Liest alle VEVENT-Termine und VTODO-Aufgaben (inklusive erledigter Aufgaben)
+        aus den angegebenen Kalendern und Listen. Die Zusammenfassung erfolgt
+        case-insensitiv; als Tag-Name wird die häufigste Schreibweise gemeldet, bei
+        Gleichstand die alphabetisch erste - damit zwei gleiche Aufrufe nicht
+        unterschiedlich antworten, nur weil der Server anders sortiert hat.
+
+        HINWEIS: Dies ist eine aufwendige Operation, da die Sammlungen vollständig
+        ohne Zeitfenster ausgelesen werden; solange sie läuft, warten andere
+        Aufrufe auf dieselbe CalDAV-Verbindung.
+
+        Args:
+            kalender_namen: Liste von Kalendernamen. None = alle Kalender, [] = keine Kalender.
+            listen_namen: Liste von Aufgabenlisten-Namen. None = alle Listen, [] = keine Listen.
+
+        Returns:
+            Eine Liste von {"tag": Tag-Name, "anzahl": Anzahl} Dicts, sortiert nach
+            anzahl absteigend, bei Gleichstand alphabetisch nach tag.
+        """
+        return await _call(
+            caldav_service.list_tags,
+            calendar_names=kalender_namen,
+            list_names=listen_namen,
+        )
+
+    @mcp.tool
     async def get_free_busy(
         von: str,
         bis: str,
