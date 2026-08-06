@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 import pytest
-from icalendar import Todo
+from icalendar import Calendar, Todo
 
 from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.errors import InvalidTaskDataError
@@ -15,6 +15,21 @@ from nextcloud_task_mcp.mapping import TaskFields
 def _new_todo(uid: str = "task-1") -> Todo:
     todo = Todo()
     todo.add("uid", uid)
+    return todo
+
+
+def _todo_from_ics(body: str) -> Todo:
+    """Parse a VTODO out of real ICS text.
+
+    Foreign-client alarms are only ever seen through the parser, so the tests
+    for them build the component the same way instead of hand-assembling
+    `icalendar` objects into states parsing can never produce.
+    """
+    calendar = Calendar.from_ical(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n" + body + "END:VCALENDAR\n"
+    )
+    todo = calendar.walk("VTODO")[0]
+    assert isinstance(todo, Todo)
     return todo
 
 
@@ -203,11 +218,9 @@ def test_extract_alarms_round_trip_absolute():
         erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
     )
     parsed = mapping.parse_vtodo(todo)
-    # Note: "...Z" input reads back as "+00:00"
-    assert parsed["erinnerungen"] == [
-        "2026-08-07T09:00:00+00:00",
-        "2026-08-07T09:00:00+00:00",
-    ]
+    # Note: "...Z" input reads back as "+00:00", and both spellings name the
+    # same instant, so they collapse into one alarm.
+    assert parsed["erinnerungen"] == ["2026-08-07T09:00:00+00:00"]
 
 
 def test_extract_alarms_preserves_order():
@@ -225,25 +238,6 @@ def test_extract_alarms_no_valarm_returns_empty():
     assert parsed["erinnerungen"] == []
 
 
-def test_extract_alarms_skips_valarm_without_trigger_or_invalid_trigger():
-    from icalendar import Alarm
-
-    todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
-
-    alarm_without_trigger = Alarm()
-    alarm_without_trigger.add("action", "DISPLAY")
-    todo.add_component(alarm_without_trigger)
-
-    alarm_with_invalid_trigger = Alarm()
-    alarm_with_invalid_trigger.add("action", "DISPLAY")
-    alarm_with_invalid_trigger["trigger"] = "unsupported-trigger"
-    todo.add_component(alarm_with_invalid_trigger)
-
-    parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["-PT30M"]
-
-
 def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
     todo = _new_todo()
     _apply(
@@ -256,90 +250,261 @@ def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
     assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
 
 
+def _todo_with_tzid_trigger(tzid: str) -> Todo:
+    """A task carrying one absolute alarm at 11:00 in the zone `tzid` names.
+
+    `icalendar` resolves a TZID on DUE/DTSTART but leaves a VALARM's TRIGGER
+    naive, with the zone name in the property's parameters - so this is what
+    an absolute foreign reminder really looks like after parsing.
+    """
+    zone_param = f";TZID={tzid}" if tzid else ""
+    return _todo_from_ics(
+        f"""BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:foreign
+TRIGGER;VALUE=DATE-TIME{zone_param}:20260719T110000
+END:VALARM
+END:VTODO
+"""
+    )
+
+
 def test_extract_alarms_resolves_foreign_tzid_trigger():
     """A TRIGGER;TZID=... written by another client is not UTC.
 
-    `icalendar` leaves such a value naive and keeps the zone in the property's
-    parameters, so reading it as UTC would shift the reminder by the zone's
-    offset (two hours for Berlin in July).
+    Reading it as UTC would shift the reminder by the zone's offset (two hours
+    for Berlin in July). The value keeps its own zone on the way out, like
+    DTSTART/DUE do.
     """
-    from icalendar import Alarm
-
-    todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20")
-
-    alarm = Alarm()
-    alarm.add("action", "DISPLAY")
-    alarm.add("description", "Reminder")
-    alarm.add("trigger", datetime(2026, 7, 19, 11, 0, 0), parameters={"TZID": "Europe/Berlin"})
-    todo.add_component(alarm)
-
-    parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
+    todo = _todo_with_tzid_trigger("Europe/Berlin")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
-def test_extract_alarms_unknown_tzid_falls_back_to_utc():
-    from icalendar import Alarm
-
-    todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20")
-
-    alarm = Alarm()
-    alarm.add("action", "DISPLAY")
-    alarm.add("description", "Reminder")
-    alarm.add("trigger", datetime(2026, 7, 19, 11, 0, 0), parameters={"TZID": "Mars/Olympus"})
-    todo.add_component(alarm)
-
-    parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+00:00"]
+def test_extract_alarms_resolves_windows_tzid_trigger():
+    """Outlook writes Windows zone names, which `zoneinfo` does not know."""
+    todo = _todo_with_tzid_trigger("W. Europe Standard Time")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
-def test_extract_alarms_skips_date_valued_and_repeated_triggers():
-    """Neither wire form is one this server writes, but foreign clients do."""
-    from icalendar import Alarm
-
-    todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
-
-    date_trigger = Alarm()
-    date_trigger.add("action", "DISPLAY")
-    date_trigger.add("trigger", date(2026, 7, 19))
-    todo.add_component(date_trigger)
-
-    repeated_trigger = Alarm()
-    repeated_trigger.add("action", "DISPLAY")
-    repeated_trigger.add("trigger", timedelta(minutes=-30))
-    repeated_trigger.add("trigger", timedelta(minutes=-60))
-    todo.add_component(repeated_trigger)
-
-    parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+def test_extract_alarms_resolves_prefixed_tzid_trigger():
+    """Evolution and older clients prefix the IANA name with a namespace path."""
+    todo = _todo_with_tzid_trigger("/freeassociation.sourceforge.net/Europe/Berlin")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
-def test_extract_alarms_does_not_preserve_related_anchor():
-    """Documented, deliberate fidelity loss: `erinnerungen` has no RELATED slot.
+def test_extract_alarms_resolves_prefixed_three_segment_tzid_trigger():
+    """Some IANA names have three segments, so two trailing segments is not enough."""
+    todo = _todo_with_tzid_trigger("/softwarestudio.org/Olson_20011030_5/America/Indiana/Knox")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00-05:00"]
 
-    A foreign alarm anchored to DTSTART on a task that also has a DUE reads
-    back as a bare duration, and writing it back re-anchors it to DUE (see
-    `build_alarm`). Pinned here so the limitation can't drift unnoticed.
+
+def test_extract_alarms_naive_trigger_without_tzid_is_utc():
+    """RFC 5545 requires absolute triggers in UTC, so an unqualified one is taken at its word."""
+    todo = _todo_with_tzid_trigger("")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+00:00"]
+
+
+def test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm():
+    """An unknown zone name is not silently read as UTC.
+
+    Guessing a zone would move the reminder by hours, so the alarm is left out
+    of `erinnerungen` - and, being invisible, is left untouched by a write.
     """
-    todo = _new_todo()
-    _apply(
-        todo, titel="Task", start_datum="2026-07-15T09:00:00", faellig_datum="2026-07-20T10:00:00"
-    )
-    todo.add_component(mapping.build_alarm("-PT30M", "Task", has_due=False, has_start=True))
+    todo = _todo_with_tzid_trigger("Mars/Olympus")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+    _apply(todo, erinnerungen=["-PT30M"])
+
+    assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 2
+
+
+def test_extract_alarms_tzid_naming_a_tzdata_directory_does_not_crash():
+    """A TZID like "Europe" names a tzdata *directory*, not a zone."""
+    todo = _todo_with_tzid_trigger("Europe")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+
+_FOREIGN_ALARMS_ICS = """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DTSTART:20260715T090000Z
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:ours
+TRIGGER;RELATED=END:-PT30M
+END:VALARM
+BEGIN:VALARM
+ACTION:AUDIO
+DESCRIPTION:anchored to the start
+TRIGGER;RELATED=START:-PT15M
+UID:foreign-alarm-1
+ACKNOWLEDGED:20260714T100000Z
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:date-valued trigger
+TRIGGER;VALUE=DATE:20260719
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:repeated trigger
+TRIGGER;RELATED=END:-PT30M
+TRIGGER:-PT60M
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no trigger at all
+END:VALARM
+END:VTODO
+"""
+
+
+def test_extract_alarms_skips_alarms_the_string_form_cannot_express():
+    """Only alarms that would survive being written back unchanged are listed.
+
+    A START-anchored alarm on a task that has a DUE would be re-anchored to
+    DUE on write-back (`build_alarm` derives RELATED from the task's own
+    dates), so reporting it as a bare "-PT15M" would be a lie about when it
+    fires. Same for the trigger forms this server cannot write at all.
+    """
+    todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
     assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
 
-    rewritten = _new_todo()
-    _apply(
-        rewritten,
-        titel="Task",
-        start_datum="2026-07-15T09:00:00",
-        faellig_datum="2026-07-20T10:00:00",
-        erinnerungen=["-PT30M"],
+
+def test_apply_task_fields_preserves_alarms_it_cannot_express():
+    """Writing `erinnerungen` must not delete what the reader could not show."""
+    todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
+    # The first VALARM in the fixture is the one `erinnerungen` can express;
+    # every other one is a form this server has no string for.
+    unexpressible = [c.to_ical() for c in todo.subcomponents if c.name == "VALARM"][1:]
+
+    _apply(todo, erinnerungen=["-PT30M", "-P1D"])
+
+    kept = [c.to_ical() for c in todo.subcomponents if c.name == "VALARM"]
+    for alarm in unexpressible:
+        assert alarm in kept
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M", "-P1D"]
+
+
+def test_apply_task_fields_leaves_an_already_present_reminder_untouched():
+    """A reminder that is already there keeps its UID/ACKNOWLEDGED/ACTION.
+
+    Rebuilding it as a fresh DISPLAY alarm would drop the dismiss state, so a
+    reminder the user already clicked away could fire again.
+    """
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:EMAIL
+DESCRIPTION:dismissed already
+TRIGGER;RELATED=END:-PT30M
+UID:foreign-alarm-1
+ACKNOWLEDGED:20260718T100000Z
+X-MOZ-LASTACK:20260718T100000Z
+END:VALARM
+END:VTODO
+"""
     )
-    alarm = next(c for c in rewritten.subcomponents if c.name == "VALARM")
-    assert alarm.get("trigger").params["RELATED"] == "END"
+    before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(todo, titel="Renamed", erinnerungen=["-PT30M"])
+
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert alarms[0].to_ical() == before
+
+
+def test_apply_task_fields_matches_an_equivalent_duration_spelling():
+    """A week and seven days are the same trigger, so the alarm is not rebuilt."""
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:week before
+TRIGGER;RELATED=END:-P1W
+UID:foreign-alarm-1
+ACKNOWLEDGED:20260713T100000Z
+END:VALARM
+END:VTODO
+"""
+    )
+    before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(todo, erinnerungen=["-P7D"])
+
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert alarms[0].to_ical() == before
+
+
+def test_reminder_round_trip_leaves_the_component_unchanged():
+    """Read `erinnerungen`, write the same list back: nothing moves."""
+    todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
+    before = todo.to_ical()
+
+    _apply(todo, erinnerungen=mapping.parse_vtodo(todo)["erinnerungen"])
+
+    assert todo.to_ical() == before
+
+
+def test_relative_alarm_without_any_anchor_is_not_listed():
+    """A bare duration on a task with neither DUE nor DTSTART cannot be written back.
+
+    Listing it would produce a value that `update_task` rejects, so it is
+    treated like any other alarm this server cannot express: hidden, but kept.
+    """
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:floating
+TRIGGER:-PT30M
+END:VALARM
+END:VTODO
+"""
+    )
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+    _apply(todo, titel="Renamed")
+
+    assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 1
+
+
+def test_duplicate_reminder_specs_produce_one_alarm():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Task",
+        faellig_datum="2026-07-20T10:00:00",
+        erinnerungen=["-PT30M", "-PT30M", "-PT0H30M"],
+    )
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+
+
+def test_updating_other_fields_leaves_alarms_alone():
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    before = todo.to_ical()
+
+    _apply(todo, ort="Zuhause")
+
+    assert [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert todo.to_ical().replace(b"LOCATION:Zuhause\r\n", b"") == before
 
 
 def test_parent_uid_set_and_extracted():
