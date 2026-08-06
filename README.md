@@ -268,6 +268,10 @@ A task completed by mistake can be reopened with `update_task(status="offen")`.
 
 Permanently deletes the task.
 
+### `move_task(list_name, task_uid, ziel_liste)`
+
+Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert"}`.
+
 ### Calendar & event tools (VEVENT)
 
 The same CalDAV account also holds event calendars; these tools mirror the task
@@ -286,9 +290,11 @@ the full reference.
 | `create_event(kalender_name, titel, start, ...)` | Full event creation: all-day or timed, `ort`, `beschreibung`, `tags`, `status` (`"bestätigt"`/`"vorläufig"`/`"abgesagt"`), `sichtbarkeit`, recurrence (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE), reminders (`erinnerungen` → VALARM), `url`, task link (`verknuepfte_aufgabe`) |
 | `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
+| `move_event(kalender_name, event_uid, ziel_kalender)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete |
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
 | `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |
 | `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |
+
 
 For all-day events `ende` is the **inclusive** last day (RFC 5545's exclusive
 `DTEND` is translated on the way in and out). Mixed calendars (VEVENT+VTODO in
