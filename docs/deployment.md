@@ -39,9 +39,13 @@ uv sync --locked --no-dev
 Create `/etc/nextcloud-task-mcp.env` (root-owned, mode `600` — it contains secrets):
 
 ```bash
-NEXTCLOUD_CALDAV_URL=https://cloud.example.com/remote.php/dav/
+NEXTCLOUD_BASE_URL=https://cloud.example.com
 NEXTCLOUD_USERNAME=<nextcloud user>
 NEXTCLOUD_APP_PASSWORD=<app password from Settings -> Security>
+
+# Optional. Only needed when the CalDAV endpoint is not <base>/remote.php/dav/
+# (both URLs must point at the same Nextcloud instance).
+# NEXTCLOUD_CALDAV_URL=https://cloud.example.com/remote.php/dav/
 
 # Must match the public Funnel URL exactly (scheme + host), set up in step 4.
 PUBLIC_BASE_URL=https://<hostname>.<tailnet>.ts.net
