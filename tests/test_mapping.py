@@ -376,6 +376,62 @@ def test_extract_alarms_skips_alarms_the_string_form_cannot_express():
     assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
 
 
+_UNANCHORED_ALARM_ICS = """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no RELATED parameter
+TRIGGER:-PT30M
+END:VALARM
+END:VTODO
+"""
+
+
+def test_extract_alarms_lists_a_trigger_that_names_no_anchor():
+    """RELATED is omissible, so the bare form is what foreign clients mostly write.
+
+    Its RFC default is START, but this task has no DTSTART for that to mean
+    anything - the due date is the only anchor there is, which is exactly what
+    "-PT30M" says here. Hiding it would be a regression: the reminder would
+    disappear from the API while still firing.
+    """
+    todo = _todo_from_ics(_UNANCHORED_ALARM_ICS)
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+
+
+def test_apply_task_fields_does_not_duplicate_a_trigger_that_names_no_anchor():
+    """Writing the same reminder back must not add a second alarm beside it."""
+    todo = _todo_from_ics(_UNANCHORED_ALARM_ICS)
+    before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(todo, erinnerungen=["-PT30M"])
+
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert alarms[0].to_ical() == before
+
+
+def test_extract_alarms_still_hides_an_anchor_the_task_really_has():
+    """The both-dates case stays hidden: there DTSTART exists and means something else."""
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DTSTART:20260715T090000Z
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no RELATED parameter
+TRIGGER:-PT30M
+END:VALARM
+END:VTODO
+"""
+    )
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+
 def test_apply_task_fields_preserves_alarms_it_cannot_express():
     """Writing `erinnerungen` must not delete what the reader could not show."""
     todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)

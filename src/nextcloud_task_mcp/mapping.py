@@ -308,18 +308,40 @@ def _expected_related(component) -> str | None:
     return None
 
 
-def _read_alarm(alarm, *, expected_related: str | None) -> tuple[str, _TriggerKey] | None:
+def _has_anchor(component, related: str) -> bool:
+    """Whether the component carries the property a RELATED value names.
+
+    START is DTSTART; END is DUE on a task and DTEND (or DTSTART+DURATION) on
+    an event. An anchor the component does not have cannot place an alarm at a
+    different moment than the anchor it does have - which is what makes a
+    differently-named anchor harmless in `_read_alarm`.
+    """
+    if related == "START":
+        return "dtstart" in component
+    if related == "END":
+        return "due" in component or "dtend" in component or "duration" in component
+    return False
+
+
+def _read_alarm(alarm, component) -> tuple[str, _TriggerKey] | None:
     """Render one VALARM's TRIGGER as a reminder spec plus its identity, or None.
 
     None means "this alarm has no `erinnerungen` spelling": returning a string
     for it would either be a lie about when it fires or a value the write path
     would reject. That covers a missing TRIGGER, a repeated TRIGGER property
     (`icalendar` hands those back as a list), a DATE-valued trigger, an
-    absolute trigger whose TZID cannot be resolved, and - the common case - a
-    relative trigger anchored differently from the anchor `build_alarm` would
-    re-derive on the way back (`RELATED=END` on an event, `RELATED=START` on a
-    task that has a due date, anything relative on a component with neither
-    date). Such alarms are left strictly alone by `apply_alarms`.
+    absolute trigger whose TZID cannot be resolved, a relative trigger on a
+    component with neither DUE nor DTSTART (nothing to anchor to, so writing
+    the string back would be rejected), and a relative trigger anchored to an
+    anchor the component really has while `build_alarm` would re-derive the
+    other one - `RELATED=END` on an event with a DTEND, `RELATED=START` on a
+    task that has both dates. Such alarms are left strictly alone by
+    `apply_alarms`.
+
+    A named anchor the component does *not* have is not a mismatch: RELATED is
+    omissible and defaults to START, so `TRIGGER:-PT30M` on a task with only a
+    due date is the ordinary wire form for "30 minutes before it is due", not
+    an alarm hanging off a DTSTART that isn't there.
     """
     prop = alarm.get("trigger")
     if prop is None:
@@ -333,10 +355,13 @@ def _read_alarm(alarm, *, expected_related: str | None) -> tuple[str, _TriggerKe
             value = value.replace(tzinfo=zone)
         return value.isoformat(), _trigger_key(value)
     if isinstance(value, timedelta):
+        expected_related = _expected_related(component)
+        if expected_related is None:
+            return None
         params = getattr(prop, "params", {}) or {}
         # RFC 5545: a TRIGGER without RELATED is anchored to the start.
         related = str(params.get("RELATED", "START")).upper()
-        if expected_related is None or related != expected_related:
+        if related != expected_related and _has_anchor(component, related):
             return None
         return vDuration(value).to_ical().decode(), _trigger_key(value)
     return None
@@ -361,7 +386,6 @@ def apply_alarms(component, specs: list[str], description: str) -> None:
     """
     has_due = "due" in component
     has_start = "dtstart" in component
-    expected_related = _expected_related(component)
 
     wanted: dict[_TriggerKey, str] = {}
     for spec in specs:
@@ -374,7 +398,7 @@ def apply_alarms(component, specs: list[str], description: str) -> None:
         if getattr(sub, "name", None) != "VALARM":
             subcomponents.append(sub)
             continue
-        read = _read_alarm(sub, expected_related=expected_related)
+        read = _read_alarm(sub, component)
         if read is None:
             subcomponents.append(sub)
             continue
@@ -558,12 +582,11 @@ def extract_alarms(component) -> list[str]:
     a plain DISPLAY alarm. `export_calendar`/`import_ics` round-trip every
     alarm verbatim and are the lossless path.
     """
-    expected_related = _expected_related(component)
     alarms: list[str] = []
     for sub in getattr(component, "subcomponents", []):
         if getattr(sub, "name", None) != "VALARM":
             continue
-        read = _read_alarm(sub, expected_related=expected_related)
+        read = _read_alarm(sub, component)
         if read is not None:
             alarms.append(read[0])
     return alarms

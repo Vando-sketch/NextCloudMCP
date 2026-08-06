@@ -260,6 +260,9 @@ def build_server(
             erinnerungen: Optional list of reminders, each either a relative RFC 5545
                 duration (e.g. "-P1D", "-PT1H", relative to faellig_datum, falling
                 back to start_datum) or an absolute ISO 8601 datetime -> VALARM.
+                The leading "-" is what makes a relative reminder fire *before*
+                that date; a positive duration ("PT30M") is valid and means 30
+                minutes *after* it.
             notizen: Optional notes -> DESCRIPTION.
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
@@ -565,7 +568,9 @@ def build_server(
                 occurrences of a recurring event -> EXDATE.
             erinnerungen: Optional reminders, each either a relative RFC 5545
                 duration before the start (e.g. "-PT30M", "-P1D") or an
-                absolute ISO 8601 datetime -> VALARM.
+                absolute ISO 8601 datetime -> VALARM. The leading "-" is what
+                makes a relative reminder fire *before* the start; a positive
+                duration ("PT30M") is valid and means 30 minutes *after* it.
             url: Optional URL -> URL.
             verknuepfte_aufgabe: Optional UID of an existing task this event
                 reserves time for -> RELATED-TO;RELTYPE=PARENT on the event

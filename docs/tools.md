@@ -105,13 +105,30 @@ Two things about the strings themselves:
   `"+00:00"` — again the same instant, not the same characters.
 
 **What is *not* listed.** Only alarms whose trigger this format can express appear here.
-An alarm is left out when it is anchored differently from the anchor a write would give it
-(a start-anchored alarm on a task that has a `faellig_datum`, since writing `"-PT30M"` back
-anchors it to the due date), when its trigger is a bare date, a repeated property or missing
-entirely, or when its timezone name resolves to no zone this server knows (common Windows
-and Evolution zone names do resolve). Such alarms still exist on the task and are **never
-touched by a write** — passing `erinnerungen` replaces only the reminders you can see. To
-remove every alarm including those, clear `"erinnerungen"` via `felder_leeren`.
+An alarm is left out when
+
+- it is anchored to a date the task really has, but not the one a write would anchor it to —
+  a start-anchored alarm on a task that has *both* `start_datum` and `faellig_datum`, since
+  writing `"-PT30M"` back anchors it to the due date. (An alarm naming an anchor the task
+  does *not* have — the common `TRIGGER:-PT30M` with no anchor named at all — is listed
+  normally: there is only one date it can mean.)
+- it is relative but the task has neither `faellig_datum` nor `start_datum`, so there is no
+  date to be relative to and the string could not be written back at all;
+- its trigger is a bare date, a repeated property, or missing entirely;
+- its timezone name resolves to no zone this server knows (common Windows and Evolution zone
+  names do resolve).
+
+Such alarms still exist on the task and are **never touched by a write** — passing
+`erinnerungen` replaces only the reminders you can see.
+
+**Important — a hidden alarm keeps firing.** If a task carries one, writing `erinnerungen`
+can leave the user with *two* notifications: the hidden alarm plus the one you just wrote.
+This is easy to hit by accident — adding a `faellig_datum` and `erinnerungen: ["-PT30M"]` in one
+`update_task` call turns the task's existing start-anchored reminder into a hidden one and
+adds a due-anchored one beside it, and `erinnerungen` then reads back as a single
+`["-PT30M"]`. The extra alarm cannot be removed through `erinnerungen`; clear
+`"erinnerungen"` via `felder_leeren` (which removes *every* alarm) and write the list you
+want afterwards, or use `export_calendar`/`import_ics` to see and edit the alarms in full.
 
 **What a write does not carry over.** For the alarms that *are* listed, the string form has
 no slot for a non-display action (`EMAIL`/`AUDIO`), an `ATTACH`, or `DURATION`/`REPEAT`

@@ -14,11 +14,14 @@ This project does not yet follow Semantic Versioning releases.
   `create_task`/`create_event` accept, so a reminder can be verified without
   exporting the calendar and parsing ICS by hand. Only alarms whose trigger
   that string form can express are listed - an alarm anchored to the end of an
-  event, one anchored to the start of a task that has a due date, one with a
-  date-valued/repeated/missing trigger, or one in a timezone that resolves to
-  no known zone would all read back as a different moment than they fire, so
-  they are left out instead. Writing `erinnerungen` never touches those
-  alarms, and a reminder that is already present is kept as it is rather than
+  event that has an end, one anchored to the start of a task that has both a
+  start and a due date, one with a date-valued/repeated/missing trigger, one
+  in a timezone that resolves to no known zone, and a relative one on a
+  component with no date at all to be relative to: each would read back as a
+  different moment than it fires, or as a value a write would reject. Writing
+  `erinnerungen` never touches those alarms - which means a hidden alarm and a
+  written reminder can both fire, see `docs/tools.md` - and a reminder that is
+  already present is kept as it is rather than
   rebuilt, so its action, dismissed state (`ACKNOWLEDGED`/`X-MOZ-LASTACK`) and
   UID survive an edit. Clearing `"erinnerungen"` via `felder_leeren` still
   removes every alarm. `export_calendar`/`import_ics` remain the verbatim,
