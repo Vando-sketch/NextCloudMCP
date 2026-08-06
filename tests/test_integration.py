@@ -13,7 +13,7 @@ from conftest import run_async
 
 from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
-from nextcloud_task_mcp.errors import NotizNotFoundError
+from nextcloud_task_mcp.errors import EventNotFoundError, NotizNotFoundError
 from nextcloud_task_mcp.notes_client import NotesService
 from nextcloud_task_mcp.notes_mapping import NoteFields
 
@@ -32,9 +32,16 @@ def live_service() -> CalDavService:
     )
 
 
-@pytest.fixture
-def test_list_name() -> str:
-    return os.environ["INTEGRATION_TEST_LIST"]
+@pytest.fixture(scope="session")
+def test_list_name(live_service) -> str:
+    """The task list these tests write into, created on demand if it is gone.
+
+    Session-scoped and deliberately *not* deleted afterwards: Nextcloud
+    rate-limits collection creation (~10 per user per hour) and keeps deleted
+    collections in its trashbin, so re-creating this list on every run would
+    trip the limit and pile up trashbin entries.
+    """
+    return _reused_collection(live_service, os.environ["INTEGRATION_TEST_LIST"], kind="VTODO")
 
 
 def test_list_task_lists_returns_at_least_the_test_list(live_service, test_list_name):
@@ -124,27 +131,33 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
 # Calendar / event integration tests (VEVENT)
 # ---------------------------------------------------------------------------
 
-# Unique per test run: Nextcloud keeps deleted calendars in its trashbin,
-# where they invisibly occupy their collection URI until purged. The service
-# dodges occupied ids automatically (see CalDavService._make_collection), but
-# unique names keep repeated test runs from piling up on the same slug.
+# Only for object names that must not collide between concurrent runs -
+# collections themselves are reused, see `_reused_collection`.
 _RUN_SUFFIX = f"{int(time.time())}"
-_TEST_CALENDAR = f"MCP-Event-Test-{_RUN_SUFFIX}"
+_TEST_CALENDAR = "MCP-Event-Test"
+
+
+def _reused_collection(live_service, name: str, *, kind: str) -> str:
+    """Create `name` only if it is missing, and never delete it.
+
+    Nextcloud rate-limits collection creation to roughly ten per user per
+    hour and keeps deleted collections in its trashbin, occupying their URI
+    until purged. A suite that created and deleted its calendars every run
+    therefore locked itself out after two runs (HTTP 429) - so these
+    collections are set up once and left in place for the next run.
+    """
+    if kind == "VEVENT":
+        if not any(entry["name"] == name for entry in live_service.list_calendars()):
+            live_service.create_calendar(name, farbe="#00679e")
+    elif not any(entry["name"] == name for entry in live_service.list_task_lists()):
+        live_service.create_task_list(name)
+    return name
 
 
 @pytest.fixture(scope="session")
 def test_calendar(live_service):
-    """One disposable VEVENT calendar shared by the whole test run.
-
-    Session-scoped on purpose: Nextcloud rate-limits calendar creation
-    (~10 new calendars per user per hour), so creating a fresh calendar per
-    test would make the suite trip that limit after a couple of runs.
-    """
-    live_service.create_calendar(_TEST_CALENDAR, farbe="#00679e")
-    try:
-        yield _TEST_CALENDAR
-    finally:
-        live_service.delete_calendar(_TEST_CALENDAR)
+    """The VEVENT calendar the whole run writes into."""
+    return _reused_collection(live_service, _TEST_CALENDAR, kind="VEVENT")
 
 
 def test_calendar_lifecycle(live_service):
@@ -223,16 +236,19 @@ def test_all_day_event_round_trip(live_service, test_calendar):
         test_calendar,
         event_mapping.EventFields(titel="Ganztags-Test", start="2026-09-02", ende="2026-09-03"),
     )
-    fetched = live_service.get_event(test_calendar, uid)
-    assert fetched["ganztaegig"] is True
-    assert fetched["start"] == "2026-09-02"
-    assert fetched["ende"] == "2026-09-03"  # inclusive last day
+    try:
+        fetched = live_service.get_event(test_calendar, uid)
+        assert fetched["ganztaegig"] is True
+        assert fetched["start"] == "2026-09-02"
+        assert fetched["ende"] == "2026-09-03"  # inclusive last day
+    finally:
+        live_service.delete_event(test_calendar, uid)
 
 
 def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
     from nextcloud_task_mcp import event_mapping
 
-    live_service.create_event(
+    series_uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
             titel="Wöchentlicher Test",
@@ -255,8 +271,11 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
     )
     occurrences = [e for e in expanded if e["titel"] == "Wöchentlicher Test"]
     starts = sorted(e["start"] for e in occurrences)
-    assert len(occurrences) == 3  # 4 occurrences minus 1 exception
-    assert "2026-09-14T10:00:00+00:00" not in starts
+    try:
+        assert len(occurrences) == 3  # 4 occurrences minus 1 exception
+        assert "2026-09-14T10:00:00+00:00" not in starts
+    finally:
+        live_service.delete_event(test_calendar, series_uid)
 
 
 def test_task_event_linking_and_conversion(live_service, test_list_name, test_calendar):
@@ -270,6 +289,8 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
             notizen="Vom Integrationstest erstellt; kann weg.",
         ),
     )
+    event_uid: str | None = None
+    second_uid: str | None = None
     try:
         # Task -> event conversion (timeboxing).
         event_uid = live_service.create_event_from_task(
@@ -297,6 +318,9 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
         assert {"uid": task_uid, "beziehung": "voraussetzung"} in linked["verknuepfte_aufgaben"]
     finally:
         live_service.delete_task(test_list_name, task_uid)
+        for created in (event_uid, second_uid):
+            if created:
+                live_service.delete_event(test_calendar, created)
 
 
 def test_get_agenda_combines_events_and_tasks(live_service, test_list_name, test_calendar):
@@ -321,6 +345,170 @@ def test_get_agenda_combines_events_and_tasks(live_service, test_list_name, test
         assert matching_tasks and matching_tasks[0]["liste"] == test_list_name
     finally:
         live_service.delete_task(test_list_name, task_uid)
+        live_service.delete_event(test_calendar, event_uid)
+
+
+# ---------------------------------------------------------------------------
+# move / list_tags / batch round-trips (write -> read -> same value)
+# ---------------------------------------------------------------------------
+
+_MOVE_TARGET_CALENDAR = "MCP-Move-Ziel-Test"
+_MOVE_TARGET_LIST = "MCP-Move-Ziel-Liste-Test"
+
+
+@pytest.fixture(scope="session")
+def move_target_calendar(live_service):
+    """A second VEVENT calendar, so a move has somewhere to go."""
+    return _reused_collection(live_service, _MOVE_TARGET_CALENDAR, kind="VEVENT")
+
+
+@pytest.fixture(scope="session")
+def move_target_list(live_service):
+    """A second VTODO list, to move a task into."""
+    return _reused_collection(live_service, _MOVE_TARGET_LIST, kind="VTODO")
+
+
+def test_move_event_keeps_uid_and_every_property(live_service, test_calendar, move_target_calendar):
+    """The whole point of MOVE over create+delete: nothing changes but the collection."""
+    from nextcloud_task_mcp import event_mapping
+
+    uid = live_service.create_event(
+        test_calendar,
+        event_mapping.EventFields(
+            titel="Verschiebe-Test",
+            start="2026-09-10T09:00:00",
+            ende="2026-09-10T10:00:00",
+            ort="Quelle",
+            tags=["MCP-Test"],
+            wiederholung="FREQ=WEEKLY;COUNT=3",
+            erinnerungen=["-PT15M"],
+        ),
+    )
+    before = live_service.get_event(test_calendar, uid)
+
+    try:
+        result = live_service.move_event(test_calendar, uid, move_target_calendar)
+        assert result["uid"] == uid
+        assert result["von"] == test_calendar
+        assert result["nach"] == move_target_calendar
+        assert result["methode"] in ("MOVE", "kopiert")
+
+        after = live_service.get_event(move_target_calendar, uid)
+        for field in ("uid", "titel", "start", "ende", "ort", "tags", "wiederholung"):
+            assert after[field] == before[field], field
+        assert after["erinnerungen"] == before["erinnerungen"]
+
+        with pytest.raises(EventNotFoundError):
+            live_service.get_event(test_calendar, uid)
+    finally:
+        for calendar in (move_target_calendar, test_calendar):
+            try:
+                live_service.delete_event(calendar, uid)
+            except Exception:
+                pass
+
+
+def test_move_task_keeps_uid_and_fields(live_service, test_list_name, move_target_list):
+    uid = live_service.create_task(
+        test_list_name,
+        mapping.TaskFields(
+            titel="Verschiebe-Test-Aufgabe",
+            faellig_datum="2026-09-11",
+            prioritaet="hoch",
+            tags=["MCP-Test"],
+            notizen="Vom Integrationstest erstellt; kann weg.",
+        ),
+    )
+    before = live_service.get_task(test_list_name, uid)
+
+    try:
+        result = live_service.move_task(test_list_name, uid, move_target_list)
+        assert result["uid"] == uid
+        assert result["nach"] == move_target_list
+
+        after = live_service.get_task(move_target_list, uid)
+        for field in ("uid", "titel", "faellig_datum", "prioritaet", "tags", "notizen"):
+            assert after[field] == before[field], field
+    finally:
+        for list_name in (move_target_list, test_list_name):
+            try:
+                live_service.delete_task(list_name, uid)
+            except Exception:
+                pass
+
+
+def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_name, test_calendar):
+    """One tag on an event and on a task has to come back as one entry counting two."""
+    from nextcloud_task_mcp import event_mapping
+
+    tag = f"MCP-Tag-Test-{_RUN_SUFFIX}"
+    event_uid = live_service.create_event(
+        test_calendar,
+        event_mapping.EventFields(titel="Tag-Test-Termin", start="2026-09-12", tags=[tag]),
+    )
+    task_uid = live_service.create_task(
+        test_list_name, mapping.TaskFields(titel="Tag-Test-Aufgabe", tags=[tag])
+    )
+
+    try:
+        tags = live_service.list_tags(calendar_names=[test_calendar], list_names=[test_list_name])
+        entry = next(e for e in tags if e["tag"] == tag)
+        assert entry["anzahl"] == 2
+
+        # Completed tasks keep counting - that is why include_completed is set.
+        live_service.complete_task(test_list_name, task_uid)
+        tags_after = live_service.list_tags(
+            calendar_names=[test_calendar], list_names=[test_list_name]
+        )
+        assert next(e for e in tags_after if e["tag"] == tag)["anzahl"] == 2
+    finally:
+        try:
+            live_service.delete_event(test_calendar, event_uid)
+        except Exception:
+            pass
+        try:
+            live_service.delete_task(test_list_name, task_uid)
+        except Exception:
+            pass
+
+
+def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
+    """Patch three events at once, read each back, then delete them all at once."""
+    from nextcloud_task_mcp import event_mapping
+
+    uids = [
+        live_service.create_event(
+            test_calendar,
+            event_mapping.EventFields(
+                titel=f"Batch-Test {index}",
+                start=f"2026-09-1{index}T08:00:00",
+                ende=f"2026-09-1{index}T09:00:00",
+            ),
+        )
+        for index in (3, 4, 5)
+    ]
+
+    try:
+        result = live_service.update_events(
+            test_calendar,
+            [*uids, "gibt-es-nicht-mcp-test"],
+            event_mapping.EventFields(ort="Batch-Ort", tags=["MCP-Test"]),
+        )
+        assert result["erfolgreich"] == 3
+        assert result["fehlgeschlagen"] == 1
+        assert result["ergebnisse"][-1]["status"] == "fehler"
+
+        for uid in uids:
+            fetched = live_service.get_event(test_calendar, uid)
+            assert fetched["ort"] == "Batch-Ort"
+            assert fetched["tags"] == ["MCP-Test"]
+    finally:
+        deleted = live_service.delete_events(test_calendar, uids)
+
+    assert deleted["erfolgreich"] == 3
+    for uid in uids:
+        with pytest.raises(EventNotFoundError):
+            live_service.get_event(test_calendar, uid)
 
 
 # ---------------------------------------------------------------------------
