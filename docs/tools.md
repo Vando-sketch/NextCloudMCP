@@ -954,6 +954,38 @@ no server-side full-text search, so this fetches the (optionally
 category-filtered) notes and filters client-side. Returns matches in the
 same shape as `list_notizen` (no content).
 
+### Verifying the notes workflow
+
+An opt-in live-server integration test suite in `tests/test_integration.py` verifies the notes workflow end-to-end against a real Nextcloud instance.
+
+#### Running the integration tests
+
+To run the live-server notes suite, set `RUN_INTEGRATION_TESTS=1` along with your Nextcloud instance environment variables:
+
+```bash
+RUN_INTEGRATION_TESTS=1 \
+NEXTCLOUD_BASE_URL="https://cloud.example.com" \
+NEXTCLOUD_USERNAME="your-username" \
+NEXTCLOUD_APP_PASSWORD="your-app-password" \
+uv run pytest tests/test_integration.py -k "notes or nonexistent_note"
+```
+
+The filter has to cover both tests: `-k test_notes` alone silently deselects
+`test_get_nonexistent_note_raises_notiz_not_found` and reports success on
+partial coverage.
+
+#### Created objects and cleanup
+
+- **Objects created**: A single disposable note titled `"mcp-notes-test"` in category `"mcp-test"`.
+- **Cleanup**: The note is automatically cleaned up in a `finally` block via a raw HTTP `DELETE` request (`/index.php/apps/notes/api/v1/notes/{id}`) using `httpx`.
+
+#### Manual verification checklist
+
+While automated integration tests verify API round-trips, client rendering and sync across Nextcloud apps require manual verification:
+
+1. **Web UI & Mobile App verification**: After writing or updating a note via `create_notiz` or `update_notiz`, open the note in the Nextcloud web UI and in the Notes mobile app (Android / iOS). Confirm that formatting, special characters (German umlauts), emojis, fenced code blocks, and trailing lines render identically.
+2. **App-to-MCP readback**: Edit the note within the Nextcloud Notes mobile app (or web UI), save it, then fetch it back using `get_notiz`. Confirm that both show the exact same updated content without data loss.
+
 ---
 
 ## ICS import / export
