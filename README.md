@@ -312,6 +312,7 @@ reference.
 | `update_notiz(notiz_id, ...)` | Partial update; `inhalt` replaces content wholesale |
 | `append_notiz(notiz_id, text)` | Read-then-write append to existing content |
 | `search_notizen(suchtext, kategorie=None)` | Case-insensitive substring search over title/content (client-side - the API has no full-text search) |
+| `delete_notiz(notiz_id)` | Permanently delete a note |
 
 ## Testing
 

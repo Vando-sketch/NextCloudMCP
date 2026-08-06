@@ -86,6 +86,7 @@ def test_all_tools_registered(tools):
         "update_notiz",
         "append_notiz",
         "search_notizen",
+        "delete_notiz",
     }
 
 
@@ -188,6 +189,12 @@ def test_search_notizen_delegates_to_notes_service(tools, fake_notes_service):
     fake_notes_service.search_notes.assert_called_once_with("Projekt", "Arbeit")
 
 
+def test_delete_notiz_delegates_to_notes_service(tools, fake_notes_service):
+    result = _run(tools["delete_notiz"].fn(2))
+    assert result == {"id": 2}
+    fake_notes_service.delete_note.assert_called_once_with(2)
+
+
 def test_notiz_tools_use_ascii_parameter_names(tools):
     for tool_name in (
         "list_notizen",
@@ -196,6 +203,7 @@ def test_notiz_tools_use_ascii_parameter_names(tools):
         "update_notiz",
         "append_notiz",
         "search_notizen",
+        "delete_notiz",
     ):
         schema = tools[tool_name].parameters
         for prop_name in schema.get("properties", {}):
@@ -210,6 +218,19 @@ def test_create_notiz_requires_only_titel(tools):
 def test_get_notiz_requires_notiz_id(tools):
     schema = tools["get_notiz"].parameters
     assert schema["required"] == ["notiz_id"]
+
+
+def test_delete_notiz_requires_notiz_id(tools):
+    schema = tools["delete_notiz"].parameters
+    assert schema["required"] == ["notiz_id"]
+
+
+def test_delete_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):
+    fake_notes_service.delete_note.side_effect = NotizNotFoundError(
+        "The requested note was not found."
+    )
+    with pytest.raises(ToolError, match="was not found"):
+        _run(tools["delete_notiz"].fn(999))
 
 
 def test_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):

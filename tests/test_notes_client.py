@@ -158,6 +158,41 @@ def test_get_note_not_found_raises():
         _run(service.get_note(999))
 
 
+# --- delete_note ---
+
+
+def test_delete_note_issues_delete_request():
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(204)
+
+    service = _service(handler)
+    _run(service.delete_note(42))
+
+    assert captured[0].method == "DELETE"
+    assert captured[0].url.path.endswith("/notes/42")
+
+
+def test_delete_note_not_found_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    service = _service(handler)
+    with pytest.raises(NotizNotFoundError):
+        _run(service.delete_note(999))
+
+
+def test_delete_note_401_raises_authentication_failed_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    service = _service(handler)
+    with pytest.raises(AuthenticationFailedError):
+        _run(service.delete_note(42))
+
+
 # --- create_note ---
 
 

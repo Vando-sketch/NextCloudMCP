@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 import time
 
-import httpx
 import pytest
 from conftest import run_async
 
@@ -347,30 +346,13 @@ def _live_notes_service() -> NotesService:
     )
 
 
-def _delete_note_via_httpx(notiz_id: int) -> None:
-    """Bypasses NotesService to issue a raw DELETE request against Nextcloud's
-    Notes REST API.
-
-    NotesService deliberately exposes no delete method (because there is no
-    delete_notiz tool in the FastMCP interface), so integration test cleanup
-    must delete disposable test notes directly via httpx.
-    """
-    base_url = os.environ["NEXTCLOUD_BASE_URL"].rstrip("/")
-    username = os.environ["NEXTCLOUD_USERNAME"]
-    password = os.environ["NEXTCLOUD_APP_PASSWORD"]
-    url = f"{base_url}/index.php/apps/notes/api/v1/notes/{notiz_id}"
-    response = httpx.delete(url, auth=(username, password), timeout=30)
-    if response.status_code not in (200, 204, 404):
-        response.raise_for_status()
-
-
 def test_notes_full_lifecycle() -> None:
     """Verify the complete notes workflow against a live Nextcloud instance.
 
     The whole scenario runs inside ONE `asyncio.run` (see
     `_live_notes_service`): create, read back exactly, replace the content
     wholesale, rename without touching the content, append twice, list with and
-    without a category filter, and search by content and by title.
+    without a category filter, search by content and by title, and delete.
     """
 
     async def scenario() -> None:
@@ -461,8 +443,20 @@ def test_notes_full_lifecycle() -> None:
                 note["id"] == notiz_id
                 for note in await service.search_notes("unrelated-random-string-mcp-test-999")
             )
+
+            # 7. Delete the note using delete_note, then verify it is really gone.
+            await service.delete_note(notiz_id)
+            with pytest.raises(NotizNotFoundError):
+                await service.get_note(notiz_id)
         finally:
-            _delete_note_via_httpx(notiz_id)
+            # Unconditional cleanup: attempt deletion if step 7 was not reached
+            # due to an assertion failure earlier in the try block.
+            # We swallow NotizNotFoundError here because if step 7 succeeded,
+            # the note is already gone, and cleanup must not blow up the test.
+            try:
+                await service.delete_note(notiz_id)
+            except NotizNotFoundError:
+                pass
             await service.aclose()
 
     run_async(scenario())
