@@ -294,6 +294,7 @@ the full reference.
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
 | `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |
 | `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |
+| `list_tags(kalender_namen=None, listen_namen=None)` | Aggregated tags (`CATEGORIES`) and usage counts across calendars and task lists (expensive: reads collections completely) |
 
 
 For all-day events `ende` is the **inclusive** last day (RFC 5545's exclusive
