@@ -1145,6 +1145,18 @@ no server-side full-text search, so this fetches the (optionally
 category-filtered) notes and filters client-side. Returns matches in the
 same shape as `list_notizen` (no content).
 
+### `delete_notiz(notiz_id)`
+
+Permanently deletes a note.
+
+WARNING: this is irreversible from this server's point of view - this server cannot restore a deleted note. Confirm with the user before calling this.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `notiz_id` | integer | yes | Note id, from `list_notizen`/`search_notizen` |
+
+Returns `{"id": notiz_id}` on success.
+
 ### Verifying the notes workflow
 
 An opt-in live-server integration test suite in `tests/test_integration.py` verifies the notes workflow end-to-end against a real Nextcloud instance.
@@ -1168,7 +1180,7 @@ partial coverage.
 #### Created objects and cleanup
 
 - **Objects created**: A single disposable note titled `"mcp-notes-test"` in category `"mcp-test"`.
-- **Cleanup**: The note is automatically cleaned up in a `finally` block via a raw HTTP `DELETE` request (`/index.php/apps/notes/api/v1/notes/{id}`) using `httpx`.
+- **Cleanup**: The note is automatically cleaned up in a `finally` block using `NotesService.delete_note(notiz_id)`.
 
 #### Manual verification checklist
 

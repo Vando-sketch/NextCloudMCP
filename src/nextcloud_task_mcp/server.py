@@ -1309,6 +1309,23 @@ def build_server(
         """
         return await _call_notes(notes_svc.search_notes(suchtext, kategorie))
 
+    @mcp.tool
+    async def delete_notiz(notiz_id: int) -> dict[str, int]:
+        """Permanently delete a Nextcloud note.
+
+        WARNING: this is irreversible from this server's point of view -
+        this server cannot restore a deleted note. Confirm with the user
+        before calling this.
+
+        Args:
+            notiz_id: The note's id, as returned by list_notizen/search_notizen.
+
+        Returns:
+            {"id": notiz_id} on success.
+        """
+        await _call_notes(notes_svc.delete_note(notiz_id))
+        return {"id": notiz_id}
+
     return mcp
 
 
