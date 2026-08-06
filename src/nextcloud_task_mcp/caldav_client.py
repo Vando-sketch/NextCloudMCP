@@ -6,8 +6,9 @@ import logging
 import re
 import threading
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterator
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
@@ -469,6 +470,67 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
     return None, None
 
 
+def _instance_markers(obj: Any, component: str) -> Counter[str] | None:
+    """Count the `component` instances inside `obj`'s calendar object, per instance key.
+
+    A recurring event or task is not one component but a master plus one
+    VEVENT/VTODO per RECURRENCE-ID override, all inside the same VCALENDAR.
+    A UID lookup can't tell those apart: it resolves as long as *any* of them
+    survived a write. `_move_object` compares these markers before deleting a
+    source, so a server that silently dropped override instances during the
+    copy is caught instead of costing the original.
+
+    A RECURRENCE-ID is reduced to the instant it names, not to its wire form:
+    a server is free to store `TZID=Europe/Berlin:...T100000` as `...T080000Z`,
+    and comparing the raw strings would then reject a copy that is in fact
+    complete.
+
+    Counts, not a set: two instances sharing a RECURRENCE-ID are two
+    instances, and losing one of them must not look like losing nothing.
+
+    Returns `None` only when the calendar object could not be read at all.
+    An empty counter is a real answer - "this object holds no such component"
+    - and the caller must treat it as a failed copy, not as "unknown".
+    """
+    try:
+        subcomponents = list(obj.icalendar_instance.subcomponents)
+    except Exception:
+        return None
+    markers: Counter[str] = Counter()
+    for sub in subcomponents:
+        if getattr(sub, "name", None) != component:
+            continue
+        recurrence_id = sub.get("recurrence-id")
+        if recurrence_id is None:
+            # The master instance; a non-recurring object has only this one.
+            markers[""] += 1
+            continue
+        markers[_recurrence_marker(recurrence_id)] += 1
+    return markers
+
+
+def _recurrence_marker(prop: Any) -> str:
+    """Reduce a RECURRENCE-ID property to a value comparable across servers.
+
+    Everything datelike collapses to a UTC instant, so a server storing a
+    DATE as midnight or a TZID as its UTC equivalent still matches.
+    """
+    value = getattr(prop, "dt", None)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            # Floating time: no instant to normalize to, compare as written.
+            return value.strftime("%Y%m%dT%H%M%S")
+        return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+    try:
+        return prop.to_ical().decode("utf-8", "replace")
+    except Exception:
+        return str(prop)
+
+
 def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     """Ensure `vcal` has a VTIMEZONE for every IANA zone `component` uses.
 
@@ -865,6 +927,35 @@ class CalDavService:
                 "use a different, unambiguous name."
             )
         return matches[0]
+
+    def _resolve_target_collection(self, name: str, component: str) -> DAVCalendar:
+        """Resolve target collection by name, validating component support.
+
+        Raises kind-specific not-found error if no collection with `name` exists,
+        or a speaking error naming both target and component kind if it exists but
+        does not support `component`.
+        """
+        calendars = self._list_collections()
+        same_name = [c for c in calendars if c.get_display_name() == name]
+        if not same_name:
+            raise self._not_found(name, component)
+
+        matches = [c for c in same_name if self._supports_component(c, component)]
+        if not matches:
+            kind_plural = "events" if component == "VEVENT" else "tasks"
+            kind_label = "Calendar" if component == "VEVENT" else "Task list"
+            raise TaskMcpError(f"{kind_label} '{name}' does not accept {kind_plural}.")
+
+        if len(matches) > 1:
+            kind = self._kind_label(component)
+            raise TaskMcpError(
+                f"Multiple {kind}s are named '{name}', which is ambiguous. "
+                f"Rename the {kind}s in Nextcloud so each has a distinct name, or "
+                "use a different, unambiguous name."
+            )
+        calendar = matches[0]
+        self._cache_collection(component, name, calendar)
+        return calendar
 
     def _cache_collection(self, component: str, name: str, calendar: DAVCalendar) -> None:
         """Remember `name`'s resolved collection, stamped for TTL expiry."""
@@ -1388,6 +1479,23 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
+    def move_task(self, list_name: str, task_uid: str, target_list: str) -> dict[str, str]:
+        """Move a task from one task list to another.
+
+        Prefers a CalDAV MOVE request (preserving server-side URL identity and
+        ETags). Falls back to copy-then-delete if the server rejects MOVE with
+        403/405/409/501/502.
+
+        Args:
+            list_name: Display name of the source task list.
+            task_uid: UID of the task to move.
+            target_list: Display name of the target task list.
+
+        Returns:
+            {"uid": task_uid, "von": source, "nach": target, "methode": "MOVE" | "kopiert"}
+        """
+        return self._move_object(list_name, task_uid, target_list, "VTODO")
+
     # ------------------------------------------------------------------
     # Event calendars (VEVENT)
     # ------------------------------------------------------------------
@@ -1896,6 +2004,249 @@ class CalDavService:
                 raise EventNotFoundError(f"Event '{event_uid}' was not found.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
+
+    def move_event(
+        self, calendar_name: str, event_uid: str, target_calendar: str
+    ) -> dict[str, str]:
+        """Move an event from one calendar to another.
+
+        Prefers a CalDAV MOVE request (preserving server-side URL identity and
+        ETags). Falls back to copy-then-delete if the server rejects MOVE with
+        403/405/409/501/502.
+
+        Args:
+            calendar_name: Display name of the source calendar.
+            event_uid: UID of the event to move.
+            target_calendar: Display name of the target calendar.
+
+        Returns:
+            {"uid": event_uid, "von": source, "nach": target, "methode": "MOVE" | "kopiert"}
+        """
+        return self._move_object(calendar_name, event_uid, target_calendar, "VEVENT")
+
+    def _move_object(
+        self, source_name: str, uid: str, target_name: str, component: str
+    ) -> dict[str, str]:
+        """Move a calendar object (VEVENT or VTODO) from one collection to another."""
+        with self._lock:
+            target_col = self._resolve_target_collection(target_name, component)
+            source_col = self._resolve_collection(source_name, component)
+
+            source_url_norm = _normalize_collection_href(str(source_col.url))
+            target_url_norm = _normalize_collection_href(str(target_col.url))
+
+            source_display = source_col.get_display_name() or source_name
+            target_display = target_col.get_display_name() or target_name
+
+            if source_url_norm == target_url_norm:
+                return {
+                    "uid": uid,
+                    "von": source_display,
+                    "nach": target_display,
+                    "methode": "MOVE",
+                }
+
+            kind_str = "event" if component == "VEVENT" else "task"
+            kind_label = "calendar" if component == "VEVENT" else "task list"
+            kind_article = "An event" if component == "VEVENT" else "A task"
+
+            try:
+                if component == "VEVENT":
+                    obj = source_col.event_by_uid(uid)
+                else:
+                    obj = source_col.get_todo_by_uid(uid)
+            except caldav_error.NotFoundError as exc:
+                if component == "VEVENT":
+                    raise EventNotFoundError(f"Event '{uid}' was not found.") from exc
+                raise TaskNotFoundError(f"Task '{uid}' was not found.") from exc
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            resource_name = str(obj.url).rstrip("/").split("/")[-1]
+            target_url_str = str(target_col.url)
+            if not target_url_str.endswith("/"):
+                target_url_str += "/"
+            destination = target_url_str + resource_name
+
+            use_fallback = False
+            try:
+                # Deliberately NOT routed through `_dav_request`: that helper
+                # turns caldav's AuthorizationError into one flat message, and
+                # caldav collapses HTTP 401 and 403 into that same exception
+                # (see `_translate`). Here the difference decides what happens
+                # next - a 403 means "this server won't MOVE between
+                # collections", which is exactly the case the copy fallback
+                # exists for, while a 401 means the credentials are wrong and
+                # retrying as a copy would only produce a misleading error.
+                # `.reason` is the one field that still tells them apart.
+                response = self._client.request(
+                    str(obj.url),
+                    "MOVE",
+                    "",
+                    {"Destination": destination, "Overwrite": "F"},
+                )
+            except caldav_error.AuthorizationError as exc:
+                # `.reason` is only set when caldav was given one; treat a
+                # missing reason as "not provably a 403" so an ambiguous
+                # failure never starts writing copies.
+                if (getattr(exc, "reason", "") or "").strip().lower() == "forbidden":
+                    use_fallback = True
+                else:
+                    raise AuthenticationFailedError(
+                        "Nextcloud rejected the CalDAV credentials (check username/app password)."
+                    ) from exc
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+            else:
+                status = getattr(response, "status", None)
+                if status in (200, 201, 204):
+                    return {
+                        "uid": uid,
+                        "von": source_display,
+                        "nach": target_display,
+                        "methode": "MOVE",
+                    }
+                if status == 412:
+                    # `Overwrite: F` - the target already holds this UID. Not
+                    # an ETag conflict (`TaskConflictError`), which is about a
+                    # concurrent edit to the *same* object.
+                    raise TaskMcpError(
+                        f"{kind_article} with UID '{uid}' already exists in target "
+                        f"{kind_label} '{target_display}'."
+                    )
+                if status in (403, 405, 409, 501, 502):
+                    use_fallback = True
+                else:
+                    raise TaskMcpError(
+                        f"Nextcloud rejected moving {kind_str} '{uid}' (HTTP {status})."
+                    )
+
+            if use_fallback:
+                # `Overwrite: F` would have stopped a server-side MOVE from
+                # replacing an existing object; the copy path has to make that
+                # check itself, before writing anything.
+                def fetch_from_target():
+                    if component == "VEVENT":
+                        return target_col.event_by_uid(uid)
+                    return target_col.get_todo_by_uid(uid)
+
+                try:
+                    fetch_from_target()
+                except caldav_error.NotFoundError:
+                    pass
+                except TaskMcpError:
+                    raise
+                except Exception as exc:
+                    raise _translate(exc) from exc
+                else:
+                    raise TaskMcpError(
+                        f"{kind_article} with UID '{uid}' already exists in target "
+                        f"{kind_label} '{target_display}'."
+                    )
+
+                # The whole calendar object, not just the component this server
+                # parses: VTIMEZONEs, VALARMs and any RECURRENCE-ID override
+                # instances travel with it.
+                try:
+                    ical_text = obj.icalendar_instance.to_ical().decode("utf-8")
+                except Exception as read_exc:
+                    raise TaskMcpError(
+                        f"Could not read {kind_str} '{uid}' from '{source_display}' to copy it. "
+                        "Nothing was written or deleted."
+                    ) from read_exc
+
+                try:
+                    # `no_overwrite=True` makes caldav re-check for an existing
+                    # object right before the PUT. It doesn't close the window
+                    # the pre-check above leaves open (that check is client-side
+                    # too), but it shrinks it, and it means a future caller
+                    # reaching this write without the pre-check still can't
+                    # clobber a target object.
+                    if component == "VEVENT":
+                        target_col.save_event(ical=ical_text, no_overwrite=True)
+                    else:
+                        target_col.save_todo(ical=ical_text, no_overwrite=True)
+                except caldav_error.ConsistencyError as clash_exc:
+                    raise TaskMcpError(
+                        f"{kind_article} with UID '{uid}' already exists in target "
+                        f"{kind_label} '{target_display}'. The original in "
+                        f"'{source_display}' was left untouched."
+                    ) from clash_exc
+                except TaskMcpError:
+                    raise
+                except Exception as write_exc:
+                    raise TaskMcpError(
+                        f"Could not copy {kind_str} '{uid}' to '{target_display}'. "
+                        f"The original in '{source_display}' was left untouched."
+                    ) from write_exc
+
+                # Read it back before deleting anything: a write the server
+                # accepted but did not persist must not cost the original.
+                try:
+                    copied = fetch_from_target()
+                except TaskMcpError:
+                    raise
+                except Exception as verify_exc:
+                    raise TaskMcpError(
+                        f"Copied {kind_str} '{uid}' to '{target_display}', but could not read "
+                        f"it back to confirm the copy, so the original in '{source_display}' "
+                        "was kept. Check both collections before retrying."
+                    ) from verify_exc
+
+                # The UID resolving in the target only proves *something*
+                # arrived. For a recurring object the overrides are separate
+                # components under the same UID, so compare them explicitly.
+                expected_markers = _instance_markers(obj, component)
+                if expected_markers is None:
+                    # Nothing to compare against - "can't tell" is not a licence
+                    # to delete, even though the copy itself may be fine.
+                    raise TaskMcpError(
+                        f"Copied {kind_str} '{uid}' to '{target_display}', but could not re-read "
+                        f"the original in '{source_display}' to compare instances, so it was "
+                        f"kept. Remove the copy from '{target_display}' before retrying."
+                    )
+                if expected_markers:
+                    copied_markers = _instance_markers(copied, component)
+                    # An unreadable copy counts as an empty one: "can't tell"
+                    # must never license deleting the source.
+                    missing = sum(
+                        max(count - (copied_markers[marker] if copied_markers else 0), 0)
+                        for marker, count in expected_markers.items()
+                    )
+                    if missing:
+                        total = sum(expected_markers.values())
+                        raise TaskMcpError(
+                            f"Copied {kind_str} '{uid}' to '{target_display}', but {missing} of "
+                            f"{total} instances are missing there, so the original in "
+                            f"'{source_display}' was kept. Remove the incomplete copy from "
+                            f"'{target_display}' before retrying."
+                        )
+
+                try:
+                    obj.delete()
+                except TaskMcpError:
+                    raise
+                except Exception as del_exc:
+                    raise TaskMcpError(
+                        f"Copied {kind_str} '{uid}' to '{target_display}', but deleting the "
+                        f"original from '{source_display}' failed - it now exists in both "
+                        "collections. Delete the original manually."
+                    ) from del_exc
+
+                return {
+                    "uid": uid,
+                    "von": source_display,
+                    "nach": target_display,
+                    "methode": "kopiert",
+                }
+
+            # Unreachable: every branch above either returns, raises, or sets
+            # use_fallback. Kept so the function has no implicit None return.
+            raise TaskMcpError(f"Could not move {kind_str} '{uid}'.")
 
     # ------------------------------------------------------------------
     # Task <-> event linking and combined views

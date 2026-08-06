@@ -6,14 +6,14 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from caldav.lib.url import URL
-from icalendar import Calendar, Event, FreeBusy, Timezone, Todo
+from icalendar import Alarm, Calendar, Event, FreeBusy, Timezone, Todo
 from lxml import etree
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
@@ -3668,3 +3668,808 @@ def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_colle
     for task in agenda["aufgaben"]:
         found = service.get_task("CSGO", task["uid"])
         assert found["uid"] == task["uid"]
+
+
+# ======================================================================
+# move_event / move_task (move operations)
+# ======================================================================
+
+
+def test_move_task_happy_path_caldav_move(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    source.get_todo_by_uid.return_value = todo_obj
+
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=201)
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result == {
+        "uid": "task1",
+        "von": "QuellListe",
+        "nach": "ZielListe",
+        "methode": "MOVE",
+    }
+    assert mock_dav_client.return_value.request.call_args_list[-1] == (
+        (
+            "https://cloud.example.com/dav/quell/task1.ics",
+            "MOVE",
+            "",
+            {"Destination": "https://cloud.example.com/dav/ziel/task1.ics", "Overwrite": "F"},
+        ),
+        {},
+    )
+
+
+def test_move_event_happy_path_caldav_move(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_cal/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_cal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/event1.ics"
+    source.event_by_uid.return_value = event_obj
+
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=204)
+
+    result = service.move_event("QuellKalender", "event1", "ZielKalender")
+
+    assert result == {
+        "uid": "event1",
+        "von": "QuellKalender",
+        "nach": "ZielKalender",
+        "methode": "MOVE",
+    }
+    assert mock_dav_client.return_value.request.call_args_list[-1] == (
+        (
+            "https://cloud.example.com/dav/quell_cal/event1.ics",
+            "MOVE",
+            "",
+            {"Destination": "https://cloud.example.com/dav/ziel_cal/event1.ics", "Overwrite": "F"},
+        ),
+        {},
+    )
+
+
+def _readback(vcal: Calendar) -> MagicMock:
+    """A target read-back that carries the same calendar object as the source.
+
+    `_move_object` compares the instances it wrote against the ones it reads
+    back, so a bare MagicMock would make that check pass vacuously.
+    """
+    copied = MagicMock()
+    copied.icalendar_instance = Calendar.from_ical(vcal.to_ical())
+    return copied
+
+
+@pytest.mark.parametrize("status", [403, 405, 409, 501, 502])
+def test_move_task_rejection_statuses_fallback(service, principal, mock_dav_client, status):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    vcal = Calendar()
+    vcal.add("prodid", "-//test//EN")
+    vcal.add("version", "2.0")
+    todo = Todo()
+    todo.add("uid", "task1")
+    todo.add("summary", "Test task")
+    vcal.add_component(todo)
+    todo_obj.icalendar_instance = vcal
+    source.get_todo_by_uid.return_value = todo_obj
+
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), _readback(vcal)]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=status)
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result == {
+        "uid": "task1",
+        "von": "QuellListe",
+        "nach": "ZielListe",
+        "methode": "kopiert",
+    }
+    target.save_todo.assert_called_once()
+    todo_obj.delete.assert_called_once()
+
+
+@pytest.mark.parametrize("status", [403, 405, 409, 501, 502])
+def test_move_event_rejection_statuses_fallback(service, principal, mock_dav_client, status):
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_cal/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_cal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/event1.ics"
+    vcal = Calendar()
+    vcal.add("prodid", "-//test//EN")
+    vcal.add("version", "2.0")
+    event = Event()
+    event.add("uid", "event1")
+    event.add("summary", "Test event")
+    vcal.add_component(event)
+    event_obj.icalendar_instance = vcal
+    source.event_by_uid.return_value = event_obj
+
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), _readback(vcal)]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=status)
+
+    result = service.move_event("QuellKalender", "event1", "ZielKalender")
+
+    assert result == {
+        "uid": "event1",
+        "von": "QuellKalender",
+        "nach": "ZielKalender",
+        "methode": "kopiert",
+    }
+    target.save_event.assert_called_once()
+    event_obj.delete.assert_called_once()
+
+
+def test_move_fallback_ordering_save_before_delete(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    todo_obj.icalendar_instance = Calendar()
+    source.get_todo_by_uid.return_value = todo_obj
+
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    calls: list[str] = []
+    target.save_todo.side_effect = lambda **kw: calls.append("save_todo")
+    todo_obj.delete.side_effect = lambda: calls.append("delete")
+
+    service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert calls == ["save_todo", "delete"]
+
+
+def test_move_fallback_write_fails_source_survives(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    todo_obj.icalendar_instance = Calendar()
+    source.get_todo_by_uid.return_value = todo_obj
+
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
+    target.save_todo.side_effect = Exception("Write failed")
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=502)
+
+    with pytest.raises(TaskMcpError, match="left untouched"):
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_delete_fails_names_both_collections(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    todo_obj.icalendar_instance = Calendar()
+    todo_obj.delete.side_effect = Exception("Delete failed")
+    source.get_todo_by_uid.return_value = todo_obj
+
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=403)
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+    msg = str(exc_info.value)
+    assert "QuellListe" in msg
+    assert "ZielListe" in msg
+
+
+def test_move_target_does_not_support_component(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "Personal", url="https://cloud.example.com/dav/personal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    with pytest.raises(TaskMcpError, match="does not accept tasks"):
+        service.move_task("QuellListe", "task1", "Personal")
+
+    source.get_todo_by_uid.assert_not_called()
+
+    with pytest.raises(TaskMcpError, match="does not accept events"):
+        service.move_event("Personal", "event1", "QuellListe")
+
+
+def test_move_source_equals_target_noop(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source]
+
+    res = service.move_task("QuellListe", "task1", "QuellListe")
+
+    assert res == {
+        "uid": "task1",
+        "von": "QuellListe",
+        "nach": "QuellListe",
+        "methode": "MOVE",
+    }
+    source.get_todo_by_uid.assert_not_called()
+
+
+def test_move_unknown_target_or_uid(service, principal):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source]
+
+    with pytest.raises(TaskListNotFoundError):
+        service.move_task("QuellListe", "task1", "UnknownTarget")
+
+    service._calendar_cache.clear()
+    service._collections = None
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+    source.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+
+    with pytest.raises(TaskNotFoundError):
+        service.move_task("QuellListe", "unknown_uid", "ZielListe")
+
+    service._calendar_cache.clear()
+    service._collections = None
+    source_cal = _make_calendar(
+        "QuellCal", url="https://cloud.example.com/dav/quell_c/", components=["VEVENT"]
+    )
+    target_cal = _make_calendar(
+        "ZielCal", url="https://cloud.example.com/dav/ziel_c/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source_cal, target_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.move_event("QuellCal", "event1", "UnknownTarget")
+
+    source_cal.event_by_uid.side_effect = caldav_error.NotFoundError()
+    with pytest.raises(EventNotFoundError):
+        service.move_event("QuellCal", "unknown_uid", "ZielCal")
+
+
+def test_move_target_already_exists_move_412(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    source.get_todo_by_uid.return_value = todo_obj
+
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=412)
+
+    with pytest.raises(TaskMcpError, match="already exists"):
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+
+def test_move_target_already_exists_fallback(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    source.get_todo_by_uid.return_value = todo_obj
+
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=501)
+    target.get_todo_by_uid.return_value = MagicMock()
+
+    with pytest.raises(TaskMcpError, match="already exists"):
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+
+def test_move_preserves_all_icalendar_properties(service, principal, mock_dav_client):
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_c/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_c/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    vcal = Calendar()
+    vcal.add("prodid", "-//test//EN")
+    vcal.add("version", "2.0")
+
+    tz = Timezone()
+    tz.add("tzid", "Europe/Berlin")
+    vcal.add_component(tz)
+
+    event = Event()
+    event.add("uid", "complex-event-uid-999")
+    event.add("summary", "Complex Event")
+    event.add("rrule", {"freq": ["weekly"], "byday": ["mo"]})
+    event.add("exdate", datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc))
+    event.add("related-to", "parent-uid-123")
+
+    alarm = Alarm()
+    alarm.add("action", "DISPLAY")
+    alarm.add("trigger", timedelta(minutes=-15))
+    event.add_component(alarm)
+
+    vcal.add_component(event)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_c/complex-event-uid-999.ics"
+    event_obj.icalendar_instance = vcal
+    source.event_by_uid.return_value = event_obj
+
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), _readback(vcal)]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    res = service.move_event("QuellKalender", "complex-event-uid-999", "ZielKalender")
+
+    assert res["methode"] == "kopiert"
+    target.save_event.assert_called_once()
+    _, kwargs = target.save_event.call_args
+    saved_ics = kwargs["ical"]
+
+    assert "complex-event-uid-999" in saved_ics
+    assert "RRULE" in saved_ics
+    assert "EXDATE" in saved_ics
+    assert "RELATED-TO" in saved_ics
+    assert "VALARM" in saved_ics
+    assert "VTIMEZONE" in saved_ics
+
+
+def test_move_falls_back_when_server_forbids_move(service, principal, mock_dav_client):
+    """A 403 means "this server won't MOVE between collections" - copy instead.
+
+    caldav raises AuthorizationError before any status code reaches us, so the
+    only thing separating this from a credentials failure is `.reason`.
+    """
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    todo_obj.icalendar_instance = Calendar()
+    source.get_todo_by_uid.return_value = todo_obj
+
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
+    error = caldav_error.AuthorizationError()
+    error.reason = "Forbidden"
+    mock_dav_client.return_value.request.side_effect = error
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result["methode"] == "kopiert"
+    target.save_todo.assert_called_once()
+    todo_obj.delete.assert_called_once()
+
+
+def test_move_rejects_bad_credentials_instead_of_copying(service, principal, mock_dav_client):
+    """A 401 must not be retried as a copy - nothing may be written or deleted."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    source.get_todo_by_uid.return_value = todo_obj
+
+    error = caldav_error.AuthorizationError()
+    error.reason = "Unauthorized"
+    mock_dav_client.return_value.request.side_effect = error
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+    target.save_todo.assert_not_called()
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_keeps_original_when_copy_cannot_be_verified(
+    service, principal, mock_dav_client
+):
+    """A write the server accepted but did not persist must not cost the original."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    todo_obj.icalendar_instance = Calendar()
+    source.get_todo_by_uid.return_value = todo_obj
+
+    # First lookup: not there yet (so the copy proceeds). Second: the read-back
+    # after the write, which fails.
+    target.get_todo_by_uid.side_effect = [
+        caldav_error.NotFoundError(),
+        caldav_error.NotFoundError(),
+    ]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError, match="could not read"):
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+    target.save_todo.assert_called_once()
+    todo_obj.delete.assert_not_called()
+
+
+def _recurring_event_vcal(*, with_override: bool) -> Calendar:
+    """A VCALENDAR holding a weekly master plus, optionally, one RECURRENCE-ID override."""
+    vcal = Calendar()
+    vcal.add("prodid", "-//test//EN")
+    vcal.add("version", "2.0")
+
+    master = Event()
+    master.add("uid", "serie-1")
+    master.add("summary", "Weekly")
+    master.add("dtstart", datetime(2026, 8, 3, 10, 0, tzinfo=timezone.utc))
+    master.add("rrule", {"freq": ["weekly"]})
+    vcal.add_component(master)
+
+    if with_override:
+        override = Event()
+        override.add("uid", "serie-1")
+        override.add("summary", "Weekly (moved)")
+        override.add("recurrence-id", datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc))
+        override.add("dtstart", datetime(2026, 8, 10, 14, 0, tzinfo=timezone.utc))
+        vcal.add_component(override)
+
+    return vcal
+
+
+def _move_series_calendars(principal):
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_cal/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_cal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+    return source, target
+
+
+def test_move_fallback_keeps_original_when_override_instance_is_missing(
+    service, principal, mock_dav_client
+):
+    """A UID lookup resolves even if the server dropped the RECURRENCE-ID override.
+
+    Deleting the source on that evidence alone would lose the override, so the
+    instances are compared before anything is deleted.
+    """
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = _recurring_event_vcal(with_override=True)
+    source.event_by_uid.return_value = event_obj
+
+    copied = MagicMock()
+    copied.icalendar_instance = _recurring_event_vcal(with_override=False)
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    msg = str(exc_info.value)
+    assert "1 of 2 instances are missing" in msg
+    assert "QuellKalender" in msg
+    assert "ZielKalender" in msg
+    target.save_event.assert_called_once()
+    event_obj.delete.assert_not_called()
+
+
+def test_move_fallback_deletes_original_when_all_instances_arrived(
+    service, principal, mock_dav_client
+):
+    """The complete series in the target is what licenses deleting the source."""
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = _recurring_event_vcal(with_override=True)
+    source.event_by_uid.return_value = event_obj
+
+    copied = MagicMock()
+    copied.icalendar_instance = _recurring_event_vcal(with_override=True)
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    result = service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    assert result["methode"] == "kopiert"
+    event_obj.delete.assert_called_once()
+
+
+def test_move_transport_failure_during_move_touches_nothing(service, principal, mock_dav_client):
+    """A dropped connection may mean the server already moved the object.
+
+    Retrying as a copy could then write a duplicate, or delete a source whose
+    object no longer belongs to it - so a transport failure ends the operation.
+    """
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    todo_obj.icalendar_instance = Calendar()
+    source.get_todo_by_uid.return_value = todo_obj
+
+    mock_dav_client.return_value.request.side_effect = ConnectionError("connection reset")
+
+    with pytest.raises(TaskMcpError):
+        service.move_task("QuellListe", "task1", "ZielListe")
+
+    target.save_todo.assert_not_called()
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_write_is_guarded_against_overwriting(service, principal, mock_dav_client):
+    """The copy itself must refuse to replace an object, not only the pre-check."""
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = _recurring_event_vcal(with_override=False)
+    source.event_by_uid.return_value = event_obj
+
+    copied = MagicMock()
+    copied.icalendar_instance = _recurring_event_vcal(with_override=False)
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    _, kwargs = target.save_event.call_args
+    assert kwargs["no_overwrite"] is True
+
+
+def test_move_fallback_write_clash_keeps_original(service, principal, mock_dav_client):
+    """If the target gained the UID between the pre-check and the write, say so."""
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = _recurring_event_vcal(with_override=False)
+    source.event_by_uid.return_value = event_obj
+
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
+    target.save_event.side_effect = caldav_error.ConsistencyError(
+        "no_overwrite flag was set, but object already exists"
+    )
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    msg = str(exc_info.value)
+    assert "already exists" in msg
+    assert "left untouched" in msg
+    event_obj.delete.assert_not_called()
+
+
+def test_move_fallback_accepts_server_normalized_recurrence_id(service, principal, mock_dav_client):
+    """A server may store TZID=Europe/Berlin 12:00 as 10:00Z - same instance.
+
+    Comparing the wire form would reject a copy that is in fact complete and
+    strand it in the target.
+    """
+    source, target = _move_series_calendars(principal)
+
+    vcal = Calendar()
+    vcal.add("prodid", "-//test//EN")
+    vcal.add("version", "2.0")
+    master = Event()
+    master.add("uid", "serie-1")
+    master.add("dtstart", datetime(2026, 8, 3, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+    master.add("rrule", {"freq": ["weekly"]})
+    vcal.add_component(master)
+    override = Event()
+    override.add("uid", "serie-1")
+    override.add("recurrence-id", datetime(2026, 8, 10, 12, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+    vcal.add_component(override)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = vcal
+    source.event_by_uid.return_value = event_obj
+
+    normalized = Calendar.from_ical(vcal.to_ical())
+    for sub in normalized.subcomponents:
+        if sub.name == "VEVENT" and sub.get("recurrence-id") is not None:
+            del sub["recurrence-id"]
+            sub.add("recurrence-id", datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc))
+    copied = MagicMock()
+    copied.icalendar_instance = normalized
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    result = service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    assert result["methode"] == "kopiert"
+    event_obj.delete.assert_called_once()
+
+
+def test_move_fallback_keeps_original_when_copy_holds_no_component(
+    service, principal, mock_dav_client
+):
+    """The UID resolving in the target proves nothing if the object arrived empty."""
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = _recurring_event_vcal(with_override=True)
+    source.event_by_uid.return_value = event_obj
+
+    copied = MagicMock()
+    copied.icalendar_instance = Calendar()
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError, match="2 of 2 instances are missing"):
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    event_obj.delete.assert_not_called()
+
+
+def test_move_fallback_keeps_original_when_copy_is_unreadable(service, principal, mock_dav_client):
+    """An unparseable read-back is "can't tell", which must not license a delete."""
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = _recurring_event_vcal(with_override=False)
+    source.event_by_uid.return_value = event_obj
+
+    copied = MagicMock()
+    type(copied).icalendar_instance = PropertyMock(side_effect=ValueError("garbage"))
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError, match="1 of 1 instances are missing"):
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    event_obj.delete.assert_not_called()
+
+
+def test_move_fallback_detects_a_dropped_duplicate_instance(service, principal, mock_dav_client):
+    """Two overrides sharing a RECURRENCE-ID are two instances, not one."""
+    source, target = _move_series_calendars(principal)
+
+    vcal = _recurring_event_vcal(with_override=True)
+    duplicate = Event()
+    duplicate.add("uid", "serie-1")
+    duplicate.add("recurrence-id", datetime(2026, 8, 10, 10, 0, tzinfo=timezone.utc))
+    duplicate.add("summary", "Second override for the same instance")
+    vcal.add_component(duplicate)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    event_obj.icalendar_instance = vcal
+    source.event_by_uid.return_value = event_obj
+
+    copied = MagicMock()
+    copied.icalendar_instance = _recurring_event_vcal(with_override=True)
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError, match="1 of 3 instances are missing"):
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    event_obj.delete.assert_not_called()
+
+
+def test_move_fallback_keeps_original_when_source_cannot_be_reread(
+    service, principal, mock_dav_client
+):
+    """Without a readable source there is nothing to verify the copy against."""
+    source, target = _move_series_calendars(principal)
+
+    vcal = _recurring_event_vcal(with_override=True)
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    # First access serializes the object for the write, the second (the
+    # verification) fails.
+    type(event_obj).icalendar_instance = PropertyMock(
+        side_effect=[vcal, ValueError("connection dropped")]
+    )
+    source.event_by_uid.return_value = event_obj
+
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError(), _readback(vcal)]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError, match="could not re-read"):
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    event_obj.delete.assert_not_called()
+
+
+def test_move_fallback_reports_unreadable_source_before_writing(
+    service, principal, mock_dav_client
+):
+    """A source that can't be serialized fails loudly, before anything is written."""
+    source, target = _move_series_calendars(principal)
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/serie-1.ics"
+    type(event_obj).icalendar_instance = PropertyMock(side_effect=ValueError("garbage"))
+    source.event_by_uid.return_value = event_obj
+
+    target.event_by_uid.side_effect = [caldav_error.NotFoundError()]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
+
+    with pytest.raises(TaskMcpError, match="Nothing was written or deleted"):
+        service.move_event("QuellKalender", "serie-1", "ZielKalender")
+
+    target.save_event.assert_not_called()
+    event_obj.delete.assert_not_called()
