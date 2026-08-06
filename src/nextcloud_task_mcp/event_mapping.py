@@ -13,7 +13,8 @@ from .mapping import (
     VISIBILITY_LABELS,
     _extract_categories,
     _set,
-    build_alarm,
+    apply_alarms,
+    extract_alarms,
     parse_datetime_input,
     visibility_label_to_ical,
 )
@@ -443,18 +444,14 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
             _set(event, "organizer", own_organizer)
 
     if fields.erinnerungen is not None:
-        event.subcomponents = [c for c in event.subcomponents if c.name != "VALARM"]
-        has_start = "dtstart" in event
-        title_for_alarm = str(event.get("summary", "Reminder"))
-        for spec in fields.erinnerungen:
-            try:
-                # Relative reminders on a VEVENT resolve against DTSTART
-                # (RELATED=START); there is no DUE. build_alarm raises the
-                # "needs a start" error itself when DTSTART is absent.
-                alarm = build_alarm(spec, title_for_alarm, has_due=False, has_start=has_start)
-            except InvalidTaskDataError as exc:
-                raise InvalidEventDataError(str(exc)) from None
-            event.add_component(alarm)
+        try:
+            # Relative reminders on a VEVENT resolve against DTSTART
+            # (RELATED=START) - a VEVENT has no DUE, so `apply_alarms` derives
+            # that anchor by itself. It raises the "needs a start" error when
+            # DTSTART is absent.
+            apply_alarms(event, list(fields.erinnerungen), str(event.get("summary", "Reminder")))
+        except InvalidTaskDataError as exc:
+            raise InvalidEventDataError(str(exc)) from None
 
     _check_start_end_consistency(event)
 
@@ -657,6 +654,7 @@ def parse_vevent(component) -> dict[str, Any]:
         "ort": _text(component, "location"),
         "beschreibung": _text(component, "description"),
         "tags": _extract_categories(component),
+        "erinnerungen": extract_alarms(component),
         "status": ical_status_to_label(str(status) if status is not None else None),
         "sichtbarkeit": (
             _ICAL_CLASS_TO_LABEL.get(str(class_value).upper()) if class_value is not None else None
