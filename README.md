@@ -40,23 +40,24 @@ Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync
 cp .env.example .env
-# edit .env with your Nextcloud CalDAV URL, an app password, and PUBLIC_BASE_URL
+# edit .env with your Nextcloud base URL, an app password, and PUBLIC_BASE_URL
 ```
 
 Generate a Nextcloud app password under **Settings → Security → Devices & sessions**
-(never use your account password). The CalDAV URL is your DAV endpoint root, typically:
+(never use your account password). `NEXTCLOUD_BASE_URL` is required — your Nextcloud
+instance's base URL with no path, typically:
 
 ```
-https://<your-nextcloud-domain>/remote.php/dav/
+https://<your-nextcloud-domain>
 ```
 
-Must be `https://` - the server refuses to start with a `http://` CalDAV URL unless it
+Must be `https://` — the server refuses to start with a `http://` URL unless it
 points at a local address (`localhost`/`127.0.0.1`/`::1`) or `NEXTCLOUD_ALLOW_INSECURE_HTTP=1`
 is set, since `http://` sends the app password above in cleartext Basic Auth.
 
-The Notes tools use a separate, plain JSON REST API (unrelated to CalDAV), so they
-also need `NEXTCLOUD_BASE_URL` - your Nextcloud instance's base URL with no path, e.g.
-`https://<your-nextcloud-domain>`. Same https/app-password rules as the CalDAV URL above.
+`NEXTCLOUD_CALDAV_URL` is optional and defaults to `<base>/remote.php/dav/`. It is only
+needed when your DAV endpoint is not `<base>/remote.php/dav/` (e.g. if CalDAV sits behind a
+different host or proxy path). Both URLs must point at the same Nextcloud instance.
 
 `PUBLIC_BASE_URL` is the exact URL clients will use to reach this server - see
 [Authentication](#authentication) below for why this has to match precisely.
