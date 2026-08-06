@@ -215,10 +215,10 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
 `faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
 date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
-RFC 5545, VALARM triggers must be in UTC). Reading reminders back always yields UTC, so
-`"...Z"` and offset-bearing input come back as `"+00:00"` — semantically identical, not
-byte-identical. See `docs/tools.md` for the two alarm details that don't survive a
-read-back-and-write-again cycle.
+RFC 5545, VALARM triggers must be in UTC). Reading a reminder and writing it back is safe —
+the alarm is recognized as already present and left alone — but the strings are normalized
+(`"-P1W"` reads back as `"-P7D"`, `"...Z"` as `"+00:00"`). Alarms whose trigger this format
+cannot express are not listed, and are never touched by a write; see `docs/tools.md`.
 
 **Date/time semantics** (applies to `start_datum`, `faellig_datum`, and absolute
 `erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
@@ -229,7 +229,7 @@ offset) is interpreted as UTC.
 
 Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
 changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
-*all* existing reminders on the task.
+the reminders `list_tasks` shows; `felder_leeren` clears *every* alarm instead.
 
 To remove a property entirely (e.g. delete a due date), list its field name in the
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
