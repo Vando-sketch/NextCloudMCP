@@ -59,6 +59,7 @@ def test_all_tools_registered(tools):
         "update_task",
         "complete_task",
         "delete_task",
+        "move_task",
         "list_calendars",
         "create_calendar",
         "delete_calendar",
@@ -68,6 +69,7 @@ def test_all_tools_registered(tools):
         "create_event",
         "update_event",
         "delete_event",
+        "move_event",
         "respond_to_event",
         "link_task_to_event",
         "list_events_for_task",
@@ -500,6 +502,46 @@ def test_delete_task_delegates(tools, fake_service):
     result = _run(tools["delete_task"].fn("Personal", "task-uid"))
     assert result == {"uid": "task-uid"}
     fake_service.delete_task.assert_called_once_with("Personal", "task-uid")
+
+
+def test_move_task_delegates(tools, fake_service):
+    fake_service.move_task.return_value = {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+    }
+    result = _run(
+        tools["move_task"].fn(list_name="Privat", task_uid="task-uid", ziel_liste="Arbeit")
+    )
+    assert result == {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+    }
+    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit")
+
+
+def test_move_event_delegates(tools, fake_service):
+    fake_service.move_event.return_value = {
+        "uid": "event-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "kopiert",
+    }
+    result = _run(
+        tools["move_event"].fn(
+            kalender_name="Privat", event_uid="event-uid", ziel_kalender="Arbeit"
+        )
+    )
+    assert result == {
+        "uid": "event-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "kopiert",
+    }
+    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit")
 
 
 # --- Calendar/event tools ---
