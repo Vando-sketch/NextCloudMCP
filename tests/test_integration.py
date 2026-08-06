@@ -8,10 +8,15 @@ from __future__ import annotations
 import os
 import time
 
+import httpx
 import pytest
+from conftest import run_async
 
 from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
+from nextcloud_task_mcp.errors import NotizNotFoundError
+from nextcloud_task_mcp.notes_client import NotesService
+from nextcloud_task_mcp.notes_mapping import NoteFields
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_INTEGRATION_TESTS") != "1",
@@ -321,3 +326,161 @@ def test_get_agenda_combines_events_and_tasks(live_service, test_list_name, test
         assert matching_tasks and matching_tasks[0]["liste"] == test_list_name
     finally:
         live_service.delete_task(test_list_name, task_uid)
+
+
+# ---------------------------------------------------------------------------
+# Notes API integration tests
+# ---------------------------------------------------------------------------
+
+
+def _live_notes_service() -> NotesService:
+    """Build a NotesService bound to the *currently running* event loop.
+
+    Deliberately not a session-scoped fixture: `NotesService` holds an
+    `httpx.AsyncClient`, whose connection pool belongs to the loop it was
+    created in. These tests drive coroutines with `asyncio.run`, which opens a
+    fresh loop per call, so a service built once and reused across calls dies
+    with "Event loop is closed" on the second one. Each test therefore builds
+    its service *inside* the single `asyncio.run` that executes its whole
+    scenario.
+    """
+    return NotesService(
+        base_url=os.environ["NEXTCLOUD_BASE_URL"],
+        username=os.environ["NEXTCLOUD_USERNAME"],
+        password=os.environ["NEXTCLOUD_APP_PASSWORD"],
+    )
+
+
+def _delete_note_via_httpx(notiz_id: int) -> None:
+    """Bypasses NotesService to issue a raw DELETE request against Nextcloud's
+    Notes REST API.
+
+    NotesService deliberately exposes no delete method (because there is no
+    delete_notiz tool in the FastMCP interface), so integration test cleanup
+    must delete disposable test notes directly via httpx.
+    """
+    base_url = os.environ["NEXTCLOUD_BASE_URL"].rstrip("/")
+    username = os.environ["NEXTCLOUD_USERNAME"]
+    password = os.environ["NEXTCLOUD_APP_PASSWORD"]
+    url = f"{base_url}/index.php/apps/notes/api/v1/notes/{notiz_id}"
+    response = httpx.delete(url, auth=(username, password), timeout=30)
+    if response.status_code not in (200, 204, 404):
+        response.raise_for_status()
+
+
+def test_notes_full_lifecycle() -> None:
+    """Verify the complete notes workflow against a live Nextcloud instance.
+
+    The whole scenario runs inside ONE `asyncio.run` (see
+    `_live_notes_service`): create, read back exactly, replace the content
+    wholesale, rename without touching the content, append twice, list with and
+    without a category filter, and search by content and by title.
+    """
+
+    async def scenario() -> None:
+        service = _live_notes_service()
+        title = "mcp-notes-test"
+        category = "mcp-test"
+        initial_content = "Initial content for live notes integration test."
+
+        created = await service.create_note(
+            NoteFields(titel=title, kategorie=category, inhalt=initial_content)
+        )
+        notiz_id: int = created["id"]
+
+        try:
+            # 1. create_note -> get_note: content comes back exactly as written.
+            fetched = await service.get_note(notiz_id)
+            assert fetched["id"] == notiz_id
+            assert fetched["titel"] == title
+            assert fetched["kategorie"] == category
+            assert fetched["inhalt"] == initial_content
+
+            # 2. update_note(inhalt=...) replaces the content wholesale. The
+            # payload is deliberately awkward - several lines, umlauts, an
+            # emoji, a fenced code block, trailing spaces, a trailing newline -
+            # since that is what a rules note actually contains.
+            demanding_payload = (
+                "Erste Zeile mit Umlauten: ÄÖÜäöüß.\n"
+                "Zweite Zeile mit Emoji: 🚀 und 📝.\n"
+                "Dritte Zeile mit Leerzeichen am Ende:   \n"
+                "```python\n"
+                "def hello_world():\n"
+                '    print("Hallo Welt!")\n'
+                "```\n"
+            )
+            updated = await service.update_note(notiz_id, NoteFields(inhalt=demanding_payload))
+            assert updated["inhalt"] == demanding_payload
+            assert (await service.get_note(notiz_id))["inhalt"] == demanding_payload
+
+            # 2b. A note the size of a real rules note must survive a full
+            # replacement untruncated - the whole point of this suite is that
+            # the deployment's rules live in a note of roughly this size.
+            large_payload = "\n".join(
+                f"{index:04d} Regelzeile mit Umlauten äöü und etwas Fülltext zur Länge."
+                for index in range(300)
+            )
+            assert len(large_payload) > 12_000
+            await service.update_note(notiz_id, NoteFields(inhalt=large_payload))
+            assert (await service.get_note(notiz_id))["inhalt"] == large_payload
+
+            # Restore the smaller payload so the append assertions below stay
+            # readable.
+            await service.update_note(notiz_id, NoteFields(inhalt=demanding_payload))
+
+            # 3. Renaming must not touch the content (the data-loss case).
+            # Keeps the "-test" suffix: a stray leftover has to stay
+            # identifiable as test data by its name alone.
+            renamed = "mcp-notes-renamed-test"
+            await service.update_note(notiz_id, NoteFields(titel=renamed))
+            after_rename = await service.get_note(notiz_id)
+            assert after_rename["titel"] == renamed
+            assert after_rename["inhalt"] == demanding_payload
+
+            # 4. Appending twice keeps everything that was there before.
+            first_block = "Erster Anhang block-test"
+            second_block = "Zweiter Anhang block-test"
+            await service.append_note(notiz_id, first_block)
+            await service.append_note(notiz_id, second_block)
+            appended = await service.get_note(notiz_id)
+            assert appended["inhalt"] == (f"{demanding_payload}\n\n{first_block}\n\n{second_block}")
+
+            # 5. Listing finds it, and the category filter returns that
+            # category only.
+            assert any(note["id"] == notiz_id for note in await service.list_notes())
+            in_category = await service.list_notes(category=category)
+            assert any(note["id"] == notiz_id for note in in_category)
+            assert all(note["kategorie"] == category for note in in_category)
+
+            # 6. Search matches content and title. Upper-case on purpose: the
+            # title is lower-case, so a hit proves the search folds case rather
+            # than matching by accident.
+            assert any(
+                note["id"] == notiz_id for note in await service.search_notes("erster anhang")
+            )
+            assert any(
+                note["id"] == notiz_id for note in await service.search_notes("MCP-NOTES-RENAMED")
+            )
+            assert not any(
+                note["id"] == notiz_id
+                for note in await service.search_notes("unrelated-random-string-mcp-test-999")
+            )
+        finally:
+            _delete_note_via_httpx(notiz_id)
+            await service.aclose()
+
+    run_async(scenario())
+
+
+def test_get_nonexistent_note_raises_notiz_not_found() -> None:
+    """A missing note must surface as NotizNotFoundError, not a raw HTTP error."""
+
+    async def scenario() -> None:
+        service = _live_notes_service()
+        try:
+            with pytest.raises(NotizNotFoundError):
+                await service.get_note(999999999)
+        finally:
+            await service.aclose()
+
+    run_async(scenario())
