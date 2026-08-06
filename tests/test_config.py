@@ -164,7 +164,6 @@ def test_caldav_timeout_seconds_accepts_custom_value():
 
 
 def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", "https://cloud.example.com/remote.php/dav/")
     monkeypatch.setenv("NEXTCLOUD_USERNAME", "testuser")
     monkeypatch.setenv("NEXTCLOUD_APP_PASSWORD", "testpass")
     monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
@@ -201,7 +200,6 @@ def test_from_env_rejects_non_integer_caldav_timeout_seconds(monkeypatch: pytest
 @pytest.mark.parametrize(
     "missing_var",
     [
-        "NEXTCLOUD_CALDAV_URL",
         "NEXTCLOUD_USERNAME",
         "NEXTCLOUD_APP_PASSWORD",
         "NEXTCLOUD_BASE_URL",
@@ -216,6 +214,149 @@ def test_from_env_raises_on_each_missing_required_var(
 
     with pytest.raises(ConfigError, match=missing_var):
         Settings.from_env()
+
+
+# --- Settings.from_env(): optional NEXTCLOUD_CALDAV_URL derivation ---
+
+
+@pytest.mark.parametrize(
+    ("base_url", "expected_caldav_url"),
+    [
+        ("https://cloud.example.com", "https://cloud.example.com/remote.php/dav/"),
+        ("https://cloud.example.com/", "https://cloud.example.com/remote.php/dav/"),
+        ("https://example.com/nextcloud", "https://example.com/nextcloud/remote.php/dav/"),
+        ("https://example.com/nextcloud/", "https://example.com/nextcloud/remote.php/dav/"),
+    ],
+)
+def test_from_env_derives_caldav_url_when_unset(
+    monkeypatch: pytest.MonkeyPatch, base_url: str, expected_caldav_url: str
+):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_CALDAV_URL", raising=False)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", base_url)
+
+    settings = Settings.from_env()
+    assert settings.caldav_url == expected_caldav_url
+
+
+@pytest.mark.parametrize("empty_val", ["", "   "])
+def test_from_env_empty_caldav_url_behaves_like_unset(
+    monkeypatch: pytest.MonkeyPatch, empty_val: str
+):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", empty_val)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
+
+    settings = Settings.from_env()
+    assert settings.caldav_url == "https://cloud.example.com/remote.php/dav/"
+
+
+def test_from_env_explicit_caldav_url_used_verbatim(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", "https://dav.different-host.org/dav/")
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
+
+    settings = Settings.from_env()
+    assert settings.caldav_url == "https://dav.different-host.org/dav/"
+
+
+def test_from_env_http_base_url_derived_caldav_url_fails_https_check(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_CALDAV_URL", raising=False)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "http://cloud.example.com")
+
+    with pytest.raises(ConfigError, match="https"):
+        Settings.from_env()
+
+
+def test_from_env_http_base_url_error_names_the_variable_that_is_actually_set(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The message must point at NEXTCLOUD_BASE_URL, not the derived variable.
+
+    With the scheme checks in the other order, an operator who never set
+    NEXTCLOUD_CALDAV_URL would be told to fix it - a variable that is nowhere
+    in their environment.
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_CALDAV_URL", raising=False)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "http://cloud.example.com")
+
+    with pytest.raises(ConfigError, match="NEXTCLOUD_BASE_URL must use https"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://cloud.example.com/nextcloud?ref=1",
+        "https://cloud.example.com#anchor",
+    ],
+)
+def test_from_env_rejects_base_url_with_query_or_fragment(
+    monkeypatch: pytest.MonkeyPatch, base_url: str
+):
+    """Appending the DAV path to such a URL yields a nonsense endpoint.
+
+    It would pass every scheme and host check, so the server would start
+    happily and only fail on the first CalDAV request.
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_CALDAV_URL", raising=False)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", base_url)
+
+    with pytest.raises(ConfigError, match="query string or fragment"):
+        Settings.from_env()
+
+
+def test_both_urls_insecure_reports_the_base_url_first(monkeypatch: pytest.MonkeyPatch):
+    """Documents the trade-off of checking the base URL first.
+
+    With both set to http://, the operator now hears about NEXTCLOUD_BASE_URL
+    rather than NEXTCLOUD_CALDAV_URL. Both are wrong and both need fixing, and
+    the base URL is the one that can no longer be omitted.
+    """
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "http://cloud.example.com")
+    monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", "http://cloud.example.com/remote.php/dav/")
+
+    with pytest.raises(ConfigError, match="NEXTCLOUD_BASE_URL must use https"):
+        Settings.from_env()
+
+
+def test_explicit_http_caldav_url_still_names_caldav_url(monkeypatch: pytest.MonkeyPatch):
+    """An explicitly set insecure CalDAV URL is still reported as such."""
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
+    monkeypatch.setenv("NEXTCLOUD_CALDAV_URL", "http://dav.example.com/remote.php/dav/")
+
+    with pytest.raises(ConfigError, match="NEXTCLOUD_CALDAV_URL must use https"):
+        Settings.from_env()
+
+
+def test_from_env_http_base_url_derived_caldav_url_allowed_with_insecure_flag(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_CALDAV_URL", raising=False)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "http://cloud.example.com")
+    monkeypatch.setenv("NEXTCLOUD_ALLOW_INSECURE_HTTP", "1")
+
+    settings = Settings.from_env()
+    assert settings.caldav_url == "http://cloud.example.com/remote.php/dav/"
+
+
+def test_from_env_http_base_url_derived_caldav_url_allowed_for_localhost(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("NEXTCLOUD_CALDAV_URL", raising=False)
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "http://localhost:8080")
+
+    settings = Settings.from_env()
+    assert settings.caldav_url == "http://localhost:8080/remote.php/dav/"
 
 
 def test_from_env_reads_notes_base_url(monkeypatch: pytest.MonkeyPatch):
