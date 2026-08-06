@@ -365,6 +365,29 @@ def test_parse_vevent_erinnerungen_skips_end_anchored_alarm():
     assert event_mapping.parse_vevent(event)["erinnerungen"] == []
 
 
+def test_parse_vevent_erinnerungen_lists_end_anchored_alarm_on_event_without_an_end():
+    """Without DTEND/DURATION the event has no end distinct from its start.
+
+    `RELATED=END` then names the same moment as `RELATED=START`, so "-PT30M"
+    is an honest spelling for it - unlike on the event above, where DTEND puts
+    the two anchors two hours apart.
+    """
+    event = _event_from_ics(
+        """BEGIN:VEVENT
+UID:event-1
+SUMMARY:T
+DTSTART:20260720T140000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:end anchored, but there is no end
+TRIGGER;RELATED=END:-PT30M
+END:VALARM
+END:VEVENT
+"""
+    )
+    assert event_mapping.parse_vevent(event)["erinnerungen"] == ["-PT30M"]
+
+
 def test_apply_event_fields_preserves_end_anchored_alarm():
     event = _event_from_ics(_END_ANCHORED_EVENT_ICS)
     end_anchored = next(c for c in event.subcomponents if c.name == "VALARM").to_ical()
