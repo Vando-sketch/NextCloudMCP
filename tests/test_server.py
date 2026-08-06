@@ -399,6 +399,14 @@ def test_update_task_passes_wiederholung(tools, fake_service):
     assert fields.wiederholung == "FREQ=DAILY"
 
 
+def test_update_task_passes_status(tools, fake_service):
+    """The reopen path has to survive the tool layer, not just the mapping."""
+    _run(tools["update_task"].fn("Personal", "task-uid", status="offen"))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.status == "offen"
+
+
 def test_update_task_passes_felder_leeren_wiederholung_as_clear(tools, fake_service):
     _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["wiederholung"]))
     args, _ = fake_service.update_task.call_args
@@ -815,9 +823,36 @@ def test_create_event_from_task_delegates(tools, fake_service):
         )
     )
     fake_service.create_event_from_task.assert_called_once_with(
-        "Privat", "task-1", "Termine", None, 30
+        "Privat", "task-1", "Termine", None, 30, None, None, None, None
     )
     assert result == {"uid": "event-uid", "task_uid": "task-1"}
+
+
+def test_create_event_from_task_passes_new_fields(tools, fake_service):
+    fake_service.create_event_from_task.return_value = "event-uid"
+    _run(
+        tools["create_event_from_task"].fn(
+            list_name="Privat",
+            task_uid="task-1",
+            kalender_name="Termine",
+            start="2026-07-20T14:00:00",
+            ende="2026-07-20T16:00:00",
+            beschreibung="",
+            erinnerungen=["-PT30M"],
+            sichtbarkeit="privat",
+        )
+    )
+    fake_service.create_event_from_task.assert_called_once_with(
+        "Privat",
+        "task-1",
+        "Termine",
+        "2026-07-20T14:00:00",
+        None,
+        "2026-07-20T16:00:00",
+        "",
+        ["-PT30M"],
+        "privat",
+    )
 
 
 def test_get_agenda_delegates(tools, fake_service):

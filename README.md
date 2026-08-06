@@ -174,9 +174,11 @@ excluded — `list_calendars` is their counterpart.
 
 ### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
 
-Returns tasks across one, several, or all task lists (`listen_namen=None` queries all lists; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed tasks. Each task
+Returns tasks across one, several, or all task lists (`listen_namen=None` queries all lists; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed *and* cancelled tasks - this is the underlying `caldav` library's own "pending" query (any `STATUS` of `COMPLETED`/`CANCELLED`, or a `COMPLETED` timestamp, counts as not-open), not a choice layered on top here. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
-`fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
+`fortschritt_prozent`, `status` (`"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"` -
+**breaking change:** two more values than before, settable via `update_task`'s `status`
+parameter), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
 `wiederholung` (raw RRULE text, or `null` if the task doesn't recur — settable via
 `create_task`/`update_task`), and `liste` (the task list's display name).
@@ -224,16 +226,29 @@ Returned timestamps carry the default timezone's offset (e.g. `+02:00`).
 
 ### `update_task(list_name, task_uid, ...)`
 
-Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
-changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
-*all* existing reminders on the task.
+Same fields as `create_task`, all optional except `task_uid`, plus `status`. Only fields
+you pass are changed; everything else on the task is left untouched. Passing `erinnerungen`
+replaces *all* existing reminders on the task.
+
+**`status`** (`"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"`) sets `STATUS`.
+`"erledigt"` behaves exactly like `complete_task` (also sets `PERCENT-COMPLETE=100` and
+the `COMPLETED` timestamp); `"offen"` is the **reopen** path for a task completed by
+mistake (removes `COMPLETED`, resets `PERCENT-COMPLETE` to `0`); `"in-arbeit"`/`"abgesagt"`
+only set `STATUS`. If the same call also passes `fortschritt_prozent`, that explicit value
+wins over whatever percentage `status` would derive. An unknown value is a speaking error
+naming the four accepted labels, and writes nothing. `status` is not accepted in
+`felder_leeren` - use `status="offen"` to reopen instead.
+
+> **BREAKING CHANGE**: task `status` now has **four** values instead of two
+> (`"offen"`/`"in-arbeit"`/`"erledigt"`/`"abgesagt"`) and is directly settable via this
+> parameter, not just an implicit read-only result of `complete_task`.
 
 To remove a property entirely (e.g. delete a due date), list its field name in the
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
 leaves it unchanged. Accepted names: `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
-`uebergeordnete_aufgabe`, `wiederholung` (`titel` cannot be cleared). A field can't be
-both set and cleared in the same call; `wiederholung`'s anchor requirement is checked
+`uebergeordnete_aufgabe`, `wiederholung` (`titel` and `status` cannot be cleared). A field
+can't be both set and cleared in the same call; `wiederholung`'s anchor requirement is checked
 against the task's final state, so clearing the task's only `start_datum`/`faellig_datum`
 while a recurrence is set or remains is rejected too. See [`docs/tools.md`](docs/tools.md)
 for details and examples.
@@ -246,6 +261,7 @@ left untouched, so completing a recurring task ends it as far as this server is
 concerned; advance `faellig_datum` instead to keep a series going. This is this server's
 own verified behaviour (see `docs/tools.md`'s `complete_task` section) — how the
 Nextcloud Tasks app itself displays a completed recurring task is not verified here.
+A task completed by mistake can be reopened with `update_task(status="offen")`.
 
 ### `delete_task(list_name, task_uid)`
 
@@ -270,7 +286,7 @@ the full reference.
 | `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
-| `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=60)` | Timeboxing: builds an event from a task (title/notes/location/tags, due date as start) and links both |
+| `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |
 | `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |
 
 For all-day events `ende` is the **inclusive** last day (RFC 5545's exclusive
