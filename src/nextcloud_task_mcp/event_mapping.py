@@ -263,14 +263,24 @@ def _parse_datetime(value: str) -> date | datetime:
         raise InvalidEventDataError(str(exc)) from None
 
 
+def _component_start(event) -> date | datetime | None:
+    """The component's DTSTART value, or None if it has none this module can read.
+
+    A `date` for an all-day event, a `datetime` otherwise - the two kinds every
+    other value of the component has to agree with.
+    """
+    prop = event.get("dtstart")
+    value = getattr(prop, "dt", None) if prop is not None else None
+    return value if isinstance(value, (date, datetime)) else None
+
+
 def _component_zone(event) -> tzinfo | None:
     """The zone the component's DTSTART is expressed in, or None.
 
     None for an all-day (date-valued) or absent DTSTART, and for a floating
     one - none of those anchor anything to a zone.
     """
-    prop = event.get("dtstart")
-    value = getattr(prop, "dt", None) if prop is not None else None
+    value = _component_start(event)
     return value.tzinfo if isinstance(value, datetime) else None
 
 
@@ -386,8 +396,7 @@ def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
     forbid, and which reads back looking fine. A date-only exception on a timed
     series names no occurrence of it in any case.
     """
-    dtstart = event.get("dtstart")
-    start_value = getattr(dtstart, "dt", None) if dtstart is not None else None
+    start_value = _component_start(event)
     all_day_event = start_value is not None and not isinstance(start_value, datetime)
 
     target = _wire_zone(_component_zone(event))
@@ -469,11 +478,8 @@ def _check_exdates_match_occurrences(
       wrong".
     """
     rrule_prop = event.get("rrule")
-    dtstart_prop = event.get("dtstart")
-    if rrule_prop is None or dtstart_prop is None or not values:
-        return
-    dtstart_value = getattr(dtstart_prop, "dt", None)
-    if not isinstance(dtstart_value, (date, datetime)):
+    dtstart_value = _component_start(event)
+    if rrule_prop is None or dtstart_value is None or not values:
         return
     all_day = not isinstance(dtstart_value, datetime)
 
