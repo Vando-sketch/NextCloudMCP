@@ -369,8 +369,20 @@ def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
 
     Only the spelling is adjusted: each entry keeps the instant it parsed to,
     including the rule that a naive entry means the server's default timezone.
-    All-day (date) entries carry no zone and pass through untouched.
+
+    For the same reason - one property, one set of parameters - every entry
+    must be the same *kind* as the event's own start: date-only entries for an
+    all-day event, datetimes otherwise. A mixed set (or the wrong kind) is
+    rejected rather than written: `icalendar` would put a DATE and a DATE-TIME
+    under one property with a single `TZID`, which RFC 5545 3.8.5.1 (one value
+    type per property) and 3.2.19 (no TZID on a value without local time) both
+    forbid, and which reads back looking fine. A date-only exception on a timed
+    series names no occurrence of it in any case.
     """
+    dtstart = event.get("dtstart")
+    start_value = getattr(dtstart, "dt", None) if dtstart is not None else None
+    all_day_event = start_value is not None and not isinstance(start_value, datetime)
+
     target = _wire_zone(_component_zone(event))
     values: list[date | datetime] = []
     for entry in entries:
@@ -378,6 +390,22 @@ def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
         if isinstance(value, datetime):
             value = value.astimezone(target)
         values.append(value)
+
+    kinds = {isinstance(value, datetime) for value in values}
+    if start_value is not None:
+        kinds.add(not all_day_event)
+    if len(kinds) > 1:
+        if start_value is None:
+            raise InvalidEventDataError(
+                "ausnahme_daten entries must all be of one kind: either date-only "
+                "'YYYY-MM-DD' values or full datetimes, not both."
+            )
+        expected = "date-only 'YYYY-MM-DD' values" if all_day_event else "full datetimes"
+        state = "all-day" if all_day_event else "not all-day"
+        raise InvalidEventDataError(
+            f"ausnahme_daten entries must match the event's start: use {expected}, "
+            f"because the event is {state}."
+        )
     return values
 
 

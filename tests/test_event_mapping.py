@@ -410,6 +410,79 @@ def test_exdate_on_a_utc_event_stays_utc_for_every_entry():
     assert exdate_line == "EXDATE:20260727T070000Z,20260803T070000Z"
 
 
+def test_exdate_mixing_dates_and_datetimes_is_rejected():
+    """One property carries one value type - RFC 5545 3.8.5.1.
+
+    Written together they came out as
+    `EXDATE;TZID=Europe/Berlin:20260727,20260803T090000`: a DATE and a
+    DATE-TIME under one property, no `VALUE=DATE` parameter, and a TZID on a
+    value that has no local time to apply it to (forbidden by 3.2.19). It
+    reads back plausibly, so nothing would ever report it.
+    """
+    event = _new_event()
+    with pytest.raises(InvalidEventDataError, match="ausnahme_daten"):
+        _apply(
+            event,
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-27", "2026-08-03T09:00:00"],
+        )
+
+
+def test_exdate_must_match_the_events_own_kind():
+    """A timed event takes timed exception dates, an all-day one takes dates.
+
+    An `EXDATE;VALUE=DATE` against a `DATE-TIME` DTSTART names no occurrence of
+    the series either way, so it is a silent no-op rather than a cancellation.
+    """
+    timed = _new_event()
+    with pytest.raises(InvalidEventDataError, match="all-day"):
+        _apply(
+            timed,
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-27"],
+        )
+
+    all_day = _new_event()
+    with pytest.raises(InvalidEventDataError, match="all-day"):
+        _apply(
+            all_day,
+            titel="Urlaub",
+            start="2026-07-20",
+            ende="2026-07-20",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-27T09:00:00"],
+        )
+
+
+def test_exdate_mixed_kinds_without_a_start_is_still_rejected():
+    """With no DTSTART to match, the entries must at least agree with each other."""
+    event = _new_event()
+    with pytest.raises(InvalidEventDataError, match="one kind"):
+        _apply(event, titel="T", ausnahme_daten=["2026-07-27", "2026-08-03T09:00:00"])
+
+
+def test_exdate_all_day_event_takes_date_entries():
+    """The matching pair still writes the one correct form."""
+    event = _new_event()
+    _apply(
+        event,
+        titel="Urlaub",
+        start="2026-07-20",
+        ende="2026-07-20",
+        wiederholung="FREQ=WEEKLY",
+        ausnahme_daten=["2026-07-27", "2026-08-03"],
+    )
+
+    exdate_line = [
+        line for line in event.to_ical().decode().split("\r\n") if line.startswith("EXDATE")
+    ][0]
+    assert exdate_line == "EXDATE;VALUE=DATE:20260727,20260803"
+
+
 def test_exdate_parses_repeated_properties_from_other_clients():
     """Other clients may write several EXDATE lines instead of one comma list."""
     event = _new_event()
