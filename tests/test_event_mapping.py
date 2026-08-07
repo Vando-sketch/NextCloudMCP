@@ -1158,6 +1158,29 @@ def test_extract_freebusy_periods_includes_busy_tentative_and_unavailable():
     assert len(event_mapping.extract_freebusy_periods(vfb)) == 2
 
 
+def test_extract_freebusy_periods_reads_a_value_without_z_as_utc():
+    """RFC 5545 3.8.2.6: FREEBUSY periods are UTC, whether or not the Z is there.
+
+    Unlike a VEVENT, a VFREEBUSY has no floating times to interpret - so a
+    value that arrives without its `Z` is a UTC value spelled sloppily, not a
+    local one, and reading it in the server's default timezone moves every
+    busy block by that zone's offset.
+    """
+    component = Calendar.from_ical(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n"
+        "BEGIN:VFREEBUSY\r\nUID:fb-1\r\n"
+        "FREEBUSY;FBTYPE=BUSY:20260720T090000/20260720T100000\r\n"
+        "END:VFREEBUSY\r\nEND:VCALENDAR\r\n"
+    ).walk("VFREEBUSY")[0]
+
+    assert event_mapping.extract_freebusy_periods(component) == [
+        (
+            datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+        )
+    ]
+
+
 def test_extract_freebusy_periods_no_freebusy_property_is_empty():
     vfb = FreeBusy()
     assert event_mapping.extract_freebusy_periods(vfb) == []

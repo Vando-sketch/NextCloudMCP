@@ -300,6 +300,18 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=get_default_timezone())
 
 
+def _utc_value(value: datetime) -> datetime:
+    """Read a value the format itself defines as UTC (a naive one included).
+
+    The counterpart to `_as_utc` for properties RFC 5545 requires to be UTC -
+    FREEBUSY periods - where a missing `Z` is a spelling mistake rather than a
+    floating local time.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 def _local_midnight(value: date) -> datetime:
     """Start of an all-day date, in the server's default timezone.
 
@@ -922,6 +934,12 @@ def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
     busy. Handles both wire forms icalendar produces when parsing a VFREEBUSY
     with more than one FREEBUSY property (each period keeps its own FBTYPE
     parameter, even when flattened into one list by icalendar).
+
+    A period value that arrives without its `Z` is read as UTC, *not* in the
+    server's default timezone the way a VEVENT's floating times are: RFC 5545
+    3.8.2.6 requires FREEBUSY periods to be UTC, so a missing `Z` is a sloppy
+    spelling of a UTC value rather than a local wall clock, and reading it
+    otherwise would move every busy block by the default zone's offset.
     """
     freebusy = component.get("freebusy")
     if freebusy is None:
@@ -937,5 +955,5 @@ def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
         end = getattr(entry, "end", None)
         if start is None or end is None:
             continue
-        periods.append((_as_utc(start), _as_utc(end)))
+        periods.append((_utc_value(start), _utc_value(end)))
     return periods
