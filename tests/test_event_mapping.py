@@ -175,12 +175,17 @@ def test_updating_only_the_end_keeps_the_events_own_zone():
 
 
 def test_naive_input_still_means_the_servers_default_zone_not_the_events():
-    """The anchoring is about *spelling*, not about reinterpreting input.
+    """A naive value keeps its *meaning*; only its spelling follows the event.
 
-    A naive value is documented to mean the server's default timezone
-    everywhere; on an event anchored in a foreign zone it therefore keeps that
-    meaning (and its own zone), rather than being silently re-read as the
-    event's local wall clock.
+    "09:00" on an event anchored in Tokyo still means 09:00 in the server's
+    default timezone, as it does everywhere else - that instant is what gets
+    stored. It is written in the event's own zone (16:00 Tokyo, the same
+    moment), because a DTEND anchored to a different zone than its DTSTART is
+    precisely how an event silently changes length at the next transition.
+
+    This test previously asserted the opposite for the spelling - a DTEND
+    keeping `Europe/Berlin` next to a `TZID=Asia/Tokyo` DTSTART - and so
+    pinned finding 2.5's failure mode as if it were the intended behaviour.
     """
     event = _new_event()
     _apply(event, titel="Call", start="2026-07-20T09:00:00 Asia/Tokyo")
@@ -189,8 +194,51 @@ def test_naive_input_still_means_the_servers_default_zone_not_the_events():
 
     dtend = _dt(event.get("dtend"))
     assert isinstance(dtend, datetime)
-    assert dtend.tzinfo == ZoneInfo("Europe/Berlin")
+    # The instant is the naive-input rule's; the zone is the event's.
     assert dtend.astimezone(timezone.utc) == datetime(2026, 7, 20, 7, 0, tzinfo=timezone.utc)
+    assert dtend.tzinfo == ZoneInfo("Asia/Tokyo")
+    assert "DTEND;TZID=Asia/Tokyo:20260720T160000" in event.to_ical().decode()
+
+
+def test_both_ends_share_one_anchor_on_a_utc_event():
+    """A UTC-anchored event takes a UTC end, whatever zone the input resolved in.
+
+    `create_event(start="...Z")` then `update_event(ende="17:00")` used to
+    write `DTSTART:...Z` next to `DTEND;TZID=Europe/Berlin:...`: the same
+    instant apart today, an hour different after the next Berlin transition,
+    and nothing in the write path notices - finding 2.5 exactly.
+    """
+    event = _new_event()
+    _apply(event, titel="Standup", start="2026-07-20T14:00:00Z", wiederholung="FREQ=WEEKLY")
+
+    _apply(event, ende="2026-07-20T17:00:00")  # 17:00 Berlin = 15:00 UTC
+
+    ical_text = event.to_ical().decode()
+    assert "DTSTART:20260720T140000Z" in ical_text
+    assert "DTEND:20260720T150000Z" in ical_text
+    assert "TZID" not in ical_text
+
+
+def test_an_explicitly_named_zone_re_anchors_the_event():
+    """Naming a zone is the one way to move an event to another one.
+
+    The re-spelling above must not swallow that: `"... Asia/Tokyo"` says which
+    zone the caller means, so the event follows it (and its end with it).
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Call",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        ende="2026-07-20T10:00:00 Europe/Berlin",
+        wiederholung="FREQ=WEEKLY",
+    )
+
+    _apply(event, start="2026-07-21T09:00:00 Asia/Tokyo", ende="2026-07-21T10:00:00 Asia/Tokyo")
+
+    ical_text = event.to_ical().decode()
+    assert "DTSTART;TZID=Asia/Tokyo:20260721T090000" in ical_text
+    assert "DTEND;TZID=Asia/Tokyo:20260721T100000" in ical_text
 
 
 def test_z_suffix_datetime_input_formatted_in_default_timezone():
