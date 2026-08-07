@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -956,6 +957,59 @@ def test_filter_events_limit_returns_earliest():
 def test_filter_events_limit_must_be_positive():
     with pytest.raises(InvalidEventDataError, match="limit"):
         event_mapping.filter_events([], limit=0)
+
+
+# --- local day window (get_agenda) ---
+
+
+def _in_day(events: list[dict[str, Any]], day: date = date(2026, 7, 20)) -> list[str]:
+    start, end = event_mapping.local_day_window(day)
+    return [event["uid"] for event in event_mapping.events_in_window(events, start, end)]
+
+
+def test_events_in_window_uses_local_day_edges():
+    """Both edges are half-open: midnight belongs to the day that starts there."""
+    events: list[dict[str, Any]] = [
+        {"uid": "ends-at-midnight", "start": "2026-07-19T23:00:00+02:00", "ende": "2026-07-20"},
+        {"uid": "starts-at-midnight", "start": "2026-07-20T00:00:00+02:00", "ende": None},
+        {"uid": "last-minute", "start": "2026-07-20T23:59:00+02:00", "ende": None},
+        {"uid": "next-midnight", "start": "2026-07-21T00:00:00+02:00", "ende": None},
+    ]
+    # "ends-at-midnight" has a datetime start and an all-day end - a pairing
+    # this server never writes, so its end is ignored and it counts as a
+    # zero-length event at 23:00 on the 19th.
+    assert _in_day(events) == ["starts-at-midnight", "last-minute"]
+
+
+def test_events_in_window_covers_a_multi_day_all_day_event():
+    events = [
+        {"uid": "holiday", "start": "2026-07-18", "ende": "2026-07-21"},
+        {"uid": "other-week", "start": "2026-07-27", "ende": "2026-07-28"},
+    ]
+    assert _in_day(events) == ["holiday"]
+
+
+def test_events_in_window_ignores_a_mismatched_all_day_pair():
+    """An all-day start with a timed end - only a foreign client writes that.
+
+    There is no sane length to read out of the pair, so the event counts as
+    the one day its start names rather than as something reaching into the
+    next.
+    """
+    events = [{"uid": "odd", "start": "2026-07-20", "ende": "2026-07-20T15:00:00+02:00"}]
+    assert _in_day(events) == ["odd"]
+    assert _in_day(events, date(2026, 7, 21)) == []
+
+
+def test_events_in_window_keeps_what_it_cannot_judge():
+    """Neither a series master nor an event without a start may be dropped."""
+    events: list[dict[str, Any]] = [
+        {"uid": "series", "start": "2020-01-06T09:00:00+01:00", "wiederholung": "FREQ=WEEKLY"},
+        {"uid": "no-start", "start": None},
+        {"uid": "unparseable", "start": "irgendwann"},
+        {"uid": "elsewhere", "start": "2026-09-01T09:00:00+02:00"},
+    ]
+    assert _in_day(events) == ["series", "no-start", "unparseable"]
 
 
 # --- free-busy: event_busy_interval ---
