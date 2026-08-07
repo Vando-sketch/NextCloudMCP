@@ -77,12 +77,16 @@ This project does not yet follow Semantic Versioning releases.
   hour of DST drift after a single read/write round trip, and updating only
   `start` or only `ende` could leave the two ends anchored differently (the
   event silently changing length at the next transition). `start`, `ende` and
-  `ausnahme_daten` values that name no zone of their own are now written in
-  the zone the event is already anchored to, same instant. `ausnahme_daten`
-  additionally shares one representation across all its entries - a mix of
-  naive and offset entries used to produce an `EXDATE` with a `TZID`
-  parameter next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids
-  and no reader reports.
+  `ausnahme_daten` are now written in the timezone the event itself is
+  anchored to - its `DTSTART`'s - whichever zone the value arrived in, and
+  always at the instant that value meant (a naive one still means the server's
+  default timezone). Naming a zone on `start`
+  (`"2026-07-21T09:00:00 Asia/Tokyo"`) is how an event is *moved* to another
+  zone; everything else then follows the new anchor. `ausnahme_daten`
+  therefore also shares one representation across all its entries - a mix of
+  naive and offset entries used to produce an `EXDATE` with a `TZID` parameter
+  next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids and no
+  reader reports.
 - **`get_free_busy(benutzer=...)` sends a valid VFREEBUSY again.** The
   scheduling request carried its day bounds as `DTSTART;TZID=Europe/Berlin:...`
   in a request body that has no VTIMEZONE component in it; RFC 5545 3.6.4

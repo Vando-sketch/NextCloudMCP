@@ -271,6 +271,36 @@ def visibility_label_to_ical(label: str) -> str:
         ) from None
 
 
+def _split_timezone_name(text: str) -> tuple[str, ZoneInfo | None]:
+    """Split "<datetime> <IANA name>" into its two parts.
+
+    The zone is None (and the text returned unchanged) when the value names no
+    zone this machine knows - a plain datetime, or a trailing word that is not
+    a zone name, both of which the datetime parser then rejects or accepts on
+    its own terms.
+    """
+    if " " not in text:
+        return text, None
+    candidate_text, _, candidate_zone = text.rpartition(" ")
+    try:
+        return candidate_text, ZoneInfo(candidate_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return text, None
+
+
+def names_timezone(value: str) -> bool:
+    """Whether this input names an IANA timezone itself (e.g. "... Europe/Berlin").
+
+    The difference between a zone the *caller* chose and the default one this
+    server attached to a naive value. Both come back from
+    `parse_datetime_input(keep_zone=True)` as an ordinary `ZoneInfo`, but only
+    the first is a statement about which zone the value belongs in - which is
+    what lets `event_mapping` move an event to another zone on request while
+    still writing everything else in the zone the event already has.
+    """
+    return _split_timezone_name(value.strip())[1] is not None
+
+
 def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datetime:
     """Parse an ISO 8601 date or datetime string, accepting a trailing 'Z'.
 
@@ -330,16 +360,7 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
         except ValueError:
             pass  # fall through to the datetime/error path below
 
-    dt_text = text
-    zone: ZoneInfo | None = None
-    if " " in text:
-        candidate_text, _, candidate_zone = text.rpartition(" ")
-        try:
-            zone = ZoneInfo(candidate_zone)
-        except (ZoneInfoNotFoundError, ValueError):
-            zone = None
-        else:
-            dt_text = candidate_text
+    dt_text, zone = _split_timezone_name(text)
 
     normalized = dt_text[:-1] + "+00:00" if dt_text.endswith("Z") else dt_text
     try:

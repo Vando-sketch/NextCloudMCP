@@ -19,6 +19,7 @@ from .mapping import (
     format_datetime_output,
     get_default_timezone,
     local_midnight,
+    names_timezone,
     parse_datetime_input,
     visibility_label_to_ical,
 )
@@ -266,25 +267,47 @@ def _component_zone(event) -> tzinfo | None:
     return value.tzinfo if isinstance(value, datetime) else None
 
 
+def _wire_zone(zone: tzinfo | None) -> tzinfo:
+    """The zone a component's values are written in, given its DTSTART's zone.
+
+    An IANA zone is written as a `TZID` reference (with a matching VTIMEZONE,
+    see `caldav_client._sync_vtimezones`); anything else - a bare UTC instant,
+    or a fixed offset left by another client - is written as UTC, since
+    `icalendar` would otherwise emit a nonstandard `TZID="UTC+02:00"` naming no
+    real zone. Shared by everything that has to put several values of one
+    component into the same form: DTSTART/DTEND (`_anchored`) and EXDATE
+    (`_exdate_values`).
+    """
+    return zone if isinstance(zone, ZoneInfo) else timezone.utc
+
+
 def _anchored(value: date | datetime, zone: tzinfo | None) -> date | datetime:
     """Express a datetime in the component's own zone, keeping the instant.
 
-    A value that carries a real IANA zone of its own (a naive input resolved
-    in the default timezone, or an explicit `"... Europe/Berlin"`) keeps it -
-    the caller named a zone, and `_sync_vtimezones` will write the matching
-    VTIMEZONE. A value that carries only a fixed offset says nothing about
-    *which* zone it belongs to; `mapping.parse_datetime_input` turns those into
-    plain UTC, and adopting the component's zone instead is what keeps
-    `get_event` -> `update_event` from quietly re-anchoring a recurring event
-    to a UTC instant (and its DTSTART/DTEND from ending up anchored
-    differently, which changes the event's real length at the next DST
-    transition).
+    Whichever zone a value arrived in - the default one this server attaches to
+    naive input, or the plain UTC `parse_datetime_input` turns an explicit
+    "+02:00" into - it is written in the zone the component's DTSTART already
+    uses. Two things depend on that:
+
+    - `get_event` -> `update_event` must not re-anchor a recurring event to a
+      fixed UTC instant, the one form that reintroduces DST drift;
+    - DTSTART and DTEND must not end up anchored to *different* zones. Two such
+      ends are the same instant apart on the day they are written and an hour
+      apart after the next transition in either zone, so the event silently
+      changes length and nothing in the write path can see it (finding 2.5).
+
+    Only the spelling changes; the instant stays whatever the input meant,
+    including the rule that a naive value means the server's default timezone.
+    Moving an event to another zone is done by *naming* that zone, which
+    `apply_event_fields` handles before calling this (`mapping.names_timezone`).
+
+    `zone` is None when the component has no datetime DTSTART to anchor to (an
+    all-day or absent one), and dates carry no zone at all: both pass through.
+    Values always come from `_parse_datetime`, so a datetime here is aware.
     """
-    if not isinstance(zone, ZoneInfo) or not isinstance(value, datetime):
+    if zone is None or not isinstance(value, datetime):
         return value
-    if value.tzinfo is None or isinstance(value.tzinfo, ZoneInfo):
-        return value
-    return value.astimezone(zone)
+    return value.astimezone(_wire_zone(zone))
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -348,12 +371,11 @@ def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
     including the rule that a naive entry means the server's default timezone.
     All-day (date) entries carry no zone and pass through untouched.
     """
-    zone = _component_zone(event)
-    target: tzinfo = zone if isinstance(zone, ZoneInfo) else timezone.utc
+    target = _wire_zone(_component_zone(event))
     values: list[date | datetime] = []
     for entry in entries:
         value = _parse_datetime(entry)
-        if isinstance(value, datetime) and value.tzinfo is not None:
+        if isinstance(value, datetime):
             value = value.astimezone(target)
         values.append(value)
     return values
@@ -454,18 +476,22 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         elif ical_name is not None and ical_name in event:
             del event[ical_name]
 
-    # The zone the event is already anchored to (before its DTSTART is
-    # replaced), so a value that carries only a numeric offset - which is how
-    # `parse_vevent` renders every timestamp - adopts the event's own zone
-    # instead of pinning it to a fixed UTC instant.
+    # The zone the event is already anchored to (read before its DTSTART is
+    # replaced), so every value written below goes on the wire in that one zone
+    # instead of each keeping whichever zone it happened to parse in.
     zone = _component_zone(event)
 
     if fields.titel is not None:
         _set(event, "summary", fields.titel)
     if fields.start is not None:
-        _set(event, "dtstart", _anchored(_parse_datetime(fields.start), zone))
-        # A new start may name a zone of its own; everything below anchors to
-        # the event's final DTSTART, not the one it had on the way in.
+        start_value = _parse_datetime(fields.start)
+        if not names_timezone(fields.start):
+            # A start that names no zone means "this instant", not "this event
+            # now lives in that zone" - so it is written in the event's own.
+            # Naming a zone explicitly is how an event is *moved* to one, and
+            # then everything below follows the new anchor.
+            start_value = _anchored(start_value, zone)
+        _set(event, "dtstart", start_value)
         zone = _component_zone(event)
     if fields.ende is not None:
         end_value = _anchored(_parse_datetime(fields.ende), zone)
