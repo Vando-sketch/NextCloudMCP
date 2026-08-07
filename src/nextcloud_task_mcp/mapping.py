@@ -164,13 +164,28 @@ def get_default_timezone() -> tzinfo:
 def _resolve_in_zone(value: datetime) -> datetime:
     """Settle a zone-anchored wall-clock datetime into the form it is written in.
 
-    A zone that *is* UTC collapses to `datetime.timezone.utc`, so the value is
-    serialized as `...Z` instead of as a TZID reference (see `_UTC_ZONE_KEYS`).
-    Everything else is returned unchanged.
+    Two adjustments, both of which only matter once the zone is *kept* (the
+    `keep_zone=True` path, i.e. events) instead of collapsed to a UTC instant:
+
+    - A zone that *is* UTC collapses to `datetime.timezone.utc`, so the value
+      is serialized as `...Z` instead of as a TZID reference (`_UTC_ZONE_KEYS`).
+    - A wall clock reading that the zone's spring-forward gap skips (02:30 on a
+      day that jumps 02:00 -> 03:00) is respelled as the real local time of the
+      same instant (03:30). `zoneinfo` resolves such a reading with the
+      pre-transition offset (`fold=0`), which is a well-defined *instant* - but
+      writing it out as `DTSTART;TZID=Europe/Berlin:...T023000` hands every
+      other client a reading that never happens, to resolve its own way.
+      Ambiguous readings (the autumn overlap) are left exactly as they are:
+      they do happen, twice, and `fold=0` picks the earlier one.
     """
     zone = value.tzinfo
-    if isinstance(zone, ZoneInfo) and zone.key in _UTC_ZONE_KEYS:
+    if not isinstance(zone, ZoneInfo):
+        return value
+    if zone.key in _UTC_ZONE_KEYS:
         return value.replace(tzinfo=timezone.utc)
+    settled = value.astimezone(timezone.utc).astimezone(zone)
+    if settled.replace(tzinfo=None) != value.replace(tzinfo=None):
+        return settled
     return value
 
 
@@ -280,6 +295,10 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       default `fold=0`, i.e. with the pre-transition offset, rather than
       rejected: refusing a timestamp for one hour twice a year would be a
       worse failure mode than picking the earlier of two plausible instants.
+      With `keep_zone=True` a nonexistent reading is additionally respelled as
+      the real local time of that same instant (02:30 -> 03:30), so what goes
+      on the wire is a wall clock reading that actually happens - see
+      `_resolve_in_zone`.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):

@@ -828,6 +828,41 @@ def test_local_times_inside_a_dst_gap_or_overlap_resolve_by_fold():
     assert ambiguous == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
 
 
+def test_gap_wall_time_is_settled_before_it_is_stored_with_its_zone():
+    """A wall time inside the spring-forward gap is moved to a real one.
+
+    With the zone kept (`keep_zone=True`, what events do), "02:30" on
+    2026-03-29 would otherwise be written verbatim as
+    `DTSTART;TZID=Europe/Berlin:20260329T023000` - a wall clock reading that
+    never happens, which every client is free to resolve its own way. The
+    instant is unchanged (01:30 UTC, `fold=0`), only its spelling in the zone
+    is made a real one.
+    """
+    settled = mapping.parse_datetime_input("2026-03-29T02:30:00", keep_zone=True)
+    assert isinstance(settled, datetime)
+    assert settled.astimezone(timezone.utc) == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+    assert (settled.hour, settled.minute) == (3, 30)
+    assert settled.utcoffset() == timedelta(hours=2)
+
+    named = mapping.parse_datetime_input("2026-03-29T02:30:00 Europe/Berlin", keep_zone=True)
+    assert isinstance(named, datetime)
+    assert (named.hour, named.minute) == (3, 30)
+
+
+def test_ambiguous_wall_time_keeps_its_spelling_when_the_zone_is_kept():
+    """The autumn overlap needs no rescue: "02:30" happens, just twice.
+
+    `fold=0` (the earlier of the two instants) is the documented choice; the
+    gap handling above must not rewrite this one to 03:30.
+    """
+    kept = mapping.parse_datetime_input("2026-10-25T02:30:00", keep_zone=True)
+    assert isinstance(kept, datetime)
+    assert (kept.hour, kept.minute) == (2, 30)
+    # A wall time inside a fold compares unequal to any other zone's datetime
+    # (PEP 495), so the instant is checked after an explicit conversion.
+    assert kept.astimezone(timezone.utc) == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+
 def test_absolute_reminder_is_written_to_the_wire_in_utc():
     """RFC 5545 demands a UTC absolute TRIGGER - only the *display* is local."""
     todo = _new_todo()
