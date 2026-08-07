@@ -2156,8 +2156,11 @@ def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, princip
     result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
 
     args, _ = principal.freebusy_request.call_args
-    assert args[0] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
-    assert args[1] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+    # UTC bounds, as the VFREEBUSY they end up in requires - the local day
+    # bounds are the same instants (see
+    # test_get_free_busy_for_other_user_sends_utc_bounds).
+    assert args[0] == datetime(2026, 7, 19, 22, 0, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
     assert args[2] == ["mailto:bob@example.com"]
     assert result["benutzer"] == "bob@example.com"
     assert result["belegt"] == [
