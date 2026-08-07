@@ -58,6 +58,14 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Changed
 
+- **One configurable server timezone instead of hardcoded UTC**
+  (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Naive datetime input is
+  interpreted in that zone, day windows (`get_agenda`, `von`/`bis`,
+  `faellig_vor`/`faellig_nach`) are local days in it, and returned timestamps
+  carry its offset (e.g. `+02:00`); all-day values stay bare `YYYY-MM-DD`
+  strings. `MCP_DEFAULT_TIMEZONE=UTC` restores the previous behaviour
+  *including the wire format*: a zone that is UTC is written as plain
+  `...Z`, never as `;TZID=UTC:...` with an accompanying VTIMEZONE.
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task
