@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +14,7 @@ import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from caldav.lib.url import URL
-from icalendar import Calendar, Event, FreeBusy, Timezone, Todo
+from icalendar import Calendar, Event, FreeBusy, Timezone, Todo, vRecur
 from lxml import etree
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
@@ -34,6 +35,10 @@ from nextcloud_task_mcp.errors import (
     TaskMcpError,
     TaskNotFoundError,
 )
+
+#: The shipped default timezone, spelled out where a test builds a component
+#: in it (the autouse `reset_default_timezone` fixture keeps it in effect).
+BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def _make_calendar(
@@ -1333,6 +1338,32 @@ def test_create_event_with_naive_start_adds_default_zone_vtimezone(service, prin
     assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
 
 
+def test_create_event_with_utc_default_timezone_writes_plain_z_and_no_vtimezone(service, principal):
+    """`MCP_DEFAULT_TIMEZONE=UTC` restores the pre-default-timezone wire format.
+
+    Restores the coverage the original
+    `test_create_event_without_named_zone_has_no_vtimezone` had: keeping UTC as
+    a `ZoneInfo` writes `DTSTART;TZID=UTC:...` plus a VTIMEZONE carrying a
+    single zero-offset observance onto every event - understood by fewer
+    clients than a plain `Z`, and the opposite of "restores the previous UTC
+    behavior".
+    """
+    mapping.set_default_timezone("UTC")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00"),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "VTIMEZONE" not in ical_text
+    assert "TZID" not in ical_text
+    assert "DTSTART:20260720T140000Z" in ical_text
+
+
 def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal):
     """Regression test: a named-zone DTSTART needs its own VTIMEZONE on the
     wire (RFC 5545 3.6.5), or the TZID it references is dangling."""
@@ -1354,6 +1385,33 @@ def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal
     assert "TZID:Europe/Berlin" in ical_text
     assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in ical_text
     assert ical_text.index("BEGIN:VTIMEZONE") < ical_text.index("BEGIN:VEVENT")
+
+
+def test_attached_vtimezone_rules_reach_well_past_2038(service, principal):
+    """A VTIMEZONE that stops in 2037 mis-resolves every date after it.
+
+    `icalendar` writes the transitions as an explicit RDATE list, not as a
+    rule, and defaults to ending it at 2038-01-01. A client reading such a
+    component applies the last observance it finds to everything later, so a
+    recurring event's summer occurrences from 2038 on come out an hour off -
+    the exact drift this zone handling exists to avoid.
+    """
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            wiederholung="FREQ=WEEKLY",
+        ),
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    vtimezone = ical_text.split("BEGIN:VTIMEZONE")[1].split("END:VTIMEZONE")[0]
+    years = {int(year) for year in re.findall(r"(\d{4})\d{4}T\d{6}", vtimezone)}
+    assert max(years) >= 2090
 
 
 def test_get_event_parses_and_annotates_calendar(service, principal):
@@ -1650,10 +1708,84 @@ def test_create_event_from_task_uses_due_datetime(service, principal):
     _, kwargs = event_cal.save_event.call_args
     ical_text = kwargs["ical"]
     assert "SUMMARY:Steuer" in ical_text
-    assert "DTSTART:20260720T120000Z" in ical_text
-    assert "DTEND:20260720T123000Z" in ical_text
+    # Timeboxing produces an ordinary event: anchored to the zone the task's
+    # due date was read in, exactly like create_event with the same value.
+    assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
+    assert "DTEND;TZID=Europe/Berlin:20260720T143000" in ical_text
+    assert "BEGIN:VTIMEZONE" in ical_text
     assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
     assert uid
+
+
+def test_create_event_from_task_keeps_an_explicit_zone_name(service, principal):
+    """An explicit start zone survives into the event, offsets stay UTC.
+
+    `create_event_from_task` is the one event-creating path that re-formatted
+    its start before handing it on, which flattened every zone to a numeric
+    offset - so the timebox for a task was the only event that could never be
+    zone-anchored.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat",
+        "task-1",
+        "Termine",
+        start="2026-07-20T09:00:00 Asia/Tokyo",
+        dauer_minuten=45,
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART;TZID=Asia/Tokyo:20260720T090000" in ical_text
+    assert "DTEND;TZID=Asia/Tokyo:20260720T094500" in ical_text
+    assert "TZID:Asia/Tokyo" in ical_text
+
+
+def test_create_event_from_task_explicit_offset_start_stays_utc(service, principal):
+    """An explicit numeric offset keeps `create_event`'s rule, deliberately.
+
+    An offset names an instant, not a zone, and `create_event` stores such a
+    value as plain UTC rather than inventing a TZID for it - the timebox path
+    must not quietly disagree with it.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat", "task-1", "Termine", start="2026-07-20T14:00:00+05:00", dauer_minuten=30
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART:20260720T090000Z" in ical_text
+    assert "DTEND:20260720T093000Z" in ical_text
+    assert "VTIMEZONE" not in ical_text
+
+
+def test_create_event_from_task_spanning_a_dst_change_keeps_its_real_length(service, principal):
+    """`dauer_minuten` is a real duration, not a wall-clock one.
+
+    Adding the timedelta to a zone-aware start does wall-clock arithmetic, so
+    a 120-minute block starting an hour before the spring-forward jump would
+    end up 180 real minutes long.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat", "task-1", "Termine", start="2026-03-29T01:30:00", dauer_minuten=120
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:20260329T013000" in ical_text
+    # 01:30 CET + 2 real hours = 04:30 CEST, not 03:30.
+    assert "DTEND;TZID=Europe/Berlin:20260329T043000" in ical_text
 
 
 def test_create_event_from_task_all_day_due_date(service, principal):
@@ -1709,11 +1841,74 @@ def test_get_agenda_combines_events_and_due_tasks(service, principal):
     assert [e["uid"] for e in result["termine"]] == ["event-1"]
     assert [t["uid"] for t in result["aufgaben"]] == ["task-1"]
     assert result["aufgaben"][0]["liste"] == "Privat"
-    # Events were queried with expand=True over exactly that day in default timezone.
+    # Events are queried with expand=True over the neighbouring days too (see
+    # test_get_agenda_keeps_only_events_of_the_local_day) and cut back to the
+    # local day afterwards.
     _, kwargs = event_cal.search.call_args
     assert kwargs["expand"] is True
-    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
-    assert kwargs["end"] == datetime(2026, 7, 21, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["start"] == datetime(2026, 7, 19, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+
+
+def test_get_agenda_keeps_only_events_of_the_local_day(service, principal):
+    """The day an agenda reports is this server's local day, whatever the server thinks.
+
+    A CalDAV time-range REPORT resolves all-day and floating values in the
+    *collection's* timezone (RFC 4791 9.9), which is the Nextcloud account's
+    setting and need not be `MCP_DEFAULT_TIMEZONE`. Where the two disagree, the
+    REPORT hands back a neighbouring day's all-day event, or drops a floating
+    one an hour before midnight - so the query covers the neighbouring days and
+    the local-day rule is applied here, once, to both halves of the agenda.
+
+    The mocked calendar returns the same four events for any window, which is
+    exactly the "server draws the boundary elsewhere" case.
+    """
+
+    def _event(uid, **props):
+        component = Event()
+        component.add("uid", uid)
+        component.add("summary", uid)
+        for name, value in props.items():
+            component.add(name, value)
+        return _make_event_obj(component)
+
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [
+        _event("all-day-yesterday", dtstart=date(2026, 7, 19), dtend=date(2026, 7, 20)),
+        _event("all-day-today", dtstart=date(2026, 7, 20), dtend=date(2026, 7, 21)),
+        _event("floating-late-today", dtstart=datetime(2026, 7, 20, 23, 30)),
+        _event("timed-tomorrow", dtstart=datetime(2026, 7, 21, 0, 30, tzinfo=BERLIN)),
+    ]
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [e["uid"] for e in result["termine"]] == ["all-day-today", "floating-late-today"]
+
+
+def test_get_agenda_keeps_a_recurring_master_the_server_did_not_expand(service, principal):
+    """A series master says nothing about which occurrence matched the query.
+
+    Servers that ignore the expansion request answer with the master component
+    and its far-away DTSTART; judging that by the local-day rule would drop a
+    recurring event from every agenda but the day it started.
+    """
+    master = Event()
+    master.add("uid", "weekly")
+    master.add("summary", "Standup")
+    master.add("dtstart", datetime(2020, 1, 6, 9, 0, tzinfo=BERLIN))
+    master.add("rrule", vRecur.from_ical("FREQ=WEEKLY"))
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [_make_event_obj(master)]
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [e["uid"] for e in result["termine"]] == ["weekly"]
 
 
 def test_get_agenda_excludes_tasks_due_other_days(service, principal):
@@ -1755,11 +1950,12 @@ def test_get_agenda_day_window_local_timezone_bounds(service, principal):
 
 
 def test_get_agenda_day_window_spans_dst_transition(service, principal):
-    """The event query window is a real local day, 25 hours long on 2026-10-25.
+    """The day an agenda covers is a real local day, 25 hours long on 2026-10-25.
 
     Building it by adding a fixed 24 hours would cut the last local hour off
     the fall-back day - the class of off-by-an-hour bug this whole change is
-    about.
+    about. The query around it is a whole number of local days too, so the
+    widening can't shave an hour off either end.
     """
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.search.return_value = []
@@ -1769,13 +1965,16 @@ def test_get_agenda_day_window_spans_dst_transition(service, principal):
 
     service.get_agenda("2026-10-25")
 
-    _, kwargs = event_cal.search.call_args
-    start, end = kwargs["start"], kwargs["end"]
+    start, end = event_mapping.local_day_window(date(2026, 10, 25))
     assert start.isoformat() == "2026-10-25T00:00:00+02:00"
     assert end.isoformat() == "2026-10-26T00:00:00+01:00"
     # Subtracting two datetimes that share a tzinfo gives the *wall-clock*
     # difference (24h here), so the real length has to be measured in UTC.
     assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(hours=25)
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"].isoformat() == "2026-10-24T00:00:00+02:00"
+    assert kwargs["end"].isoformat() == "2026-10-27T00:00:00+01:00"
 
 
 # ======================================================================
@@ -2023,6 +2222,28 @@ def test_get_free_busy_returns_normalized_bounds(service, principal):
     assert result["bis"] == "2026-07-22T00:00:00+02:00"
 
 
+def test_get_free_busy_bounds_are_readings_that_exist(service, principal):
+    """A day window is reported back, so it must be a time that happens.
+
+    America/Santiago moves its clocks at 00:00, so 2026-09-06 has no midnight;
+    the window still starts at that day's first instant, and says so with a
+    reading the day really had.
+    """
+    mapping.set_default_timezone("America/Santiago")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-09-06", "2026-09-06")
+
+    assert result["von"] == "2026-09-06T01:00:00-03:00"
+    assert result["bis"] == "2026-09-07T00:00:00-03:00"
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"].astimezone(timezone.utc) == datetime(
+        2026, 9, 6, 4, 0, tzinfo=timezone.utc
+    )
+
+
 def test_get_free_busy_own_availability_translates_generic_exception(service, principal):
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.search.side_effect = RuntimeError("boom")
@@ -2049,13 +2270,38 @@ def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, princip
     result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
 
     args, _ = principal.freebusy_request.call_args
-    assert args[0] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
-    assert args[1] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+    # UTC bounds, as the VFREEBUSY they end up in requires - the local day
+    # bounds are the same instants (see
+    # test_get_free_busy_for_other_user_sends_utc_bounds).
+    assert args[0] == datetime(2026, 7, 19, 22, 0, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
     assert args[2] == ["mailto:bob@example.com"]
     assert result["benutzer"] == "bob@example.com"
     assert result["belegt"] == [
         {"von": "2026-07-20T11:00:00+02:00", "bis": "2026-07-20T12:00:00+02:00"}
     ]
+
+
+def test_get_free_busy_for_other_user_sends_utc_bounds(service, principal):
+    """A VFREEBUSY's DTSTART/DTEND must be UTC (RFC 5545 3.6.4, RFC 6638).
+
+    caldav puts the datetimes it is handed straight into the VFREEBUSY it
+    POSTs to the schedule outbox, and `icalendar` writes a zone-aware value as
+    `DTSTART;TZID=Europe/Berlin:...` - a TZID reference in a request that
+    carries no VTIMEZONE component at all, which a server is free to reject or
+    to resolve as something else entirely.
+    """
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[0].tzinfo is timezone.utc
+    assert args[1].tzinfo is timezone.utc
+    # The same instants as the local day bounds: 2026-07-20 00:00+02:00 on.
+    assert args[0] == datetime(2026, 7, 19, 22, 0, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
 
 
 def test_get_free_busy_for_other_user_accepts_mailto_prefixed_benutzer(service, principal):
@@ -2516,6 +2762,34 @@ def test_list_trash_deleted_at_accepts_iso8601_too(service, dav_client):
     <d:propstat>
       <d:prop>
         <nc:deleted-at>2026-07-10T12:00:00+00:00</nc:deleted-at>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_trash()
+
+    assert result[0]["geloescht_am"] == "2026-07-10T14:00:00+02:00"
+
+
+def test_list_trash_deleted_at_without_an_offset_is_read_as_utc(service, dav_client):
+    """`{nc}deleted-at` is a server-side timestamp, not a caller's input.
+
+    Nextcloud emits it in UTC; a value that arrives without an offset is
+    therefore a UTC one missing its suffix, not a local wall clock. Reading it
+    in the default timezone stamps the deletion two hours early - and this is
+    the one field in `list_trash` an operator uses to decide what to restore.
+    """
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/9.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <nc:deleted-at>2026-07-10T12:00:00</nc:deleted-at>
       </d:prop>
       <d:status>HTTP/1.1 200 OK</d:status>
     </d:propstat>

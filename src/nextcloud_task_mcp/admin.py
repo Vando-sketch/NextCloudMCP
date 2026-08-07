@@ -31,10 +31,15 @@ import os
 import sys
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from .config import default_timezone_from_env
 
 #: Mirrors personal_auth.DEFAULT_STATE_DIR - duplicated rather than imported
 #: so this module stays a plain stdlib script, independent of the vendored
-#: file and everything it (transitively) imports (fastmcp, mcp).
+#: file and everything it (transitively) imports (fastmcp, mcp). (`config` is
+#: itself stdlib-only, so reading the configured timezone from it costs
+#: nothing of that independence.)
 DEFAULT_STATE_DIR = ".oauth-state"
 STATE_FILENAME = "oauth_tokens.json"
 
@@ -87,10 +92,25 @@ def _truncate(token: str, length: int = 16) -> str:
     return token if len(token) <= length else f"{token[:length]}..."
 
 
+def _default_timezone() -> datetime.tzinfo:
+    """The zone the server formats its timestamps in (`MCP_DEFAULT_TIMEZONE`).
+
+    Falls back to UTC when that names no zone this machine knows: the server
+    itself refuses to start on such a value, but an operator listing tokens
+    with a typo'd (or unset) environment is better served by a timestamp in a
+    named zone than by a stack trace.
+    """
+    try:
+        return ZoneInfo(default_timezone_from_env())
+    except (ZoneInfoNotFoundError, ValueError):
+        return datetime.timezone.utc
+
+
 def _format_expiry(expires_at: float | int | None) -> str:
+    """An expiry timestamp in the server's default timezone, like every other one."""
     if expires_at is None:
         return "never"
-    return datetime.datetime.fromtimestamp(expires_at, tz=datetime.timezone.utc).isoformat()
+    return datetime.datetime.fromtimestamp(expires_at, tz=_default_timezone()).isoformat()
 
 
 def _format_token_line(prefix: str, token: str, info: dict[str, Any]) -> str:
