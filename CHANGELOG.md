@@ -98,6 +98,15 @@ This project does not yet follow Semantic Versioning releases.
   offset as UTC - it is Nextcloud's own record of the deletion, not a
   caller's input or a floating calendar time - and is then rendered in the
   default timezone like everything else.
+- **`create_event_from_task` produces an ordinary, zone-anchored event.** It
+  re-formatted its start before handing it on, which flattened any timezone to
+  a numeric offset - so a timebox was the one event this server could never
+  anchor to a zone. A `start` naming an IANA zone now keeps it, a start taken
+  from the task's own due date (a bare instant - tasks store no zone) is
+  anchored in the server's default timezone, and an explicit numeric offset
+  still becomes UTC, exactly as in `create_event`. `dauer_minuten` is also a
+  real duration now: a block spanning a daylight-saving change no longer
+  grows or shrinks by the transition's hour.
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task

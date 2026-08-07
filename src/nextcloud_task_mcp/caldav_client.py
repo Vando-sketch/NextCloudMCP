@@ -463,6 +463,22 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
     return None, None
 
 
+def _zone_preserving_isoformat(value: datetime) -> str:
+    """Render a datetime so that parsing it back keeps its zone, not just its offset.
+
+    `EventFields` takes strings, so anything handed to it internally
+    (`create_event_from_task`) has to survive a second trip through
+    `mapping.parse_datetime_input`. `isoformat()` writes a numeric offset,
+    which names an instant but no zone - the event would end up pinned to a UTC
+    instant instead of anchored to the zone its start was resolved in. The
+    "<naive datetime> <IANA name>" form that same parser accepts keeps it.
+    """
+    zone = value.tzinfo
+    if isinstance(zone, ZoneInfo):
+        return f"{value.replace(tzinfo=None).isoformat()} {zone.key}"
+    return value.isoformat()
+
+
 def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     """Ensure `vcal` has a VTIMEZONE for every IANA zone `component` uses.
 
@@ -1858,10 +1874,26 @@ class CalDavService:
                     "for the event instead."
                 )
 
-            parsed_start = mapping.parse_datetime_input(start_spec)
+            parsed_start = mapping.parse_datetime_input(start_spec, keep_zone=True)
+            if isinstance(parsed_start, datetime) and start is None:
+                # A task's due date is stored as a bare UTC instant (VTODOs
+                # keep no zone) and read back with a numeric offset, so there
+                # is no zone left to carry over - but the wall clock the caller
+                # originally typed was in the server's default zone, and a
+                # timebox should look like the event that same value would
+                # produce through `create_event`. An explicit `start` argument
+                # keeps `create_event`'s own rules instead: a named zone is
+                # preserved below, a numeric offset stays UTC.
+                parsed_start = parsed_start.astimezone(mapping.get_default_timezone())
             if isinstance(parsed_start, datetime):
-                ende = (parsed_start + timedelta(minutes=dauer_minuten)).isoformat()
-                start_value = parsed_start.isoformat()
+                # `dauer_minuten` is a real duration: adding it to a zone-aware
+                # datetime would do wall-clock arithmetic, stretching a block
+                # that spans a DST change by the transition's own hour.
+                parsed_end = (
+                    parsed_start.astimezone(timezone.utc) + timedelta(minutes=dauer_minuten)
+                ).astimezone(parsed_start.tzinfo)
+                start_value = _zone_preserving_isoformat(parsed_start)
+                ende = _zone_preserving_isoformat(parsed_end)
             else:
                 # All-day due date -> one-day all-day event (inclusive end).
                 start_value = parsed_start.isoformat()

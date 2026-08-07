@@ -1562,10 +1562,84 @@ def test_create_event_from_task_uses_due_datetime(service, principal):
     _, kwargs = event_cal.save_event.call_args
     ical_text = kwargs["ical"]
     assert "SUMMARY:Steuer" in ical_text
-    assert "DTSTART:20260720T120000Z" in ical_text
-    assert "DTEND:20260720T123000Z" in ical_text
+    # Timeboxing produces an ordinary event: anchored to the zone the task's
+    # due date was read in, exactly like create_event with the same value.
+    assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
+    assert "DTEND;TZID=Europe/Berlin:20260720T143000" in ical_text
+    assert "BEGIN:VTIMEZONE" in ical_text
     assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
     assert uid
+
+
+def test_create_event_from_task_keeps_an_explicit_zone_name(service, principal):
+    """An explicit start zone survives into the event, offsets stay UTC.
+
+    `create_event_from_task` is the one event-creating path that re-formatted
+    its start before handing it on, which flattened every zone to a numeric
+    offset - so the timebox for a task was the only event that could never be
+    zone-anchored.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat",
+        "task-1",
+        "Termine",
+        start="2026-07-20T09:00:00 Asia/Tokyo",
+        dauer_minuten=45,
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART;TZID=Asia/Tokyo:20260720T090000" in ical_text
+    assert "DTEND;TZID=Asia/Tokyo:20260720T094500" in ical_text
+    assert "TZID:Asia/Tokyo" in ical_text
+
+
+def test_create_event_from_task_explicit_offset_start_stays_utc(service, principal):
+    """An explicit numeric offset keeps `create_event`'s rule, deliberately.
+
+    An offset names an instant, not a zone, and `create_event` stores such a
+    value as plain UTC rather than inventing a TZID for it - the timebox path
+    must not quietly disagree with it.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat", "task-1", "Termine", start="2026-07-20T14:00:00+05:00", dauer_minuten=30
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART:20260720T090000Z" in ical_text
+    assert "DTEND:20260720T093000Z" in ical_text
+    assert "VTIMEZONE" not in ical_text
+
+
+def test_create_event_from_task_spanning_a_dst_change_keeps_its_real_length(service, principal):
+    """`dauer_minuten` is a real duration, not a wall-clock one.
+
+    Adding the timedelta to a zone-aware start does wall-clock arithmetic, so
+    a 120-minute block starting an hour before the spring-forward jump would
+    end up 180 real minutes long.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat", "task-1", "Termine", start="2026-03-29T01:30:00", dauer_minuten=120
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:20260329T013000" in ical_text
+    # 01:30 CET + 2 real hours = 04:30 CEST, not 03:30.
+    assert "DTEND;TZID=Europe/Berlin:20260329T043000" in ical_text
 
 
 def test_create_event_from_task_all_day_due_date(service, principal):
