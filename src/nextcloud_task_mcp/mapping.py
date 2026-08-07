@@ -211,6 +211,29 @@ def format_datetime_output(value: date | datetime | None) -> str | None:
     return str(value)
 
 
+def _local_wall_time(day: date, wall: time) -> datetime:
+    """A wall clock reading of a local day, as an instant in the default timezone."""
+    return _resolve_in_zone(datetime.combine(day, wall, tzinfo=get_default_timezone()))
+
+
+def local_midnight(day: date) -> datetime:
+    """The first instant of a local day, in the server's default timezone.
+
+    The one definition of where a day starts, shared by every part of the
+    server that has to decide which day something falls in: `get_agenda`'s
+    events and tasks, `von`/`bis` and `faellig_vor`/`faellig_nach` bounds, and
+    the instant an all-day value is compared at.
+
+    Not every day has a midnight: America/Santiago, Asia/Beirut and others move
+    their clocks *at* 00:00, so on a transition day the reading 00:00 never
+    happens. `zoneinfo` still maps it to the correct instant - the transition
+    itself is that day's first moment - but a bound like this is also printed
+    back to callers (`get_free_busy` reports the window it used), so it is
+    respelled as the day's first real reading. Same instant either way.
+    """
+    return _local_wall_time(day, time.min)
+
+
 def priority_label_to_ical(label: str) -> int:
     """Map a German priority label to an RFC 5545 PRIORITY value (1-9)."""
     try:
@@ -846,8 +869,9 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     parsed = parse_datetime_input(value)
     if isinstance(parsed, datetime):
         return parsed
-    time_of_day = time(23, 59, 59) if end_of_day else time.min
-    return datetime.combine(parsed, time_of_day, tzinfo=get_default_timezone())
+    if end_of_day:
+        return _local_wall_time(parsed, time(23, 59, 59))
+    return local_midnight(parsed)
 
 
 def filter_tasks(

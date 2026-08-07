@@ -2108,6 +2108,28 @@ def test_get_free_busy_returns_normalized_bounds(service, principal):
     assert result["bis"] == "2026-07-22T00:00:00+02:00"
 
 
+def test_get_free_busy_bounds_are_readings_that_exist(service, principal):
+    """A day window is reported back, so it must be a time that happens.
+
+    America/Santiago moves its clocks at 00:00, so 2026-09-06 has no midnight;
+    the window still starts at that day's first instant, and says so with a
+    reading the day really had.
+    """
+    mapping.set_default_timezone("America/Santiago")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-09-06", "2026-09-06")
+
+    assert result["von"] == "2026-09-06T01:00:00-03:00"
+    assert result["bis"] == "2026-09-07T00:00:00-03:00"
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"].astimezone(timezone.utc) == datetime(
+        2026, 9, 6, 4, 0, tzinfo=timezone.utc
+    )
+
+
 def test_get_free_busy_own_availability_translates_generic_exception(service, principal):
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.search.side_effect = RuntimeError("boom")
