@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
@@ -1223,7 +1223,7 @@ class CalDavService:
                 limit=limit,
             )
 
-    def _parse_todos(self, todos: Any, list_name: str) -> list[dict[str, Any]]:
+    def _parse_todos(self, todos: Iterable[Any], list_name: str) -> list[dict[str, Any]]:
         """Parse one list's VTODO objects, stamping each with the list it came from."""
         parsed = []
         for todo in todos:
@@ -1271,23 +1271,38 @@ class CalDavService:
         lists sharing a display name both reachable - that name is ambiguous
         on purpose. The cost is that `_with_collection`'s stale-cache retry
         doesn't apply here, so it is done once over the whole pass instead: a
-        collection that 404s means the cached listing is out of date (the list
-        was deleted or recreated server-side), the caches are dropped and the
-        pass is repeated against a freshly listed set. Without it, one deleted
-        task list would make every all-lists query fail for the remaining life
-        of the process.
+        404 anywhere in the pass means the cached listing is out of date (the
+        list was deleted or recreated server-side), the caches are dropped and
+        the pass is repeated against a freshly listed set. Without it, one
+        deleted task list would make every all-lists query fail for the
+        remaining life of the process.
+
+        "Anywhere in the pass" includes enumerating the lists: reading a
+        cached collection's display name is itself a request, so `_task_lists`
+        is inside the retry rather than in front of it. A stale object found
+        there would otherwise escape as a generic not-found error with the
+        cache left untouched - the same permanent failure, one call earlier.
         """
         tasks: list[dict[str, Any]] = []
+        name: str | None = None
         try:
-            for name, calendar in self._task_lists():
-                try:
+            try:
+                for name, calendar in self._task_lists():
                     todos = calendar.todos(include_completed=not only_open)
-                except caldav_error.NotFoundError as exc:
-                    if not may_retry:
-                        raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
+                    tasks.extend(self._parse_todos(todos, name))
+            except caldav_error.NotFoundError as exc:
+                if may_retry:
                     self._invalidate_collection_caches()
                     return self._tasks_from_every_list(only_open, may_retry=False)
-                tasks.extend(self._parse_todos(todos, name))
+                # A freshly listed collection that still 404s is genuinely
+                # gone mid-request, not a stale cache entry. `name` is None
+                # when the enumeration itself failed, before any list was
+                # named.
+                raise TaskListNotFoundError(
+                    f"Task list '{name}' was not found."
+                    if name is not None
+                    else "A task list was not found while listing the task lists."
+                ) from exc
         except TaskMcpError:
             raise
         except Exception as exc:
