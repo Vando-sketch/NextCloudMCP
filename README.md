@@ -229,6 +229,9 @@ cannot express are not listed, and are never touched by a write; see `docs/tools
 (`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
 offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
 Returned timestamps carry the default timezone's offset (e.g. `+02:00`).
+An event keeps the timezone it is anchored to, so a value read from `get_event` can be written
+straight back through `update_event` without the event losing that anchor — which is what keeps
+a recurring event on its wall-clock time across daylight-saving changes.
 
 ### `update_task(list_name, task_uid, ...)`
 
