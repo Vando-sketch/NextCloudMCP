@@ -2463,6 +2463,34 @@ def test_list_trash_deleted_at_accepts_iso8601_too(service, dav_client):
     assert result[0]["geloescht_am"] == "2026-07-10T14:00:00+02:00"
 
 
+def test_list_trash_deleted_at_without_an_offset_is_read_as_utc(service, dav_client):
+    """`{nc}deleted-at` is a server-side timestamp, not a caller's input.
+
+    Nextcloud emits it in UTC; a value that arrives without an offset is
+    therefore a UTC one missing its suffix, not a local wall clock. Reading it
+    in the default timezone stamps the deletion two hours early - and this is
+    the one field in `list_trash` an operator uses to decide what to restore.
+    """
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/9.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <nc:deleted-at>2026-07-10T12:00:00</nc:deleted-at>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_trash()
+
+    assert result[0]["geloescht_am"] == "2026-07-10T14:00:00+02:00"
+
+
 def test_list_trash_not_available_translates_404_to_clean_error(service, dav_client):
     dav_client.request.return_value = _dav_response(404)
 

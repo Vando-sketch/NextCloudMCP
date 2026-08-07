@@ -414,6 +414,12 @@ def _parse_deleted_at(raw: str | None) -> str | None:
     (`DateTimeInterface::ATOM`, e.g. from newer server versions) - both are
     accepted; anything else parses to None rather than raising, since this is
     a display-only field.
+
+    This is the server's own record of when it deleted something, always
+    UTC-based, so an ISO value that arrives *without* an offset is read as UTC
+    rather than as a local wall clock - unlike caller input, and unlike the
+    floating times foreign clients put in calendar components. It is then
+    rendered in the default timezone like every other timestamp.
     """
     if raw is None:
         return None
@@ -427,9 +433,11 @@ def _parse_deleted_at(raw: str | None) -> str | None:
         pass
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return mapping.format_datetime_output(dt)
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return mapping.format_datetime_output(dt)
 
 
 def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None]:
