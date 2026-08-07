@@ -659,7 +659,15 @@ Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
 One day's calendar events and due tasks together — CalDAV has no combined
 VEVENT+VTODO query, so this is composed server-side. `datum` must be a
 date-only `"YYYY-MM-DD"` string; day boundaries are in the server's default timezone
-(consistent with the naive-input rule).
+(consistent with the naive-input rule), for the events and the tasks alike —
+including days that a daylight-saving change makes 23 or 25 hours long.
+
+Nextcloud resolves all-day and floating (zone-less) values against the
+*calendar's own* timezone when it answers a time-range query, which need not be
+`MCP_DEFAULT_TIMEZONE`. To keep the agenda's day the one this server promises,
+the neighbouring days are queried too and the result is cut back to the local
+day here. A recurring event that the server returns unexpanded is kept in any
+case — its start is the series' first occurrence, not the one that matched.
 
 ```json
 {

@@ -107,6 +107,16 @@ This project does not yet follow Semantic Versioning releases.
   still becomes UTC, exactly as in `create_event`. `dauer_minuten` is also a
   real duration now: a block spanning a daylight-saving change no longer
   grows or shrinks by the transition's hour.
+- **`get_agenda` reports its own day, not the calendar server's.** A CalDAV
+  time-range query resolves all-day and floating values against the calendar
+  collection's timezone (RFC 4791 9.9) - the Nextcloud account's setting,
+  which need not be `MCP_DEFAULT_TIMEZONE`. When the two differ, a
+  neighbouring day's all-day event turned up in the agenda, or a floating one
+  shortly before midnight went missing. The agenda now queries the
+  neighbouring days as well and applies its own local-day rule to the result,
+  so the events half of the agenda draws the same day boundary the tasks half
+  already did. `list_events` keeps passing `von`/`bis` to the server
+  untouched: its range is a filter, not a promise about days.
 - **The VTIMEZONE attached to a zone-anchored event covers dates past 2038.**
   `icalendar` writes a zone's transitions as an explicit list and ends it at
   2038-01-01 by default; a client applies the last observance it finds to

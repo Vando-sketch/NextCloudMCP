@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -14,7 +14,7 @@ import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from caldav.lib.url import URL
-from icalendar import Calendar, Event, FreeBusy, Timezone, Todo
+from icalendar import Calendar, Event, FreeBusy, Timezone, Todo, vRecur
 from lxml import etree
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
@@ -35,6 +35,10 @@ from nextcloud_task_mcp.errors import (
     TaskMcpError,
     TaskNotFoundError,
 )
+
+#: The shipped default timezone, spelled out where a test builds a component
+#: in it (the autouse `reset_default_timezone` fixture keeps it in effect).
+BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def _make_calendar(
@@ -1723,11 +1727,74 @@ def test_get_agenda_combines_events_and_due_tasks(service, principal):
     assert [e["uid"] for e in result["termine"]] == ["event-1"]
     assert [t["uid"] for t in result["aufgaben"]] == ["task-1"]
     assert result["aufgaben"][0]["liste"] == "Privat"
-    # Events were queried with expand=True over exactly that day in default timezone.
+    # Events are queried with expand=True over the neighbouring days too (see
+    # test_get_agenda_keeps_only_events_of_the_local_day) and cut back to the
+    # local day afterwards.
     _, kwargs = event_cal.search.call_args
     assert kwargs["expand"] is True
-    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
-    assert kwargs["end"] == datetime(2026, 7, 21, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["start"] == datetime(2026, 7, 19, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+
+
+def test_get_agenda_keeps_only_events_of_the_local_day(service, principal):
+    """The day an agenda reports is this server's local day, whatever the server thinks.
+
+    A CalDAV time-range REPORT resolves all-day and floating values in the
+    *collection's* timezone (RFC 4791 9.9), which is the Nextcloud account's
+    setting and need not be `MCP_DEFAULT_TIMEZONE`. Where the two disagree, the
+    REPORT hands back a neighbouring day's all-day event, or drops a floating
+    one an hour before midnight - so the query covers the neighbouring days and
+    the local-day rule is applied here, once, to both halves of the agenda.
+
+    The mocked calendar returns the same four events for any window, which is
+    exactly the "server draws the boundary elsewhere" case.
+    """
+
+    def _event(uid, **props):
+        component = Event()
+        component.add("uid", uid)
+        component.add("summary", uid)
+        for name, value in props.items():
+            component.add(name, value)
+        return _make_event_obj(component)
+
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [
+        _event("all-day-yesterday", dtstart=date(2026, 7, 19), dtend=date(2026, 7, 20)),
+        _event("all-day-today", dtstart=date(2026, 7, 20), dtend=date(2026, 7, 21)),
+        _event("floating-late-today", dtstart=datetime(2026, 7, 20, 23, 30)),
+        _event("timed-tomorrow", dtstart=datetime(2026, 7, 21, 0, 30, tzinfo=BERLIN)),
+    ]
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [e["uid"] for e in result["termine"]] == ["all-day-today", "floating-late-today"]
+
+
+def test_get_agenda_keeps_a_recurring_master_the_server_did_not_expand(service, principal):
+    """A series master says nothing about which occurrence matched the query.
+
+    Servers that ignore the expansion request answer with the master component
+    and its far-away DTSTART; judging that by the local-day rule would drop a
+    recurring event from every agenda but the day it started.
+    """
+    master = Event()
+    master.add("uid", "weekly")
+    master.add("summary", "Standup")
+    master.add("dtstart", datetime(2020, 1, 6, 9, 0, tzinfo=BERLIN))
+    master.add("rrule", vRecur.from_ical("FREQ=WEEKLY"))
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [_make_event_obj(master)]
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [e["uid"] for e in result["termine"]] == ["weekly"]
 
 
 def test_get_agenda_excludes_tasks_due_other_days(service, principal):
@@ -1769,11 +1836,12 @@ def test_get_agenda_day_window_local_timezone_bounds(service, principal):
 
 
 def test_get_agenda_day_window_spans_dst_transition(service, principal):
-    """The event query window is a real local day, 25 hours long on 2026-10-25.
+    """The day an agenda covers is a real local day, 25 hours long on 2026-10-25.
 
     Building it by adding a fixed 24 hours would cut the last local hour off
     the fall-back day - the class of off-by-an-hour bug this whole change is
-    about.
+    about. The query around it is a whole number of local days too, so the
+    widening can't shave an hour off either end.
     """
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.search.return_value = []
@@ -1783,13 +1851,16 @@ def test_get_agenda_day_window_spans_dst_transition(service, principal):
 
     service.get_agenda("2026-10-25")
 
-    _, kwargs = event_cal.search.call_args
-    start, end = kwargs["start"], kwargs["end"]
+    start, end = event_mapping.local_day_window(date(2026, 10, 25))
     assert start.isoformat() == "2026-10-25T00:00:00+02:00"
     assert end.isoformat() == "2026-10-26T00:00:00+01:00"
     # Subtracting two datetimes that share a tzinfo gives the *wall-clock*
     # difference (24h here), so the real length has to be measured in UTC.
     assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(hours=25)
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"].isoformat() == "2026-10-24T00:00:00+02:00"
+    assert kwargs["end"].isoformat() == "2026-10-27T00:00:00+01:00"
 
 
 # ======================================================================

@@ -1939,6 +1939,15 @@ class CalDavService:
         string; day boundaries are local days in the server's default timezone
         (`MCP_DEFAULT_TIMEZONE`), consistent with the rule used everywhere else
         in this server, and applied identically to the events and the tasks.
+
+        Because a CalDAV time-range REPORT resolves all-day and floating values
+        in the *calendar collection's* timezone (RFC 4791 9.9) - the Nextcloud
+        account's setting, which need not be `MCP_DEFAULT_TIMEZONE` - the event
+        query covers the neighbouring days as well and the local day is cut out
+        of the result here (`event_mapping.events_in_window`). Otherwise a
+        neighbouring day's all-day event can appear in the agenda, or a
+        floating one an hour before midnight go missing, purely from the two
+        zones disagreeing.
         """
         parsed = mapping.parse_datetime_input(datum)
         if isinstance(parsed, datetime):
@@ -1946,9 +1955,18 @@ class CalDavService:
                 f"datum must be a date-only 'YYYY-MM-DD' string, got '{datum}'."
             )
 
+        day_start, day_end = event_mapping.local_day_window(parsed)
+
         with self._lock:
-            termine = self.list_events(
-                calendar_names=calendar_names, von=datum, bis=datum, expand=True
+            termine = event_mapping.events_in_window(
+                self.list_events(
+                    calendar_names=calendar_names,
+                    von=(parsed - timedelta(days=1)).isoformat(),
+                    bis=(parsed + timedelta(days=1)).isoformat(),
+                    expand=True,
+                ),
+                day_start,
+                day_end,
             )
 
             if list_names is None:

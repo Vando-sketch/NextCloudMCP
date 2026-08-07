@@ -801,6 +801,87 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     return (0, _local_midnight(parsed))
 
 
+def local_day_window(day: date) -> tuple[datetime, datetime]:
+    """The [start, end) instants one local day covers in the default timezone.
+
+    The single definition of "a day" for the parts of the server that decide
+    what belongs to one - `get_agenda`'s events, and (via the same local
+    midnights in `mapping._to_comparable_datetime`) its tasks. The end is the
+    *next* day's midnight rather than start + 24h, so a day with a
+    daylight-saving change is the 23 or 25 hours it really has.
+    """
+    return _local_midnight(day), _local_midnight(day + timedelta(days=1))
+
+
+def _event_interval(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """The instants a parsed event dict covers, or None if that can't be told.
+
+    All-day values are expanded from local midnight to the local midnight
+    after the (inclusive) last day, matching `event_busy_interval`'s treatment
+    of the same components; the returned end is exclusive. None means the
+    event has no usable start, or a start this module can't parse back - a
+    caller must then not draw conclusions from it.
+    """
+    start_text = event.get("start")
+    if not isinstance(start_text, str):
+        return None
+    try:
+        start_value = _parse_datetime(start_text)
+        end_text = event.get("ende")
+        end_value = _parse_datetime(end_text) if isinstance(end_text, str) else None
+    except InvalidEventDataError:
+        return None
+
+    if isinstance(start_value, datetime):
+        start_dt = _as_utc(start_value)
+        end_dt = _as_utc(end_value) if isinstance(end_value, datetime) else start_dt
+    else:
+        start_dt = _local_midnight(start_value)
+        last_day = end_value if isinstance(end_value, date) else start_value
+        if isinstance(last_day, datetime):  # mismatched pair from another client
+            last_day = start_value
+        end_dt = _local_midnight(last_day + timedelta(days=1))
+    return start_dt, max(end_dt, start_dt)
+
+
+def events_in_window(
+    events: list[dict[str, Any]], start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Keep the parsed events overlapping [start, end), by this server's day rule.
+
+    A CalDAV time-range REPORT is the server's answer, not ours: RFC 4791 9.9
+    has it resolve all-day and floating values in the *collection's* timezone
+    (or UTC), which need not be `MCP_DEFAULT_TIMEZONE` - so its idea of which
+    day an all-day event belongs to can differ from this server's by a few
+    hours, in either direction. Applying the local-day rule here makes the
+    answer this server's own, and match the one its tasks get.
+
+    Two kinds of event are kept unconditionally, because their dict says
+    nothing about which moment matched the query: one that still carries a
+    `wiederholung` (a series master a server answered with instead of
+    expanding it - its DTSTART is the first occurrence, not the matching one),
+    and one with no usable start. Dropping either would hide a real event to
+    tidy up a boundary.
+    """
+    kept: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("wiederholung"):
+            kept.append(event)
+            continue
+        interval = _event_interval(event)
+        if interval is None:
+            kept.append(event)
+            continue
+        event_start, event_end = interval
+        if event_end == event_start:
+            # A zero-length event occupies just its start instant.
+            if start <= event_start < end:
+                kept.append(event)
+        elif event_start < end and event_end > start:
+            kept.append(event)
+    return kept
+
+
 def filter_events(
     events: list[dict[str, Any]],
     *,
