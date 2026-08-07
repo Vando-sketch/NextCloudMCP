@@ -643,6 +643,12 @@ Timeboxing: creates an event from an existing task and links the two (the
   call fails and you must pass `start` explicitly.
 - A datetime start produces an event of `dauer_minuten` length; a date-only
   start produces a one-day all-day event (`dauer_minuten` is ignored).
+- `dauer_minuten` is a real duration: a block that spans a daylight-saving
+  change stays that many minutes long, rather than following the wall clock.
+- The event is anchored to a timezone the same way `create_event` anchors one:
+  a `start` naming an IANA zone keeps it, a numeric offset is stored as UTC,
+  and a start taken from the task's `faellig_datum` (which is a bare instant —
+  tasks store no zone) is anchored in the server's default timezone.
 
 Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
 
