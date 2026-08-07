@@ -70,6 +70,19 @@ This project does not yet follow Semantic Versioning releases.
   Europe/Berlin) is stored as the real local time of the same instant
   (03:30) instead of being written out as a reading that never happens;
   the autumn overlap keeps the earlier of its two instants.
+- **Event timestamps stay anchored to the event's own timezone.** `get_event`
+  reports every timestamp with a numeric offset (`"...+02:00"`), which says
+  nothing about *which* zone it came from - so writing one straight back used
+  to re-anchor a recurring event to a fixed UTC instant, reintroducing the
+  hour of DST drift after a single read/write round trip, and updating only
+  `start` or only `ende` could leave the two ends anchored differently (the
+  event silently changing length at the next transition). `start`, `ende` and
+  `ausnahme_daten` values that name no zone of their own are now written in
+  the zone the event is already anchored to, same instant. `ausnahme_daten`
+  additionally shares one representation across all its entries - a mix of
+  naive and offset entries used to produce an `EXDATE` with a `TZID`
+  parameter next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids
+  and no reader reports.
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task

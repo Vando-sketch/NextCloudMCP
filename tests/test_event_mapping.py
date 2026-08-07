@@ -116,6 +116,82 @@ def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
     assert parsed["start"] == "2026-07-20T09:00:00+02:00"  # CEST
 
 
+def test_get_event_update_event_round_trip_keeps_the_zone_anchor():
+    """Reading an event and writing it straight back must not un-anchor it.
+
+    `parse_vevent` renders a TZID-anchored DTSTART with a numeric offset - the
+    one spelling that used to collapse back to a fixed UTC instant on the way
+    in. A recurring event that makes that trip once keeps its old summer
+    offset all winter, which is exactly the drift this zone handling exists to
+    prevent.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        ende="2026-07-20T09:15:00 Europe/Berlin",
+        wiederholung="FREQ=WEEKLY",
+    )
+    parsed = event_mapping.parse_vevent(event)
+
+    _apply(event, start=parsed["start"], ende=parsed["ende"])
+
+    dtstart = _dt(event.get("dtstart"))
+    dtend = _dt(event.get("dtend"))
+    assert isinstance(dtstart, datetime) and isinstance(dtend, datetime)
+    assert dtstart.tzinfo == ZoneInfo("Europe/Berlin")
+    assert dtend.tzinfo == ZoneInfo("Europe/Berlin")
+    ical_text = event.to_ical().decode()
+    assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in ical_text
+    assert "DTEND;TZID=Europe/Berlin:20260720T091500" in ical_text
+    assert event_mapping.parse_vevent(event) == parsed
+
+
+def test_updating_only_the_end_keeps_the_events_own_zone():
+    """Half an update must not leave the two ends anchored differently.
+
+    With DTSTART on a TZID and DTEND collapsed to UTC, the two drift apart at
+    the next transition - the event silently gets an hour longer or shorter -
+    and nothing in the write path notices, because both are still the same
+    instant apart *today*.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        ende="2026-07-20T10:00:00 Europe/Berlin",
+        wiederholung="FREQ=WEEKLY",
+    )
+
+    _apply(event, ende="2026-07-20T10:30:00+02:00")
+
+    dtend = _dt(event.get("dtend"))
+    assert isinstance(dtend, datetime)
+    assert dtend.tzinfo == ZoneInfo("Europe/Berlin")
+    assert "DTEND;TZID=Europe/Berlin:20260720T103000" in event.to_ical().decode()
+
+
+def test_naive_input_still_means_the_servers_default_zone_not_the_events():
+    """The anchoring is about *spelling*, not about reinterpreting input.
+
+    A naive value is documented to mean the server's default timezone
+    everywhere; on an event anchored in a foreign zone it therefore keeps that
+    meaning (and its own zone), rather than being silently re-read as the
+    event's local wall clock.
+    """
+    event = _new_event()
+    _apply(event, titel="Call", start="2026-07-20T09:00:00 Asia/Tokyo")
+
+    _apply(event, ende="2026-07-20T09:00:00")  # 09:00 Berlin = 16:00 Tokyo
+
+    dtend = _dt(event.get("dtend"))
+    assert isinstance(dtend, datetime)
+    assert dtend.tzinfo == ZoneInfo("Europe/Berlin")
+    assert dtend.astimezone(timezone.utc) == datetime(2026, 7, 20, 7, 0, tzinfo=timezone.utc)
+
+
 def test_z_suffix_datetime_input_formatted_in_default_timezone():
     event = _new_event()
     _apply(event, titel="T", start="2026-07-20T14:00:00Z", ende="2026-07-20T15:00:00Z")
@@ -211,6 +287,78 @@ def test_exdate_replaces_instead_of_appending():
     _apply(event, titel="T", start="2026-07-20T14:00:00", ausnahme_daten=["2026-07-27T14:00:00"])
     _apply(event, ausnahme_daten=["2026-08-03T14:00:00"])
     assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-03T14:00:00+02:00"]
+
+
+def test_exdate_is_anchored_to_the_zone_of_its_own_dtstart():
+    """An exception date must be spelled in the zone the instances live in.
+
+    `get_event` returns an occurrence as `"...+02:00"`, so cancelling one means
+    passing that string back. Stored as UTC (`...Z`) next to a
+    `DTSTART;TZID=Europe/Berlin`, the EXDATE no longer looks like any value of
+    the recurrence set - RFC 5545 3.8.5.1 wants it to match DTSTART's own
+    form - and nothing reports that the instance stayed.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        wiederholung="FREQ=WEEKLY",
+        ausnahme_daten=["2026-07-27T09:00:00+02:00"],
+    )
+
+    exdate_line = [
+        line for line in event.to_ical().decode().split("\r\n") if line.startswith("EXDATE")
+    ][0]
+    assert exdate_line == "EXDATE;TZID=Europe/Berlin:20260727T090000"
+
+
+def test_exdate_entries_in_mixed_zones_share_one_representation():
+    """One EXDATE property carries one TZID, so its values cannot disagree.
+
+    A naive entry parses zone-aware and an offset entry collapses to UTC;
+    written together, `icalendar` puts one `TZID=` on the property while the
+    UTC value keeps its `Z` suffix - a combination RFC 5545 3.2.19 forbids
+    (TZID must not be applied to a UTC value), and one that reads back
+    plausibly enough to hide the damage.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        wiederholung="FREQ=WEEKLY",
+        ausnahme_daten=["2026-07-27T09:00:00", "2026-08-03T07:00:00+00:00"],
+    )
+
+    exdate_line = [
+        line for line in event.to_ical().decode().split("\r\n") if line.startswith("EXDATE")
+    ][0]
+    assert exdate_line.count("TZID=") == 1
+    assert "Z" not in exdate_line.split(":", 1)[1]
+    assert exdate_line == "EXDATE;TZID=Europe/Berlin:20260727T090000,20260803T090000"
+
+
+def test_exdate_on_a_utc_event_stays_utc_for_every_entry():
+    """The mirror image: a UTC-anchored DTSTART takes UTC exception dates.
+
+    Here it is the *naive* entry that would otherwise arrive as
+    `ZoneInfo("Europe/Berlin")` and drag a TZID onto a property whose other
+    value is written with a `Z`.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T07:00:00+00:00",
+        wiederholung="FREQ=WEEKLY",
+        ausnahme_daten=["2026-07-27T09:00:00", "2026-08-03T07:00:00Z"],
+    )
+
+    exdate_line = [
+        line for line in event.to_ical().decode().split("\r\n") if line.startswith("EXDATE")
+    ][0]
+    assert exdate_line == "EXDATE:20260727T070000Z,20260803T070000Z"
 
 
 def test_exdate_parses_repeated_properties_from_other_clients():
