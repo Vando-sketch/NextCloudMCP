@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -557,11 +558,13 @@ def test_list_tasks_limit_cuts_after_merge_across_lists(service, principal):
 def test_list_tasks_all_lists_reaches_both_lists_sharing_a_display_name(service, principal):
     """Two lists may legitimately carry the same display name.
 
-    The all-lists branch queries the resolved collection objects directly
+    The all-lists branch queries the listed collection objects directly
     instead of resolving by name, which is the only reason both stay
     reachable - resolving "Dup" by name is ambiguous on purpose. Pinned here
     because "simplifying" that branch back to the name-based path would
-    silently turn a full listing into an error.
+    silently turn a full listing into an error. It does *not* follow that the
+    branch may skip the stale-cache recovery `_with_collection` provides - see
+    `test_list_tasks_all_lists_recovers_from_a_vanished_collection`.
     """
     dup_a = _make_calendar("Dup", "https://cloud.example.com/dav/dup-a/")
     dup_b = _make_calendar("Dup", "https://cloud.example.com/dav/dup-b/")
@@ -582,6 +585,111 @@ def test_list_tasks_named_duplicate_list_is_still_ambiguous(service, principal):
 
     with pytest.raises(TaskMcpError, match="ambiguous"):
         service.list_tasks(list_names=["Dup"])
+
+
+def test_list_tasks_filters_added_after_limit_are_keyword_only(service):
+    """`limit` must keep its position, or a positional caller silently rebinds it.
+
+    The filter arguments were inserted *before* `limit` as ordinary
+    positional-or-keyword parameters, so `list_tasks(name, True, None, None, 5)`
+    - a legal call before - started passing 5 as `prioritaet`. Anything added
+    after `limit` is keyword-only, so the positional prefix can never shift
+    again.
+    """
+    params = inspect.signature(CalDavService.list_tasks).parameters
+    positional = [
+        name for name, p in params.items() if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+
+    assert positional == ["self", "list_names", "only_open", "due_before", "due_after", "limit"]
+    assert all(
+        params[name].kind is inspect.Parameter.KEYWORD_ONLY
+        for name in ("prioritaet", "tag", "suchtext")
+    )
+
+
+def test_list_tasks_all_lists_recovers_from_a_vanished_collection(service, principal):
+    """A deleted list must not break every all-lists query for the rest of the process.
+
+    The collection listing is cached, so a list deleted server-side stays in
+    it and 404s on every use. Named lists recover through
+    `_with_collection`'s invalidate-and-retry; the all-lists branch has to do
+    the same or "what is due anywhere?" fails forever.
+    """
+    gone = _make_calendar("Weg", "https://cloud.example.com/dav/weg/")
+    kept = _make_calendar("Bleibt", "https://cloud.example.com/dav/bleibt/")
+    kept.todos.return_value = [_todo_obj("still-here", titel="Da", faellig_datum="2026-08-01")]
+    principal.calendars.return_value = [gone, kept]
+
+    # Prime the collection cache with both lists, then delete one server-side.
+    service.list_task_lists()
+    gone.todos.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [kept]
+
+    result = service.list_tasks()
+
+    assert [t["uid"] for t in result] == ["still-here"]
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_all_lists_gives_up_after_one_refresh(service, principal):
+    """A freshly listed collection that still 404s is a real error, not a stale cache."""
+    broken = _make_calendar("Kaputt", "https://cloud.example.com/dav/kaputt/")
+    broken.todos.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [broken]
+    service.list_task_lists()
+
+    with pytest.raises(TaskListNotFoundError, match="Kaputt"):
+        service.list_tasks()
+
+    # Listed once to prime, once for the first pass' cache miss... plus exactly
+    # one refresh.
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_repeated_list_name_is_queried_once(service, principal):
+    """Naming a list twice must not count its tasks twice."""
+    calendar = _make_calendar("Personal")
+    calendar.todos.return_value = [_todo_obj("t1", titel="Einmal", faellig_datum="2026-08-01")]
+    principal.calendars.return_value = [calendar]
+
+    result = service.list_tasks(["Personal", "Personal"])
+
+    assert [t["uid"] for t in result] == ["t1"]
+    calendar.todos.assert_called_once()
+
+
+def test_list_tasks_empty_string_list_name_is_reported_as_not_found(service, principal):
+    """ "" is a name like any other - an unknown one - not an empty scope."""
+    principal.calendars.return_value = [_make_calendar("Personal")]
+
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tasks("")
+
+
+def test_list_tasks_empty_scope_still_validates_the_filters(service, principal):
+    """No lists to query is no reason to accept a nonsense filter silently."""
+    with pytest.raises(InvalidTaskDataError):
+        service.list_tasks([], limit=0)
+    with pytest.raises(InvalidTaskDataError):
+        service.list_tasks([], prioritaet="dringend")
+    principal.calendars.assert_not_called()
+
+
+@pytest.mark.parametrize("list_names", [["Personal"], None], ids=["named", "all"])
+def test_list_tasks_resolution_failure_is_translated(service, principal, list_names):
+    """Resolving the target(s) moved out of the try/except that translates errors.
+
+    A dropped connection while resolving a display name then reached the tool
+    layer as a raw library exception - "an unexpected internal error" - instead
+    of the connection error it is.
+    """
+    calendar = _make_calendar("Personal")
+    calendar.get_display_name.side_effect = _http_errors.ConnectionError("network down")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(ConnectionFailedError):
+        service.list_tasks(list_names)
 
 
 def test_get_agenda_sorts_tasks_by_due_time(service, principal):
