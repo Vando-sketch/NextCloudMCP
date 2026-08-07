@@ -1353,3 +1353,83 @@ def test_filter_tasks_combination():
         limit=1,
     )
     assert [t["uid"] for t in res] == ["2"]
+
+
+def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
+    """A VTODO whose DUE this server can't parse must not poison its whole list.
+
+    Sorting reads *every* task's `faellig_datum`, so a single odd value (a
+    bare time, a period, whatever a foreign client wrote) would otherwise
+    turn an entire healthy listing into an error. It sorts with the tasks
+    that have no due date instead.
+    """
+    tasks = [
+        dict(_task("bad", "12:00:00"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+        dict(_task("none", None), titel="Ohne"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["good", "bad", "none"]
+
+
+def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
+    """It can't be judged "before"/"after" anything, exactly like a missing one."""
+    tasks = [
+        dict(_task("bad", "(2026-07-01, 2026-07-02)"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+    ]
+
+    res = mapping.filter_tasks(tasks, due_before="2026-07-31")
+
+    assert [t["uid"] for t in res] == ["good"]
+
+
+def test_filter_tasks_tag_matches_across_unicode_spellings():
+    """ "ü" has two spellings and "ß" uppercases to "SS" - a German API must match both."""
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Büro"]),  # u + combining diaeresis
+        dict(_task("2", "2026-07-01"), tags=["Straße"]),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="Büro")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="STRASSE")] == ["2"]
+
+
+def test_filter_tasks_suchtext_matches_across_unicode_spellings():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Große Wäsche", notizen=None),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="wäsche")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="GROSSE")] == ["1"]
+
+
+def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
+    """Raw codepoint order files every umlaut after "Z", which reads as random."""
+    tasks = [
+        dict(_task("z", "2026-07-01"), titel="Zahnarzt"),
+        dict(_task("ae", "2026-07-01"), titel="Ärztin"),
+        dict(_task("a", "2026-07-01"), titel="Apotheke"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["a", "ae", "z"]
+
+
+def test_filter_tasks_empty_filter_value_means_no_filter():
+    """ "" is how a client spells "unset"; all three text filters read it that way.
+
+    They used to disagree: `prioritaet=""` raised, `tag=""` matched nothing,
+    `suchtext=""` matched everything.
+    """
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch", tags=["work"], titel="Bericht"),
+        dict(_task("2", "2026-07-02"), prioritaet=None, tags=[], titel="Anruf"),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, prioritaet="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="")] == ["1", "2"]

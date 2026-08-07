@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
@@ -895,13 +896,59 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     return local_midnight(parsed)
 
 
-def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, str]:
-    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
-    due_text = task.get("faellig_datum")
-    titel = str(task.get("titel") or "")
+def _task_due_instant(due_text: str | None) -> datetime | None:
+    """A task's own stored `faellig_datum` as a comparable instant, or None.
+
+    None means "cannot be placed on a timeline at all": either the task has no
+    due date, or the value the server stores is not one this server can read
+    (a foreign client's `DUE` holding a bare time or a period, say). Both are
+    treated identically - excluded from a due-date filter, sorted last -
+    because sorting reads *every* task's due date, so raising here would let
+    one unreadable task turn an entire healthy listing into an error.
+    """
     if due_text is None:
+        return None
+    try:
+        return _to_comparable_datetime(due_text, end_of_day=False)
+    except InvalidTaskDataError:
+        _logger.debug("Ignoring unreadable faellig_datum %r while filtering/sorting", due_text)
+        return None
+
+
+def _collation_key(value: str) -> tuple[str, str]:
+    """A rough locale-independent collation key for a title.
+
+    Raw codepoint order files every umlaut after "Z" ("Ärztin" behind
+    "Zahnarzt"), which reads as no order at all in a German-facing listing.
+    Decomposing (NFKD) and dropping the combining marks sorts "Ä" with "A";
+    case-folding sorts "ärztin" with "Ärztin" and "ß" with "ss", which is
+    also DIN 5007 variant 1's rule. This is not full locale-aware collation -
+    that needs a collation library this server does not depend on - so the
+    original string is kept as a tiebreak to stay deterministic.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    return ("".join(c for c in decomposed if not unicodedata.combining(c)).casefold(), value)
+
+
+def _fold(value: str) -> str:
+    """Normalize text for caseless, spelling-independent matching.
+
+    "ü" has two Unicode spellings (precomposed, or "u" plus a combining
+    diaeresis) that no client is consistent about, and `.lower()` leaves "ß"
+    and "SS" different - both of which matter in a German-language API.
+    NFC-normalizing and case-*folding* (not lowercasing) makes either
+    spelling of an umlaut, and either spelling of a sharp s, match.
+    """
+    return unicodedata.normalize("NFC", value).casefold()
+
+
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, tuple[str, str]]:
+    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
+    titel = _collation_key(str(task.get("titel") or ""))
+    due = _task_due_instant(task.get("faellig_datum"))
+    if due is None:
         return (1, datetime.max.replace(tzinfo=timezone.utc), titel)
-    return (0, _to_comparable_datetime(due_text, end_of_day=False), titel)
+    return (0, due, titel)
 
 
 def filter_tasks(
@@ -917,21 +964,25 @@ def filter_tasks(
     """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
     `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is given,
-    tasks with no `faellig_datum` (due date) are excluded.
+    tasks with no readable `faellig_datum` (due date) are excluded.
     `prioritaet`: "hoch"/"mittel"/"niedrig", validated against `PRIORITY_LABELS`
     (unknown value raises `InvalidTaskDataError`).
-    `tag`: exact, case-insensitive match against one `tags` entry.
-    `suchtext`: case-insensitive substring match over `titel` and `notizen`
-    (skipping None values).
+    `tag`: exact match against one `tags` entry, `suchtext`: substring match over
+    `titel` and `notizen` (skipping None values); both compare case- and
+    spelling-insensitively (see `_fold`).
 
-    Results are sorted by `faellig_datum` ascending (tasks without a due date last),
-    then by `titel`. `limit`, if given, must be a positive integer and caps the number
-    of results returned, applied last.
+    An empty string means "no filter" for `prioritaet`, `tag` and `suchtext`
+    alike - clients spell an unset argument that way, and the three used to
+    disagree about it (an error, an empty result, and a no-op respectively).
+
+    Results are sorted by `faellig_datum` ascending (tasks without a readable due
+    date last), then by `titel` (see `_collation_key`). `limit`, if given, must be a
+    positive integer and caps the number of results returned, applied last.
     """
     if limit is not None and limit <= 0:
         raise InvalidTaskDataError(f"limit must be greater than 0, got {limit}.")
 
-    if prioritaet is not None:
+    if prioritaet:
         if prioritaet not in PRIORITY_LABELS:
             raise InvalidTaskDataError(
                 f"Unknown prioritaet '{prioritaet}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
@@ -947,10 +998,9 @@ def filter_tasks(
         )
         filtered: list[dict[str, Any]] = []
         for task in tasks:
-            due_text = task.get("faellig_datum")
-            if due_text is None:
+            due_dt = _task_due_instant(task.get("faellig_datum"))
+            if due_dt is None:
                 continue
-            due_dt = _to_comparable_datetime(due_text, end_of_day=False)
             if before_bound is not None and due_dt > before_bound:
                 continue
             if after_bound is not None and due_dt < after_bound:
@@ -958,17 +1008,17 @@ def filter_tasks(
             filtered.append(task)
         tasks = filtered
 
-    if tag is not None:
-        wanted = tag.lower()
-        tasks = [task for task in tasks if any(t.lower() == wanted for t in task.get("tags") or [])]
+    if tag:
+        wanted = _fold(tag)
+        tasks = [task for task in tasks if any(_fold(t) == wanted for t in task.get("tags") or [])]
 
-    if suchtext is not None:
-        needle = suchtext.lower()
+    if suchtext:
+        needle = _fold(suchtext)
         tasks = [
             task
             for task in tasks
             if any(
-                needle in value.lower()
+                needle in _fold(value)
                 for value in (task.get("titel"), task.get("notizen"))
                 if value is not None
             )
