@@ -61,7 +61,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -69,14 +69,19 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | `nur_offene` | boolean | no (default `true`) | Exclude completed tasks |
 | `faellig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
 | `faellig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
+| `limit` | integer | no | Max number of results; must be `> 0` |
 | `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
-| `limit` | integer | no | Max number of results; must be `> 0` |
 | `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
 
 > **BREAKING CHANGE**: Results are now sorted by `faellig_datum` ascending (tasks without a due date last, then by `titel`), rather than returned in server order.
 > **BREAKING CHANGE**: Every task dict now includes a `"liste"` key containing the task list's display name.
+
+A bare `list_tasks()` queries **every** task list on the account — one request
+per list — and returns every open task in all of them. Narrow it with
+`listen_namen`, a due-date bound or `limit` unless the whole account really is
+what you want.
 
 Result — one dict per task:
 
@@ -156,25 +161,36 @@ dismissed state — use `export_calendar`/`import_ics`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
 only surfaces whether/how an existing task recurs.
-`liste` is the display name of the task list containing the task.
+`liste` is the display name of the task list containing the task — the name every
+other task tool takes. Nextcloud does allow two task lists to carry the *same*
+display name, and then `liste` cannot tell them apart (neither can any by-name
+call: such a name is reported as ambiguous rather than guessed at). Renaming one
+of them in Nextcloud is the only way to make those tasks addressable.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
 
 ### Filtering and Sorting
 
-- `listen_namen`: pass a list of list names to query specific task lists, or `null` to query all task lists on the account. `list_name` is a deprecated alias that takes a single list name.
+- `listen_namen`: pass a list of list names to query specific task lists, or `null` to query all task lists on the account. `list_name` is a deprecated alias that takes a single list name. Naming the same list twice queries it once. An empty list (`[]`) is an empty scope: no request, no results — the other filter arguments are still validated.
 - `prioritaet`: filters by task priority (`"hoch"`, `"mittel"`, `"niedrig"`). An unknown priority raises an error (`InvalidTaskDataError`).
-- `tag`: exact, case-insensitive match against any entry in `tags`.
-- `suchtext`: case-insensitive substring match over `titel` and `notizen` (skipping `null` values).
-- If either `faellig_vor` or `faellig_nach` is given, tasks with **no** `faellig_datum` at all
+- `tag`: exact match against any entry in `tags`.
+- `suchtext`: substring match over `titel` and `notizen` (skipping `null` values).
+- `tag` and `suchtext` compare case-insensitively *and* independently of Unicode
+  spelling: either encoding of `"ü"` matches the other, and `"STRASSE"` matches
+  `"Straße"`.
+- An empty string means "no filter" for `prioritaet`, `tag` and `suchtext` alike.
+- If either `faellig_vor` or `faellig_nach` is given, tasks with **no** readable `faellig_datum`
   are excluded from the result — a task without a due date can't be judged "before" or
-  "after" anything.
+  "after" anything, and neither can one whose stored due value this server cannot
+  parse (a foreign client's `DUE` holding a bare time or a period). Such a task is
+  listed normally when no due bound is given, sorting with the ones that have no
+  due date.
 - Both accept the same ISO 8601 date/datetime formats as `create_task`'s `faellig_datum`. A
   date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `faellig_vor` expands
   to the end of that day (`23:59:59`), `faellig_nach` to the start of it (`00:00:00`) — both
   in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), so an all-day task due exactly
   on the boundary date is included by either bound. A datetime bound (with a specific time) is used exactly as given.
 - `faellig_vor` and `faellig_nach` can be combined to select a range.
-- Tasks are sorted by `faellig_datum` ascending (tasks without a due date sort last), then by `titel`.
+- Tasks are sorted by `faellig_datum` ascending (tasks without a readable due date sort last), then by `titel` — case-insensitively and with umlauts filed under their base letter (`"Ärztin"` between `"Apotheke"` and `"Zahnarzt"`, not behind both), not in raw codepoint order.
 - `limit` caps the number of results, applied *last* after merging and sorting across lists. `limit <= 0`
   is an error (`InvalidTaskDataError`).
 
@@ -189,8 +205,9 @@ Fetch a single task by UID, without listing the whole task list.
 | `list_name` | string | yes | Display name of the task list |
 | `task_uid` | string | yes | UID of the task to fetch |
 
-Returns the same dict shape as one entry from `list_tasks` (see above), including
-`wiederholung`.
+Returns what one entry from `list_tasks` holds (see above), including
+`wiederholung` — minus its `"liste"` key, since the list is `list_name`, which
+you passed in.
 
 ---
 
