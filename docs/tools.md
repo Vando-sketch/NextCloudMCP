@@ -478,6 +478,13 @@ timezone, like every other naive input: for an event anchored in a *foreign*
 zone, name that zone (`"2026-07-27T09:00:00 Asia/Tokyo"`) or pass the reported
 value back.
 
+Every entry must be the same kind as the event's own start — date-only
+`"YYYY-MM-DD"` values for an all-day event, full datetimes otherwise. A mixed
+(or mismatched) set is rejected instead of written: iCalendar puts every value
+under one property with one set of parameters, which RFC 5545 §3.8.5.1 allows
+for a single value type only, and a date-only exception names no occurrence of
+a timed series in any case.
+
 ### Attendees (`teilnehmer`)
 
 Each entry:

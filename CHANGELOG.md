@@ -86,7 +86,11 @@ This project does not yet follow Semantic Versioning releases.
   therefore also shares one representation across all its entries - a mix of
   naive and offset entries used to produce an `EXDATE` with a `TZID` parameter
   next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids and no
-  reader reports.
+  reader reports. For the same reason, `ausnahme_daten` entries must now all be
+  the same kind as the event's start - date-only values for an all-day event,
+  datetimes otherwise - and a mixed or mismatched set is **rejected** with a
+  clear error rather than written as one `EXDATE` carrying two value types
+  under a single `TZID`.
 - **`get_free_busy(benutzer=...)` sends a valid VFREEBUSY again.** The
   scheduling request carried its day bounds as `DTSTART;TZID=Europe/Berlin:...`
   in a request body that has no VTIMEZONE component in it; RFC 5545 3.6.4
