@@ -9,6 +9,28 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Reminders are readable**: `list_tasks`, `get_task`, `list_events` and
+  `get_event` now return an `erinnerungen` list in the same string form
+  `create_task`/`create_event` accept, so a reminder can be verified without
+  exporting the calendar and parsing ICS by hand. Only alarms whose trigger
+  that string form can express are listed - an alarm anchored to the end of an
+  event that has an end, one anchored to the start of a task that has both a
+  start and a due date, one with a date-valued/repeated/missing trigger, one
+  in a timezone that resolves to no known zone, and a relative one on a
+  component with no date at all to be relative to: each would read back as a
+  different moment than it fires, or as a value a write would reject. Writing
+  `erinnerungen` never touches those alarms - which means a hidden alarm and a
+  written reminder can both fire, see `docs/tools.md` - and a reminder that is
+  already present is kept as it is rather than
+  rebuilt, so its action, dismissed state (`ACKNOWLEDGED`/`X-MOZ-LASTACK`) and
+  UID survive an edit. Clearing `"erinnerungen"` via `felder_leeren` still
+  removes every alarm. `export_calendar`/`import_ics` remain the verbatim,
+  lossless path for alarms. Absolute reminders are resolved in the timezone
+  they were stored in (previously always assumed UTC, silently shifting
+  foreign-client alarms) and read back formatted in the server's default
+  timezone (`MCP_DEFAULT_TIMEZONE`), the same convention `start_datum`/
+  `faellig_datum` follow; durations read back in canonical spelling
+  (`-P1W` → `-P7D`), and passing the same trigger twice creates one alarm.
 - **Notes support**: 6 new MCP tools (`list_notizen`, `get_notiz`,
   `create_notiz`, `update_notiz`, `append_notiz`, `search_notizen`) over the
   Nextcloud Notes app's own JSON REST API - a per-project "living document"
