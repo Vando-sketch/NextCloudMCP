@@ -91,6 +91,15 @@ This project does not yet follow Semantic Versioning releases.
   datetimes otherwise - and a mixed or mismatched set is **rejected** with a
   clear error rather than written as one `EXDATE` carrying two value types
   under a single `TZID`.
+- **An exception date that would cancel nothing now says so.** `ausnahme_daten`
+  only skips an occurrence when it names exactly a moment the series produces;
+  miss it by a day, an hour, or a timezone and the entry used to be stored
+  while the occurrence stayed, with nothing reporting it. Entries are now
+  checked against the event's `wiederholung` (and its `RDATE`s) and a
+  non-matching one is rejected with an error naming it. The check never
+  guesses: an event with no recurrence rule, a rule that cannot be expanded,
+  or a series that would take more than 10 000 occurrences to search are all
+  accepted unchecked.
 - **`get_free_busy(benutzer=...)` sends a valid VFREEBUSY again.** The
   scheduling request carried its day bounds as `DTSTART;TZID=Europe/Berlin:...`
   in a request body that has no VTIMEZONE component in it; RFC 5545 3.6.4
