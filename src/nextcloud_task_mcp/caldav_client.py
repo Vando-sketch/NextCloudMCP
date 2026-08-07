@@ -7,7 +7,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable, Iterator
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -1312,8 +1312,7 @@ class CalDavService:
         parsed = mapping.parse_datetime_input(value)
         if isinstance(parsed, datetime):
             return parsed
-        day_start = datetime.combine(parsed, time.min, tzinfo=mapping.get_default_timezone())
-        return day_start + timedelta(days=1) if exclusive_end else day_start
+        return mapping.local_midnight(parsed + timedelta(days=1) if exclusive_end else parsed)
 
     def _event_calendars(self, calendar_names: list[str] | None) -> list[tuple[str, DAVCalendar]]:
         """Return (display name, calendar) pairs for the VEVENT calendars to query.

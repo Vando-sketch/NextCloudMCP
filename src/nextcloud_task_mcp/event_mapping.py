@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,6 +18,7 @@ from .mapping import (
     extract_alarms,
     format_datetime_output,
     get_default_timezone,
+    local_midnight,
     parse_datetime_input,
     visibility_label_to_ical,
 )
@@ -310,17 +311,6 @@ def _utc_value(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
-
-
-def _local_midnight(value: date) -> datetime:
-    """Start of an all-day date, in the server's default timezone.
-
-    All-day values carry no time, so any comparison has to pick an instant for
-    them. `caldav_client._range_bound` and `mapping._to_comparable_datetime`
-    pick local midnight; these helpers must agree, or an all-day event's busy
-    block would start (and end) at the wrong hour of its own day.
-    """
-    return datetime.combine(value, time.min, tzinfo=get_default_timezone())
 
 
 def _parse_rrule(text: str) -> vRecur:
@@ -798,7 +788,7 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     parsed = _parse_datetime(start)
     if isinstance(parsed, datetime):
         return (0, _as_utc(parsed))
-    return (0, _local_midnight(parsed))
+    return (0, local_midnight(parsed))
 
 
 def local_day_window(day: date) -> tuple[datetime, datetime]:
@@ -810,7 +800,7 @@ def local_day_window(day: date) -> tuple[datetime, datetime]:
     *next* day's midnight rather than start + 24h, so a day with a
     daylight-saving change is the 23 or 25 hours it really has.
     """
-    return _local_midnight(day), _local_midnight(day + timedelta(days=1))
+    return local_midnight(day), local_midnight(day + timedelta(days=1))
 
 
 def _event_interval(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
@@ -836,11 +826,11 @@ def _event_interval(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
         start_dt = _as_utc(start_value)
         end_dt = _as_utc(end_value) if isinstance(end_value, datetime) else start_dt
     else:
-        start_dt = _local_midnight(start_value)
+        start_dt = local_midnight(start_value)
         last_day = end_value if isinstance(end_value, date) else start_value
         if isinstance(last_day, datetime):  # mismatched pair from another client
             last_day = start_value
-        end_dt = _local_midnight(last_day + timedelta(days=1))
+        end_dt = local_midnight(last_day + timedelta(days=1))
     return start_dt, max(end_dt, start_dt)
 
 
@@ -935,7 +925,7 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
 
     Both ends are timezone-aware: a value written without a zone by another
     client is read in the server's default timezone (`_as_utc`), and an
-    all-day date is expanded from local midnight (`_local_midnight`), so the
+    all-day date is expanded from local midnight (`mapping.local_midnight`), so the
     interval lines up with the day windows the rest of the server builds.
 
     A cancelled event (STATUS=CANCELLED) or a transparent one
@@ -972,7 +962,7 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
     def _to_instant(value: date | datetime) -> datetime:
         if isinstance(value, datetime):
             return _as_utc(value)
-        return _local_midnight(value)
+        return local_midnight(value)
 
     start_dt = _to_instant(start_value)
     end_dt = _to_instant(end_value)

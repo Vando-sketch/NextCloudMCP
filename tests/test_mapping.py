@@ -863,6 +863,38 @@ def test_ambiguous_wall_time_keeps_its_spelling_when_the_zone_is_kept():
     assert kept.astimezone(timezone.utc) == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
 
 
+def test_local_midnight_in_a_zone_whose_day_starts_an_hour_late():
+    """Some zones jump at 00:00, so that day has no midnight at all.
+
+    America/Santiago goes 00:00 -> 01:00 on 2026-09-06. `zoneinfo` resolves
+    the missing reading to the right instant either way (the transition itself
+    *is* the day's first moment), but a bound that is printed - `get_free_busy`
+    reports the window it used - must not read as a time that never struck.
+    """
+    mapping.set_default_timezone("America/Santiago")
+    start = mapping.local_midnight(date(2026, 9, 6))
+
+    assert start.astimezone(timezone.utc) == datetime(2026, 9, 6, 4, 0, tzinfo=timezone.utc)
+    assert start.isoformat() == "2026-09-06T01:00:00-03:00"
+
+
+def test_local_midnight_on_an_ordinary_day_is_midnight():
+    assert mapping.local_midnight(date(2026, 7, 20)).isoformat() == "2026-07-20T00:00:00+02:00"
+
+
+def test_due_filter_bounds_are_real_readings_in_a_midnight_transition_zone():
+    """The same rule for the end-of-day bound `faellig_vor` builds."""
+    mapping.set_default_timezone("America/Santiago")
+    start = mapping._to_comparable_datetime("2026-09-06", end_of_day=False)
+    end = mapping._to_comparable_datetime("2026-09-06", end_of_day=True)
+
+    assert start.isoformat() == "2026-09-06T01:00:00-03:00"
+    assert end.isoformat() == "2026-09-06T23:59:59-03:00"
+    assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(
+        hours=22, minutes=59, seconds=59
+    )
+
+
 def test_absolute_reminder_is_written_to_the_wire_in_utc():
     """RFC 5545 demands a UTC absolute TRIGGER - only the *display* is local."""
     todo = _new_todo()

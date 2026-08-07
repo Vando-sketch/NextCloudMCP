@@ -107,6 +107,12 @@ This project does not yet follow Semantic Versioning releases.
   still becomes UTC, exactly as in `create_event`. `dauer_minuten` is also a
   real duration now: a block spanning a daylight-saving change no longer
   grows or shrinks by the transition's hour.
+- **Day boundaries come from one helper, and are readings that exist.** Zones
+  that move their clocks at 00:00 (America/Santiago, Asia/Beirut, …) have no
+  midnight on a transition day. The instant such a bound resolved to was
+  always the right one - that day's first moment - but `get_free_busy` reports
+  its window back, and now does so with a wall clock the day really had
+  (`01:00-03:00`, not `00:00-04:00`).
 - **`get_agenda` reports its own day, not the calendar server's.** A CalDAV
   time-range query resolves all-day and floating values against the calendar
   collection's timezone (RFC 4791 9.9) - the Nextcloud account's setting,
