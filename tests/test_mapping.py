@@ -733,6 +733,15 @@ def test_utc_default_timezone_is_kept_as_plain_utc(zone_name):
     assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
 
 
+def test_default_timezone_set_to_a_plain_tzinfo_is_used_as_is():
+    """`set_default_timezone` also takes a `tzinfo` - the tzdata-less fallback path."""
+    mapping.set_default_timezone(timezone.utc)
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+    assert mapping.local_midnight(date(2026, 7, 20)).isoformat() == "2026-07-20T00:00:00+00:00"
+
+
 def test_explicit_utc_zone_name_input_is_kept_as_plain_utc():
     result = mapping.parse_datetime_input("2026-07-20T14:00:00 UTC", keep_zone=True)
     assert isinstance(result, datetime)
