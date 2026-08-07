@@ -172,20 +172,20 @@ Returns all available Nextcloud task lists (calendars supporting VTODO) as
 Event-only calendars (e.g. Nextcloud's default "Personal" calendar) are
 excluded — `list_calendars` is their counterpart.
 
-### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
+### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
 
-Returns tasks across one, several, or all task lists (`listen_namen=None` queries all lists; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed tasks. Each task
+Returns tasks across one, several, or all task lists (`listen_namen=None` queries *every* list on the account, unbounded unless you narrow it; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed tasks. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), and `liste` (the task list's display name).
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), and `liste` (the task list's display name — ambiguous in the one case Nextcloud allows two lists to share one).
 
-Results are sorted by `faellig_datum` ascending (tasks without a due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact, case-insensitive), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds). `limit` (must be `> 0`) caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
+Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter". `limit` (must be `> 0`) caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
 ### `get_task(list_name, task_uid)`
 
-Fetches a single task by UID, without listing the whole task list. Returns the same
-dict shape as one entry from `list_tasks`.
+Fetches a single task by UID, without listing the whole task list. Returns what one
+entry from `list_tasks` holds, minus its `liste` key.
 
 ### `create_task(list_name, titel, ...)`
 
