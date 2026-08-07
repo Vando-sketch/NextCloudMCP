@@ -470,7 +470,13 @@ Returns `{"uid": ...}`.
 
 To move or cancel a **single occurrence** of a recurring event: add its
 original date to `ausnahme_daten` (via `update_event`) and, for a move, create
-a separate replacement event.
+a separate replacement event. Pass the occurrence exactly as `list_events` /
+`get_event` reported its `start` — exception dates are stored in the timezone
+the event's own start is anchored to, so the value names the same moment the
+series produced. A **naive** exception date still means the server's default
+timezone, like every other naive input: for an event anchored in a *foreign*
+zone, name that zone (`"2026-07-27T09:00:00 Asia/Tokyo"`) or pass the reported
+value back.
 
 ### Attendees (`teilnehmer`)
 

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from icalendar import vRecur
 
@@ -131,9 +132,12 @@ class EventFields:
     string of exactly the form "YYYY-MM-DD" makes the event all-day
     (VALUE=DATE), a naive datetime is interpreted in the server's default
     timezone and, since events pass `keep_zone=True`, keeps that zone
-    (DTSTART;TZID=...) instead of collapsing to UTC. For all-day events
-    `ende` is the *inclusive* last day; RFC 5545 DTEND is exclusive, so one
-    day is added when writing and subtracted again when parsing.
+    (DTSTART;TZID=...) instead of collapsing to UTC. A value that carries only
+    a numeric offset (the form `parse_vevent` returns) is re-expressed in the
+    zone the event is already anchored to, same instant - see `_anchored`. For
+    all-day events `ende` is the *inclusive* last day; RFC 5545 DTEND is
+    exclusive, so one day is added when writing and subtracted again when
+    parsing.
 
     `teilnehmer`, when set, *replaces* the event's full ATTENDEE set (not an
     append). Each entry is {"email": str (required), "name": str (optional),
@@ -250,6 +254,38 @@ def _parse_datetime(value: str) -> date | datetime:
         raise InvalidEventDataError(str(exc)) from None
 
 
+def _component_zone(event) -> tzinfo | None:
+    """The zone the component's DTSTART is expressed in, or None.
+
+    None for an all-day (date-valued) or absent DTSTART, and for a floating
+    one - none of those anchor anything to a zone.
+    """
+    prop = event.get("dtstart")
+    value = getattr(prop, "dt", None) if prop is not None else None
+    return value.tzinfo if isinstance(value, datetime) else None
+
+
+def _anchored(value: date | datetime, zone: tzinfo | None) -> date | datetime:
+    """Express a datetime in the component's own zone, keeping the instant.
+
+    A value that carries a real IANA zone of its own (a naive input resolved
+    in the default timezone, or an explicit `"... Europe/Berlin"`) keeps it -
+    the caller named a zone, and `_sync_vtimezones` will write the matching
+    VTIMEZONE. A value that carries only a fixed offset says nothing about
+    *which* zone it belongs to; `mapping.parse_datetime_input` turns those into
+    plain UTC, and adopting the component's zone instead is what keeps
+    `get_event` -> `update_event` from quietly re-anchoring a recurring event
+    to a UTC instant (and its DTSTART/DTEND from ending up anchored
+    differently, which changes the event's real length at the next DST
+    transition).
+    """
+    if not isinstance(zone, ZoneInfo) or not isinstance(value, datetime):
+        return value
+    if value.tzinfo is None or isinstance(value.tzinfo, ZoneInfo):
+        return value
+    return value.astimezone(zone)
+
+
 def _as_utc(value: datetime) -> datetime:
     """Make a datetime comparable: a naive value is read in the default zone.
 
@@ -293,6 +329,32 @@ def _parse_rrule(text: str) -> vRecur:
             "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
         )
     return recur
+
+
+def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
+    """Parse `ausnahme_daten` entries into values anchored to the event's DTSTART.
+
+    Every value of one EXDATE property shares that property's parameters, so
+    they must all be expressed the same way: in the zone DTSTART names when it
+    has one, in UTC otherwise. Mixing them lets `icalendar` write a single
+    `TZID=` next to a value that still carries its own `Z` suffix - forbidden
+    by RFC 5545 3.2.19, and invisible when read back - and, more importantly,
+    an exception date only cancels an occurrence when it names the same moment
+    the recurrence set produced, which is DTSTART's moment in DTSTART's zone.
+
+    Only the spelling is adjusted: each entry keeps the instant it parsed to,
+    including the rule that a naive entry means the server's default timezone.
+    All-day (date) entries carry no zone and pass through untouched.
+    """
+    zone = _component_zone(event)
+    target: tzinfo = zone if isinstance(zone, ZoneInfo) else timezone.utc
+    values: list[date | datetime] = []
+    for entry in entries:
+        value = _parse_datetime(entry)
+        if isinstance(value, datetime) and value.tzinfo is not None:
+            value = value.astimezone(target)
+        values.append(value)
+    return values
 
 
 def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:
@@ -356,6 +418,13 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     field (including "titel" and "start", which cannot be cleared), raises
     `InvalidEventDataError`.
 
+    Timestamps are anchored to the zone the event already carries: a `start`,
+    `ende` or `ausnahme_daten` entry that names no zone of its own (only a
+    numeric offset, which is what `parse_vevent` hands back) is written in the
+    event's own DTSTART zone rather than as a bare UTC instant, so reading an
+    event and writing it back leaves it exactly as anchored as it was. See
+    `_anchored` and `_exdate_values`.
+
     `own_organizer` is the caller's own "mailto:..." address (discovered by
     `CalDavService` via a CalDAV principal lookup - this module makes no
     network calls itself, so the value has to be handed in). It is only used
@@ -383,12 +452,21 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         elif ical_name is not None and ical_name in event:
             del event[ical_name]
 
+    # The zone the event is already anchored to (before its DTSTART is
+    # replaced), so a value that carries only a numeric offset - which is how
+    # `parse_vevent` renders every timestamp - adopts the event's own zone
+    # instead of pinning it to a fixed UTC instant.
+    zone = _component_zone(event)
+
     if fields.titel is not None:
         _set(event, "summary", fields.titel)
     if fields.start is not None:
-        _set(event, "dtstart", _parse_datetime(fields.start))
+        _set(event, "dtstart", _anchored(_parse_datetime(fields.start), zone))
+        # A new start may name a zone of its own; everything below anchors to
+        # the event's final DTSTART, not the one it had on the way in.
+        zone = _component_zone(event)
     if fields.ende is not None:
-        end_value = _parse_datetime(fields.ende)
+        end_value = _anchored(_parse_datetime(fields.ende), zone)
         if not isinstance(end_value, datetime):
             # `ende` is the inclusive last day; RFC 5545 DTEND is exclusive,
             # so the stored all-day end is one day later.
@@ -418,7 +496,7 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         if "exdate" in event:
             del event["exdate"]
         if fields.ausnahme_daten:
-            event.add("exdate", [_parse_datetime(entry) for entry in fields.ausnahme_daten])
+            event.add("exdate", _exdate_values(event, list(fields.ausnahme_daten)))
     if fields.url is not None:
         _set(event, "url", fields.url)
     if fields.verknuepfte_aufgabe is not None:
