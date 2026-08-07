@@ -1984,8 +1984,15 @@ class CalDavService:
         address = benutzer if is_mailto else f"mailto:{benutzer}"
         bare = address[len("mailto:") :]
 
+        # RFC 5545 3.6.4 (and RFC 6638's scheduling profile of it): a
+        # VFREEBUSY's DTSTART/DTEND are UTC. caldav puts these datetimes
+        # straight into the VFREEBUSY it POSTs, where `icalendar` would write a
+        # zone-aware bound as `DTSTART;TZID=Europe/Berlin:...` - a TZID
+        # reference in a request that carries no VTIMEZONE to resolve it with.
         try:
-            response = principal.freebusy_request(start, end, [address])
+            response = principal.freebusy_request(
+                start.astimezone(timezone.utc), end.astimezone(timezone.utc), [address]
+            )
         except TaskMcpError:
             raise
         except Exception as exc:

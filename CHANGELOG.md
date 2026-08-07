@@ -83,6 +83,13 @@ This project does not yet follow Semantic Versioning releases.
   naive and offset entries used to produce an `EXDATE` with a `TZID`
   parameter next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids
   and no reader reports.
+- **`get_free_busy(benutzer=...)` sends a valid VFREEBUSY again.** The
+  scheduling request carried its day bounds as `DTSTART;TZID=Europe/Berlin:...`
+  in a request body that has no VTIMEZONE component in it; RFC 5545 3.6.4
+  requires UTC bounds there, so they are converted before the POST (the same
+  instants either way). Busy periods coming *back* without a `Z` are read as
+  UTC too, as that format requires - reading them in the default timezone
+  moved every reported busy block by that zone's offset.
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task

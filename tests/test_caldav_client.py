@@ -1970,6 +1970,28 @@ def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, princip
     ]
 
 
+def test_get_free_busy_for_other_user_sends_utc_bounds(service, principal):
+    """A VFREEBUSY's DTSTART/DTEND must be UTC (RFC 5545 3.6.4, RFC 6638).
+
+    caldav puts the datetimes it is handed straight into the VFREEBUSY it
+    POSTs to the schedule outbox, and `icalendar` writes a zone-aware value as
+    `DTSTART;TZID=Europe/Berlin:...` - a TZID reference in a request that
+    carries no VTIMEZONE component at all, which a server is free to reject or
+    to resolve as something else entirely.
+    """
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[0].tzinfo is timezone.utc
+    assert args[1].tzinfo is timezone.utc
+    # The same instants as the local day bounds: 2026-07-20 00:00+02:00 on.
+    assert args[0] == datetime(2026, 7, 19, 22, 0, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
+
+
 def test_get_free_busy_for_other_user_accepts_mailto_prefixed_benutzer(service, principal):
     vfb = FreeBusy()
     principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
