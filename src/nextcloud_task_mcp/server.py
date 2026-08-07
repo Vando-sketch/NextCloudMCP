@@ -197,9 +197,10 @@ def build_server(
                 of that day onward.
             limit: Optional maximum number of results to return (must be > 0).
             prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
-            tag: Optional category/tag filter (exact, case-insensitive match).
-            suchtext: Optional case-insensitive substring filter over title (titel)
-                and notes (notizen).
+            tag: Optional category/tag filter (exact match).
+            suchtext: Optional substring filter over title (titel) and notes
+                (notizen). Both it and `tag` ignore case and Unicode spelling
+                ("STRASSE" matches "Straße").
             list_name: Deprecated alias for `listen_namen` (takes a single list display name).
                 Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
                 is an error.
@@ -207,9 +208,9 @@ def build_server(
         An empty string is "no filter" for prioritaet, tag and suchtext; an
         empty `listen_namen` list is an empty scope and returns nothing.
 
-        If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
-        (due date) at all are excluded - they can't be judged "before"/"after"
-        anything. Results are sorted by faellig_datum ascending (tasks without a due date last),
+        If `faellig_vor` and/or `faellig_nach` is given, tasks with no readable
+        faellig_datum (due date) are excluded - they can't be judged "before"/"after"
+        anything. Results are sorted by faellig_datum ascending (those tasks last),
         then by titel. `limit` is applied last, after merging across lists.
 
         Returns:
