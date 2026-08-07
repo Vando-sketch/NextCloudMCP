@@ -90,6 +90,14 @@ This project does not yet follow Semantic Versioning releases.
   instants either way). Busy periods coming *back* without a `Z` are read as
   UTC too, as that format requires - reading them in the default timezone
   moved every reported busy block by that zone's offset.
+- **The last two UTC-only timestamps follow the same rule now**: a note's
+  `geaendert` (`list_notizen`, `get_notiz`, …) and the token expiry printed by
+  the `nextcloud-task-mcp-admin list` CLI, which reads `MCP_DEFAULT_TIMEZONE`
+  from the environment for it (falling back to UTC if it names no known zone).
+  `list_trash`'s `geloescht_am` keeps reading a server-side value without an
+  offset as UTC - it is Nextcloud's own record of the deletion, not a
+  caller's input or a floating calendar time - and is then rendered in the
+  default timezone like everything else.
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task
