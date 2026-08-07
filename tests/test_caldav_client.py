@@ -642,8 +642,8 @@ def test_list_tasks_all_lists_gives_up_after_one_refresh(service, principal):
     with pytest.raises(TaskListNotFoundError, match="Kaputt"):
         service.list_tasks()
 
-    # Listed once to prime, once for the first pass' cache miss... plus exactly
-    # one refresh.
+    # Listed once to prime the cache, then exactly one refresh - the second
+    # pass reports the failure instead of refreshing again forever.
     assert principal.calendars.call_count == 2
 
 
