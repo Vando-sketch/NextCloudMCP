@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 from . import event_mapping, mapping, notes_mapping
 from .caldav_client import CalDavService
 from .config import Settings, is_local_hostname
-from .errors import InvalidTaskDataError, TaskMcpError
+from .errors import TaskMcpError
 from .notes_client import NotesService
 from .personal_auth import PersonalAuthProvider
 
@@ -173,17 +173,21 @@ def build_server(
         nur_offene: bool = True,
         faellig_vor: str | None = None,
         faellig_nach: str | None = None,
+        limit: int | None = None,
+        *,
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
-        limit: int | None = None,
         list_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """List tasks across one, several, or all Nextcloud task lists.
 
         Args:
             listen_namen: Optional list of task list display names to query;
-                None queries every task list on the account.
+                None queries **every** task list on the account. That is one
+                request per list and returns every open task in the account
+                unless something narrows it - pass `listen_namen`, a due-date
+                bound, or `limit` unless you really want the lot.
             nur_offene: If True (default), only return tasks that are not completed.
             faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
@@ -191,14 +195,17 @@ def build_server(
             faellig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
+            limit: Optional maximum number of results to return (must be > 0).
             prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
             tag: Optional category/tag filter (exact, case-insensitive match).
             suchtext: Optional case-insensitive substring filter over title (titel)
                 and notes (notizen).
-            limit: Optional maximum number of results to return (must be > 0).
             list_name: Deprecated alias for `listen_namen` (takes a single list display name).
                 Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
                 is an error.
+
+        An empty string is "no filter" for prioritaet, tag and suchtext; an
+        empty `listen_namen` list is an empty scope and returns nothing.
 
         If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
         (due date) at all are excluded - they can't be judged "before"/"after"
@@ -217,16 +224,11 @@ def build_server(
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
             or None if the task doesn't recur; read-only - this server can't
             create/edit recurrence), and liste (the display name of the task list
-            containing the task).
+            containing the task; ambiguous in the one case Nextcloud allows two
+            task lists to share a display name).
         """
         if list_name is not None and listen_namen is not None:
-
-            def _fail_alias():
-                raise InvalidTaskDataError(
-                    "list_name is the deprecated alias of listen_namen; pass only one"
-                )
-
-            await _call(_fail_alias)
+            raise ToolError("list_name is the deprecated alias of listen_namen; pass only one")
 
         target_list_names: list[str] | None
         if list_name is not None:
@@ -257,9 +259,10 @@ def build_server(
             task_uid: UID of the task to fetch.
 
         Returns:
-            A task dict with the same shape as one entry from list_tasks: uid,
-            titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
-            status, ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
+            A task dict holding what one entry from list_tasks holds, minus its
+            "liste" key (the list is `list_name`, which you passed): uid, titel,
+            start_datum, faellig_datum, prioritaet, fortschritt_prozent, status,
+            ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
             wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
