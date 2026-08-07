@@ -214,9 +214,13 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
 `faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
-date raises an error. Absolute reminders are stored in UTC per RFC 5545, but reading reminders
-back formats them in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
-See `docs/tools.md` for details.
+date raises an error. Absolute reminders without a UTC offset are interpreted in the server's
+default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`) and stored as UTC per RFC
+5545; reading them back formats the same instant in the default timezone, so the string may
+differ from what was written. Reading a reminder and writing it back is safe — the alarm is
+recognized as already present and left alone — but the strings are normalized (`"-P1W"` reads
+back as `"-P7D"`, `"...Z"` as the default timezone's offset). Alarms whose trigger this format
+cannot express are not listed, and are never touched by a write; see `docs/tools.md`.
 
 > **BREAKING CHANGE**: Server timezone handling uses a single configurable default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC-hardcoded behavior.
 
@@ -230,7 +234,7 @@ Returned timestamps carry the default timezone's offset (e.g. `+02:00`).
 
 Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
 changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
-*all* existing reminders on the task.
+the reminders `list_tasks` shows; `felder_leeren` clears *every* alarm instead.
 
 To remove a property entirely (e.g. delete a due date), list its field name in the
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
