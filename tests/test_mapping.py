@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from icalendar import Calendar, Todo
@@ -712,6 +713,48 @@ def test_set_default_timezone_utc_reproduces_old_expectations():
     _apply(todo, titel="Task", faellig_datum="2026-07-20T14:00:00")
     res = mapping.parse_vtodo(todo)
     assert res["faellig_datum"] == "2026-07-20T14:00:00+00:00"
+
+
+@pytest.mark.parametrize("zone_name", ["UTC", "Etc/UTC", "Etc/GMT", "Universal"])
+def test_utc_default_timezone_is_kept_as_plain_utc(zone_name):
+    """A zone that *is* UTC never becomes a TZID reference.
+
+    `keep_zone=True` normally attaches the default zone as a `ZoneInfo`, which
+    `icalendar` writes as `DTSTART;TZID=<key>:...`. For UTC that would be a
+    TZID reference to a VTIMEZONE with a single zero-offset observance instead
+    of the plain `...Z` form every client understands - and
+    `MCP_DEFAULT_TIMEZONE=UTC` is documented to restore exactly the old,
+    pre-default-timezone wire format.
+    """
+    mapping.set_default_timezone(zone_name)
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result.tzinfo is timezone.utc
+    assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+
+
+def test_explicit_utc_zone_name_input_is_kept_as_plain_utc():
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00 UTC", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result.tzinfo is timezone.utc
+
+
+def test_missing_tzdata_falls_back_to_utc_instead_of_crashing_on_import(monkeypatch, caplog):
+    """The shipped default zone is resolved defensively at import time.
+
+    A Python install without the IANA database (a slim container, Windows
+    without `tzdata`) makes `ZoneInfo("Europe/Berlin")` raise at *import*, so
+    every tool would fail with an unhandled `ZoneInfoNotFoundError` traceback
+    from the module header - before the config layer gets to report anything.
+    """
+
+    def _no_tzdata(name):
+        raise ZoneInfoNotFoundError(f"No time zone found with key {name}")
+
+    monkeypatch.setattr(mapping, "ZoneInfo", _no_tzdata)
+    with caplog.at_level(logging.WARNING, logger="nextcloud_task_mcp.mapping"):
+        assert mapping._initial_default_timezone() is timezone.utc
+    assert "MCP_DEFAULT_TIMEZONE" in caplog.text
 
 
 def test_naive_datetime_round_trip():

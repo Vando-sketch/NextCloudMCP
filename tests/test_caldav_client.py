@@ -1219,6 +1219,32 @@ def test_create_event_with_naive_start_adds_default_zone_vtimezone(service, prin
     assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
 
 
+def test_create_event_with_utc_default_timezone_writes_plain_z_and_no_vtimezone(service, principal):
+    """`MCP_DEFAULT_TIMEZONE=UTC` restores the pre-default-timezone wire format.
+
+    Restores the coverage the original
+    `test_create_event_without_named_zone_has_no_vtimezone` had: keeping UTC as
+    a `ZoneInfo` writes `DTSTART;TZID=UTC:...` plus a VTIMEZONE carrying a
+    single zero-offset observance onto every event - understood by fewer
+    clients than a plain `Z`, and the opposite of "restores the previous UTC
+    behavior".
+    """
+    mapping.set_default_timezone("UTC")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00"),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "VTIMEZONE" not in ical_text
+    assert "TZID" not in ical_text
+    assert "DTSTART:20260720T140000Z" in ical_text
+
+
 def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal):
     """Regression test: a named-zone DTSTART needs its own VTIMEZONE on the
     wire (RFC 5545 3.6.5), or the TZID it references is dangling."""

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -87,10 +88,66 @@ class TaskFields:
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
-_DEFAULT_TIMEZONE: ZoneInfo = ZoneInfo("Europe/Berlin")
+#: The zone this server falls back to before `set_default_timezone` runs, kept
+#: in sync with `config.Settings.default_timezone` (the value the server
+#: actually applies at startup).
+_SHIPPED_DEFAULT_TIMEZONE = "Europe/Berlin"
+
+# IANA names that denote UTC itself. A zone from this set is stored as
+# `datetime.timezone.utc` rather than as a `ZoneInfo`, so `icalendar` writes
+# the plain `...Z` form instead of `;TZID=UTC:...` plus a VTIMEZONE holding one
+# zero-offset observance - which is what `MCP_DEFAULT_TIMEZONE=UTC` is
+# documented to do ("restores the previous UTC behavior"). Zones that merely
+# *happen* to sit at +00:00 (Europe/London in winter, Africa/Abidjan) are real,
+# distinct zones and deliberately not listed.
+_UTC_ZONE_KEYS = frozenset(
+    {
+        "UTC",
+        "Etc/UTC",
+        "Etc/GMT",
+        "Etc/GMT+0",
+        "Etc/GMT-0",
+        "Etc/GMT0",
+        "Etc/Greenwich",
+        "Etc/Universal",
+        "Etc/Zulu",
+        "GMT",
+        "GMT+0",
+        "GMT-0",
+        "GMT0",
+        "Greenwich",
+        "Universal",
+        "Zulu",
+    }
+)
+
+_logger = logging.getLogger(__name__)
 
 
-def set_default_timezone(zone: str | ZoneInfo) -> None:
+def _initial_default_timezone() -> tzinfo:
+    """Resolve the shipped default zone, falling back to UTC if tzdata is absent.
+
+    A Python installation without the IANA database (a slim container image,
+    Windows without the `tzdata` package) cannot resolve any zone name at all.
+    Raising from a module-level statement would take the whole server down with
+    an unhandled `ZoneInfoNotFoundError` traceback before the config layer -
+    which reports missing/invalid zones properly - even gets to run.
+    """
+    try:
+        return ZoneInfo(_SHIPPED_DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        _logger.warning(
+            "Timezone database unavailable: %r could not be resolved, falling back to "
+            "UTC. Install the 'tzdata' package to use MCP_DEFAULT_TIMEZONE.",
+            _SHIPPED_DEFAULT_TIMEZONE,
+        )
+        return timezone.utc
+
+
+_DEFAULT_TIMEZONE: tzinfo = _initial_default_timezone()
+
+
+def set_default_timezone(zone: str | tzinfo) -> None:
     """Set the server-wide default timezone."""
     global _DEFAULT_TIMEZONE
     if isinstance(zone, str):
@@ -99,9 +156,22 @@ def set_default_timezone(zone: str | ZoneInfo) -> None:
         _DEFAULT_TIMEZONE = zone
 
 
-def get_default_timezone() -> ZoneInfo:
+def get_default_timezone() -> tzinfo:
     """Return the server-wide default timezone (defaults to Europe/Berlin)."""
     return _DEFAULT_TIMEZONE
+
+
+def _resolve_in_zone(value: datetime) -> datetime:
+    """Settle a zone-anchored wall-clock datetime into the form it is written in.
+
+    A zone that *is* UTC collapses to `datetime.timezone.utc`, so the value is
+    serialized as `...Z` instead of as a TZID reference (see `_UTC_ZONE_KEYS`).
+    Everything else is returned unchanged.
+    """
+    zone = value.tzinfo
+    if isinstance(zone, ZoneInfo) and zone.key in _UTC_ZONE_KEYS:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def format_datetime_output(value: date | datetime | None) -> str | None:
@@ -242,10 +312,10 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
                     "timezone name cannot both be given - use one or the other."
                 )
             dt = dt.replace(tzinfo=zone)
-            return dt if keep_zone else dt.astimezone(timezone.utc)
+            return _resolve_in_zone(dt) if keep_zone else dt.astimezone(timezone.utc)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=get_default_timezone())
-            return dt if keep_zone else dt.astimezone(timezone.utc)
+            return _resolve_in_zone(dt) if keep_zone else dt.astimezone(timezone.utc)
         return dt.astimezone(timezone.utc)
 
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
