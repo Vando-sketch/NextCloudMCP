@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -1266,6 +1267,33 @@ def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal
     assert "TZID:Europe/Berlin" in ical_text
     assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in ical_text
     assert ical_text.index("BEGIN:VTIMEZONE") < ical_text.index("BEGIN:VEVENT")
+
+
+def test_attached_vtimezone_rules_reach_well_past_2038(service, principal):
+    """A VTIMEZONE that stops in 2037 mis-resolves every date after it.
+
+    `icalendar` writes the transitions as an explicit RDATE list, not as a
+    rule, and defaults to ending it at 2038-01-01. A client reading such a
+    component applies the last observance it finds to everything later, so a
+    recurring event's summer occurrences from 2038 on come out an hour off -
+    the exact drift this zone handling exists to avoid.
+    """
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            wiederholung="FREQ=WEEKLY",
+        ),
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    vtimezone = ical_text.split("BEGIN:VTIMEZONE")[1].split("END:VTIMEZONE")[0]
+    years = {int(year) for year in re.findall(r"(\d{4})\d{4}T\d{6}", vtimezone)}
+    assert max(years) >= 2090
 
 
 def test_get_event_parses_and_annotates_calendar(service, principal):

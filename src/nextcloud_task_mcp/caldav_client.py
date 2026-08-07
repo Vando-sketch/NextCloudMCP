@@ -68,6 +68,10 @@ _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
 _RANGE_MIN = datetime(1901, 1, 1, tzinfo=timezone.utc)
 _RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
 
+# How far the daylight-saving transitions written into an attached VTIMEZONE
+# reach (see `_sync_vtimezones`). Matches `_RANGE_MAX`.
+_VTIMEZONE_HORIZON = _RANGE_MAX.date()
+
 # The two supported task<->event link semantics, mapped to the RELATED-TO
 # RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
 # VTODO would make Nextcloud Tasks render the task as a subtask of a
@@ -491,6 +495,14 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     one (via `icalendar.Timezone.from_tzinfo`) for each such zone and adds
     it to `vcal`, skipping any TZID `vcal` already has (mirroring
     `export_calendar`'s `seen_tzids` de-dup pattern).
+
+    `icalendar` writes the zone's transitions as an explicit RDATE list rather
+    than as a recurrence rule, and stops at 2038-01-01 unless told otherwise;
+    a client reading such a component applies the last observance it finds to
+    every later date, so a weekly event's summer occurrences would come out an
+    hour off from 2038 on. The list is therefore generated up to
+    `_VTIMEZONE_HORIZON` instead, at a cost of about 2 KB per written event -
+    the same horizon `_RANGE_MAX` already treats as "far enough".
     """
     seen_tzids = {str(c.get("TZID", "")) for c in vcal.subcomponents if c.name == "VTIMEZONE"}
     zones: dict[str, ZoneInfo] = {}
@@ -516,7 +528,9 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
         # any VEVENT/VTODO already in `vcal` - required by RFC 5545 3.6.5,
         # and `update_event` syncs onto a component already carrying its
         # VEVENT, unlike `create_event`'s empty `vcal`.
-        vcal.subcomponents.insert(0, Timezone.from_tzinfo(zone, tzid=tzid))
+        vcal.subcomponents.insert(
+            0, Timezone.from_tzinfo(zone, tzid=tzid, last_date=_VTIMEZONE_HORIZON)
+        )
         seen_tzids.add(tzid)
 
 

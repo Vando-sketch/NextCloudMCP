@@ -107,6 +107,12 @@ This project does not yet follow Semantic Versioning releases.
   still becomes UTC, exactly as in `create_event`. `dauer_minuten` is also a
   real duration now: a block spanning a daylight-saving change no longer
   grows or shrinks by the transition's hour.
+- **The VTIMEZONE attached to a zone-anchored event covers dates past 2038.**
+  `icalendar` writes a zone's transitions as an explicit list and ends it at
+  2038-01-01 by default; a client applies the last observance it finds to
+  everything after that, so occurrences of a long-running series would come
+  out an hour off. The list now reaches 2100 (about 2 KB more per written
+  event).
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task
