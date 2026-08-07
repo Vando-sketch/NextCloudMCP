@@ -485,6 +485,14 @@ under one property with one set of parameters, which RFC 5545 §3.8.5.1 allows
 for a single value type only, and a date-only exception names no occurrence of
 a timed series in any case.
 
+An entry that names no occurrence of the event's `wiederholung` at all — wrong
+day, wrong time, or a naive value read in the server's timezone while the
+series runs in another — is **rejected** rather than stored, since it would
+cancel nothing and report nothing. The check is best-effort and never guesses:
+an event without an `RRULE`, a rule that cannot be expanded, and a series long
+enough that finding the occurrence would mean walking more than 10 000 of them
+are all accepted unchecked. `RDATE` dates count as occurrences too.
+
 ### Attendees (`teilnehmer`)
 
 Each entry:

@@ -483,6 +483,145 @@ def test_exdate_all_day_event_takes_date_entries():
     assert exdate_line == "EXDATE;VALUE=DATE:20260727,20260803"
 
 
+def test_exdate_that_cancels_nothing_is_reported():
+    """Finding 2.2's other half: silence was the defect.
+
+    A naive entry means the server's default timezone even on an event
+    anchored elsewhere, so "09:00" on a Tokyo series is 16:00 Tokyo - an hour
+    the series never produces. The exception was written, the occurrence
+    stayed, and nothing said so.
+    """
+    event = _new_event()
+    with pytest.raises(InvalidEventDataError, match="cancel"):
+        _apply(
+            event,
+            titel="Standup",
+            start="2026-07-20T09:00:00 Asia/Tokyo",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-27T09:00:00"],
+        )
+
+    # Naming the event's zone (or passing back what get_event reported) works.
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T09:00:00 Asia/Tokyo",
+        wiederholung="FREQ=WEEKLY",
+        ausnahme_daten=["2026-07-27T09:00:00 Asia/Tokyo"],
+    )
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T02:00:00+02:00"]
+
+
+def test_exdate_on_a_day_the_series_skips_is_reported():
+    """Right time of day, wrong day: a weekly Monday series has no Tuesday."""
+    event = _new_event()
+    with pytest.raises(InvalidEventDataError, match="does not name an occurrence"):
+        _apply(
+            event,
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",  # a Monday
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-28T09:00:00"],  # Tuesday
+        )
+
+
+def test_exdate_after_the_series_has_ended_is_reported():
+    event = _new_event()
+    with pytest.raises(InvalidEventDataError, match="does not name an occurrence"):
+        _apply(
+            event,
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            wiederholung="FREQ=WEEKLY;COUNT=3",
+            ausnahme_daten=["2026-09-07T09:00:00"],
+        )
+
+
+def test_exdate_matching_an_occurrence_after_a_dst_change_is_accepted():
+    """The series keeps its wall clock, so must the check.
+
+    The occurrence a week after the October transition is 09:00 local at a
+    different UTC offset; comparing instants naively against "start + 7 days"
+    would reject exactly the value `get_event` reports for it.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-10-19T09:00:00 Europe/Berlin",  # +02:00
+        wiederholung="FREQ=WEEKLY",
+        ausnahme_daten=["2026-10-26T09:00:00 Europe/Berlin"],  # +01:00
+    )
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-10-26T09:00:00+01:00"]
+
+
+def test_exdate_on_an_all_day_series_is_checked_by_date():
+    event = _new_event()
+    with pytest.raises(InvalidEventDataError, match="does not name an occurrence"):
+        _apply(
+            event,
+            titel="Urlaub",
+            start="2026-07-20",
+            ende="2026-07-20",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-28"],
+        )
+
+
+def test_exdate_may_name_an_rdate_occurrence():
+    """RDATE dates are part of the recurrence set too."""
+    event = _new_event()
+    _apply(event, titel="Standup", start="2026-07-20T09:00:00 Europe/Berlin")
+    event.add("rdate", [datetime(2026, 7, 22, 9, 0, tzinfo=ZoneInfo("Europe/Berlin"))])
+
+    _apply(event, wiederholung="FREQ=WEEKLY", ausnahme_daten=["2026-07-22T09:00:00"])
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-22T09:00:00+02:00"]
+
+
+def test_exdate_without_a_recurrence_is_not_second_guessed():
+    """With no RRULE there is no occurrence set to check against."""
+    event = _new_event()
+    _apply(
+        event,
+        titel="Einzeltermin",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        ausnahme_daten=["2026-08-15T18:30:00"],
+    )
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-15T18:30:00+02:00"]
+
+
+def test_exdate_check_skips_a_rule_it_cannot_expand():
+    """ "Could not check this" must never read as "this is wrong".
+
+    An all-day series carries a naive start, and a `UNTIL` in UTC next to it is
+    a combination the expander refuses. The exception date below names no
+    occurrence, but nothing here can show that, so it is written.
+    """
+    event = _new_event()
+    _apply(
+        event,
+        titel="Urlaub",
+        start="2026-07-20",
+        ende="2026-07-20",
+        wiederholung="FREQ=WEEKLY;UNTIL=20260831T235959Z",
+        ausnahme_daten=["2026-07-28"],
+    )
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-28"]
+
+
+def test_exdate_check_gives_up_rather_than_walking_an_unbounded_series():
+    """A per-second series must not be expanded until it matches (or forever)."""
+    event = _new_event()
+    _apply(
+        event,
+        titel="Ticker",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        wiederholung="FREQ=SECONDLY",
+        ausnahme_daten=["2027-07-20T09:00:00"],
+    )
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2027-07-20T09:00:00+02:00"]
+
+
 def test_exdate_parses_repeated_properties_from_other_clients():
     """Other clients may write several EXDATE lines instead of one comma list."""
     event = _new_event()

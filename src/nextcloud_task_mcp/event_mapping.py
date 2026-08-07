@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from dateutil.rrule import rrulestr
 from icalendar import vRecur
 
 from .errors import InvalidEventDataError, InvalidTaskDataError
@@ -30,6 +31,12 @@ STATUS_LABELS: dict[str, str] = {
     "abgesagt": "CANCELLED",
 }
 _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
+
+#: How many occurrences of a series `_check_exdates_match_occurrences` expands
+#: before giving up on proving that an exception date names one of them. Ten
+#: thousand covers any plausible real series (192 years of weekly occurrences,
+#: 27 of daily ones) and takes ~20 ms even for a per-second rule.
+_RECURRENCE_SCAN_LIMIT = 10_000
 
 # RFC 5545 RELTYPE -> German relation name used in the `verknuepfte_aufgaben`
 # entries returned by `parse_vevent`. A RELATED-TO property without an
@@ -409,6 +416,99 @@ def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
     return values
 
 
+def _occurrence_key(value: date | datetime, *, all_day: bool) -> date | datetime:
+    """Identity of one occurrence, for comparing exception dates against a series.
+
+    An all-day series is compared by date (`dateutil` yields its occurrences as
+    naive midnights); a timed one by instant, so an exception written in the
+    event's zone and an occurrence computed in it match whatever offset each
+    side happens to be spelled with.
+    """
+    if all_day:
+        return value.date() if isinstance(value, datetime) else value
+    return _as_utc(value).astimezone(timezone.utc) if isinstance(value, datetime) else value
+
+
+def _rdate_values(event) -> list[date | datetime]:
+    """Every RDATE value on the component (extra dates of the recurrence set)."""
+    rdate = event.get("rdate")
+    if rdate is None:
+        return []
+    entries = rdate if isinstance(rdate, list) else [rdate]
+    values: list[date | datetime] = []
+    for entry in entries:
+        for item in getattr(entry, "dts", []):
+            value = getattr(item, "dt", None)
+            if isinstance(value, (date, datetime)):
+                values.append(value)
+    return values
+
+
+def _check_exdates_match_occurrences(
+    event, entries: list[str], values: list[date | datetime]
+) -> None:
+    """Reject an exception date that names no occurrence of the event's series.
+
+    An EXDATE only cancels something when it names exactly a moment the
+    recurrence set produces. Miss it - by a day, by an hour, or by writing a
+    naive value that means the server's default timezone while the series runs
+    on another one - and the exception is stored, the occurrence stays, and
+    nothing anywhere says so. That silence was half of finding 2.2; the zone
+    anchoring above removed the most common cause, this reports what is left.
+
+    Deliberately best-effort, and never a false alarm:
+
+    - without an RRULE there is no occurrence set to check against (an EXDATE
+      on a non-recurring event is pointless, but that is not this check's
+      business), and neither is there when the rule or DTSTART is one
+      `dateutil` refuses;
+    - RDATE values count as occurrences too, being part of the same set;
+    - the scan stops after `_RECURRENCE_SCAN_LIMIT` occurrences and passes.
+      A per-second rule would otherwise be expanded a year deep to prove a
+      point, and "we could not check this cheaply" must not read as "this is
+      wrong".
+    """
+    rrule_prop = event.get("rrule")
+    dtstart_prop = event.get("dtstart")
+    if rrule_prop is None or dtstart_prop is None or not values:
+        return
+    dtstart_value = getattr(dtstart_prop, "dt", None)
+    if not isinstance(dtstart_value, (date, datetime)):
+        return
+    all_day = not isinstance(dtstart_value, datetime)
+
+    wanted: dict[Any, str] = {}
+    for spec, value in zip(entries, values, strict=True):
+        wanted.setdefault(_occurrence_key(value, all_day=all_day), spec)
+    for extra in _rdate_values(event):
+        wanted.pop(_occurrence_key(extra, all_day=all_day), None)
+    if not wanted:
+        return
+    latest = max(wanted)
+
+    try:
+        rule = rrulestr(rrule_prop.to_ical().decode(), dtstart=dtstart_value)
+        for index, occurrence in enumerate(rule):
+            if index >= _RECURRENCE_SCAN_LIMIT:
+                return
+            key = _occurrence_key(occurrence, all_day=all_day)
+            wanted.pop(key, None)
+            if not wanted:
+                return
+            if key > latest:
+                break  # occurrences ascend, so nothing further can match
+    except (ValueError, TypeError, OverflowError):
+        return  # a rule (or a DTSTART) dateutil cannot expand proves nothing
+
+    spec = next(iter(wanted.values()))
+    raise InvalidEventDataError(
+        f"ausnahme_daten entry '{spec}' does not name an occurrence of this event's "
+        "wiederholung, so it would cancel nothing. Pass the occurrence exactly as "
+        "list_events/get_event reported its 'start' - a value without a timezone is "
+        "read in the server's default timezone, not in the event's."
+    )
+
+
 def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:
     unknown = sorted({name for name in clear if name not in _CLEAR_SPECS})
     if unknown:
@@ -552,7 +652,10 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         if "exdate" in event:
             del event["exdate"]
         if fields.ausnahme_daten:
-            event.add("exdate", _exdate_values(event, list(fields.ausnahme_daten)))
+            exdate_entries = list(fields.ausnahme_daten)
+            exdate_values = _exdate_values(event, exdate_entries)
+            _check_exdates_match_occurrences(event, exdate_entries, exdate_values)
+            event.add("exdate", exdate_values)
     if fields.url is not None:
         _set(event, "url", fields.url)
     if fields.verknuepfte_aufgabe is not None:
