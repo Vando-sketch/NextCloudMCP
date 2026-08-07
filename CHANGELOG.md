@@ -65,7 +65,11 @@ This project does not yet follow Semantic Versioning releases.
   carry its offset (e.g. `+02:00`); all-day values stay bare `YYYY-MM-DD`
   strings. `MCP_DEFAULT_TIMEZONE=UTC` restores the previous behaviour
   *including the wire format*: a zone that is UTC is written as plain
-  `...Z`, never as `;TZID=UTC:...` with an accompanying VTIMEZONE.
+  `...Z`, never as `;TZID=UTC:...` with an accompanying VTIMEZONE. A wall
+  clock reading the spring-forward gap skips (`"2026-03-29T02:30:00"` in
+  Europe/Berlin) is stored as the real local time of the same instant
+  (03:30) instead of being written out as a reading that never happens;
+  the autumn overlap keeps the earlier of its two instants.
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task
