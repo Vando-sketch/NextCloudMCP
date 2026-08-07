@@ -1165,44 +1165,53 @@ class CalDavService:
         only_open: bool = True,
         due_before: str | None = None,
         due_after: str | None = None,
+        limit: int | None = None,
+        *,
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
-        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
 
+        `list_names` is a display name, a list of them, or `None` for every
+        task list on the account; an empty list is an empty scope (no request,
+        no results - the filter arguments are still validated). Repeating a
+        name queries that list once, not twice. `""` is a name like any other,
+        i.e. an unknown one.
+
         `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
         parsed results via `mapping.filter_tasks`. Each task dict gains a "liste"
-        key set to its task list display name.
+        key set to its task list display name. That name is what every other task
+        tool takes, with one honest exception: Nextcloud permits two task lists to
+        share a display name, and then "liste" cannot tell them apart (nor can any
+        by-name call - `_resolve_collection` reports such a name as ambiguous
+        rather than guessing). Renaming one of them in Nextcloud is the only fix.
+
+        Anything added to this signature goes after `limit`, keyword-only: the
+        parameters up to and including `limit` are a positional prefix callers
+        may rely on.
         """
+        if isinstance(list_names, str):
+            list_names = [list_names]
         if list_names is not None and not list_names:
-            return []
+            # Nothing to query, but a caller passing limit=0 or an unknown
+            # prioritaet still deserves to hear about it rather than get a
+            # plausible-looking empty result.
+            return mapping.filter_tasks(
+                [],
+                due_before=due_before,
+                due_after=due_after,
+                prioritaet=prioritaet,
+                tag=tag,
+                suchtext=suchtext,
+                limit=limit,
+            )
 
         with self._lock:
-
-            def op(calendar: DAVCalendar):
-                return calendar.todos(include_completed=not only_open)
-
-            targets = self._task_lists(list_names)
-            tasks: list[dict[str, Any]] = []
-            for name, target_calendar in targets:
-                try:
-                    if list_names is not None:
-                        todos = self._with_collection(name, "VTODO", op)
-                    else:
-                        todos = op(target_calendar)
-                except TaskMcpError:
-                    raise
-                except caldav_error.NotFoundError as exc:
-                    raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
-                except Exception as exc:
-                    raise _translate(exc) from exc
-
-                for todo in todos:
-                    parsed = mapping.parse_vtodo(todo.icalendar_component)
-                    parsed["liste"] = name
-                    tasks.append(parsed)
+            if list_names is None:
+                tasks = self._tasks_from_every_list(only_open)
+            else:
+                tasks = self._tasks_from_named_lists(list_names, only_open)
 
             return mapping.filter_tasks(
                 tasks,
@@ -1213,6 +1222,77 @@ class CalDavService:
                 suchtext=suchtext,
                 limit=limit,
             )
+
+    def _parse_todos(self, todos: Any, list_name: str) -> list[dict[str, Any]]:
+        """Parse one list's VTODO objects, stamping each with the list it came from."""
+        parsed = []
+        for todo in todos:
+            task = mapping.parse_vtodo(todo.icalendar_component)
+            task["liste"] = list_name
+            parsed.append(task)
+        return parsed
+
+    def _tasks_from_named_lists(
+        self, list_names: list[str], only_open: bool
+    ) -> list[dict[str, Any]]:
+        """Tasks from the named lists, each queried through the cache-aware path.
+
+        Names are de-duplicated (keeping the caller's order): the same list
+        named twice used to be fetched twice, so every one of its tasks
+        appeared twice in the result. Each name is resolved once, inside
+        `_with_collection` - which also means a resolution failure is
+        translated like any other CalDAV error, and a stale cache entry is
+        re-resolved once.
+        """
+
+        def op(calendar: DAVCalendar):
+            return calendar.todos(include_completed=not only_open)
+
+        tasks: list[dict[str, Any]] = []
+        for name in dict.fromkeys(list_names):
+            try:
+                todos = self._with_collection(name, "VTODO", op)
+            except TaskMcpError:
+                raise
+            except caldav_error.NotFoundError as exc:
+                raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
+            except Exception as exc:
+                raise _translate(exc) from exc
+            tasks.extend(self._parse_todos(todos, name))
+        return tasks
+
+    def _tasks_from_every_list(
+        self, only_open: bool, *, may_retry: bool = True
+    ) -> list[dict[str, Any]]:
+        """Tasks from every VTODO collection on the account.
+
+        The collections are queried as the objects the (cached) listing
+        returned rather than re-resolved by name, which is what keeps two
+        lists sharing a display name both reachable - that name is ambiguous
+        on purpose. The cost is that `_with_collection`'s stale-cache retry
+        doesn't apply here, so it is done once over the whole pass instead: a
+        collection that 404s means the cached listing is out of date (the list
+        was deleted or recreated server-side), the caches are dropped and the
+        pass is repeated against a freshly listed set. Without it, one deleted
+        task list would make every all-lists query fail for the remaining life
+        of the process.
+        """
+        tasks: list[dict[str, Any]] = []
+        try:
+            for name, calendar in self._task_lists():
+                try:
+                    todos = calendar.todos(include_completed=not only_open)
+                except caldav_error.NotFoundError as exc:
+                    if not may_retry:
+                        raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
+                    self._invalidate_collection_caches()
+                    return self._tasks_from_every_list(only_open, may_retry=False)
+                tasks.extend(self._parse_todos(todos, name))
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
+        return tasks
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
         """Create a new task in the given list and return its UID."""
@@ -1336,20 +1416,15 @@ class CalDavService:
             return parsed
         return mapping.local_midnight(parsed + timedelta(days=1) if exclusive_end else parsed)
 
-    def _task_lists(self, list_names: list[str] | str | None) -> list[tuple[str, DAVCalendar]]:
-        """Return (display name, calendar) pairs for the VTODO task lists to query.
+    def _task_lists(self) -> list[tuple[str, DAVCalendar]]:
+        """Return (display name, calendar) pairs for every VTODO task list on the account.
 
-        With explicit `list_names`, each is resolved individually (going
-        through the cache); unknown names raise `TaskListNotFoundError`
-        instead of being skipped, so a typo can't silently produce an empty
-        result. With `None`, every VTODO-supporting calendar on the account
-        is returned, freshly listed.
+        Read from the cached collection listing (`_list_collections`), not
+        re-listed per call. Named lists deliberately don't come through here:
+        they are resolved one at a time by `_with_collection`, so an unknown
+        name raises `TaskListNotFoundError` instead of being skipped and a
+        typo can't silently produce an empty result.
         """
-        if isinstance(list_names, str):
-            list_names = [list_names]
-        if list_names is not None:
-            return [(name, self._get_collection(name, "VTODO")) for name in list_names]
-
         calendars = self._list_collections()
         result: list[tuple[str, DAVCalendar]] = []
         for calendar in calendars:
