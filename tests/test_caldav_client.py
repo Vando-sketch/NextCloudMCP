@@ -632,6 +632,31 @@ def test_list_tasks_all_lists_recovers_from_a_vanished_collection(service, princ
     assert principal.calendars.call_count == 2
 
 
+def test_list_tasks_all_lists_recovers_when_listing_the_collections_404s(service, principal):
+    """Enumerating the lists is a request too, and it can 404 on a stale object.
+
+    Reading a cached collection's display name goes to the server, so the
+    vanished list can be discovered there just as well as on the `todos()`
+    call - same stale cache, same recovery. It used to escape as the generic
+    "resource was not found" error with the cache left untouched, i.e. exactly
+    the permanent failure this branch is supposed to be immune to now.
+    """
+    stale = _make_calendar("Weg", "https://cloud.example.com/dav/weg/")
+    kept = _make_calendar("Bleibt", "https://cloud.example.com/dav/bleibt/")
+    kept.todos.return_value = [_todo_obj("still-here", titel="Da", faellig_datum="2026-08-01")]
+    # Names itself once for the priming listing, then 404s as the deleted list it is.
+    stale.get_display_name.side_effect = ["Weg", caldav_error.NotFoundError("gone")]
+    principal.calendars.return_value = [stale, kept]
+
+    service.list_task_lists()
+    principal.calendars.return_value = [kept]
+
+    result = service.list_tasks()
+
+    assert [t["uid"] for t in result] == ["still-here"]
+    assert principal.calendars.call_count == 2
+
+
 def test_list_tasks_all_lists_gives_up_after_one_refresh(service, principal):
     """A freshly listed collection that still 404s is a real error, not a stale cache."""
     broken = _make_calendar("Kaputt", "https://cloud.example.com/dav/kaputt/")
@@ -644,6 +669,18 @@ def test_list_tasks_all_lists_gives_up_after_one_refresh(service, principal):
 
     # Listed once to prime the cache, then exactly one refresh - the second
     # pass reports the failure instead of refreshing again forever.
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_all_lists_reports_a_list_that_vanishes_while_being_listed(service, principal):
+    """Nothing was named yet, so the error can't name one - it still says what happened."""
+    broken = _make_calendar("Kaputt", "https://cloud.example.com/dav/kaputt/")
+    broken.get_display_name.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [broken]
+
+    with pytest.raises(TaskListNotFoundError, match="while listing the task lists"):
+        service.list_tasks()
+
     assert principal.calendars.call_count == 2
 
 
