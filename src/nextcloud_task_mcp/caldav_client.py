@@ -1489,7 +1489,14 @@ class CalDavService:
 
             def op(calendar: DAVCalendar):
                 todo_obj = calendar.get_todo_by_uid(task_uid)
-                mapping.apply_task_fields(todo_obj.icalendar_component, fields)
+                master = None
+                for component in todo_obj.icalendar_instance.walk("VTODO"):
+                    if "recurrence-id" not in component:
+                        master = component
+                        break
+                if master is None:
+                    master = todo_obj.icalendar_component
+                mapping.apply_task_fields(master, fields)
                 todo_obj.save()
 
             try:
