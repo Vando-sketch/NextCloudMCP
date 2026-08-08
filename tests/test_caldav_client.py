@@ -2045,7 +2045,12 @@ def _todo_obj(uid: str = "task-1", **fields) -> MagicMock:
 def test_create_event_from_task_uses_due_datetime(service, principal):
     todo_cal = _make_calendar("Privat", components=["VTODO"])
     todo_cal.get_todo_by_uid.return_value = _todo_obj(
-        titel="Steuer", faellig_datum="2026-07-20T14:00:00", notizen="Belege", ort="Zuhause"
+        titel="Steuer",
+        faellig_datum="2026-07-20T14:00:00",
+        start_datum="2026-07-20T14:00:00",
+        notizen="Belege",
+        ort="Zuhause",
+        wiederholung="FREQ=WEEKLY",
     )
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     principal.calendars.return_value = [todo_cal, event_cal]
@@ -2061,6 +2066,7 @@ def test_create_event_from_task_uses_due_datetime(service, principal):
     assert "DTEND;TZID=Europe/Berlin:20260720T143000" in ical_text
     assert "BEGIN:VTIMEZONE" in ical_text
     assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
+    assert "RRULE:FREQ=WEEKLY" in ical_text
     assert uid
 
 

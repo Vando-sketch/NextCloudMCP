@@ -2243,6 +2243,7 @@ class CalDavService:
                 beschreibung=task.get("notizen"),
                 ort=task.get("ort"),
                 tags=task.get("tags") or None,
+                wiederholung=task.get("wiederholung"),
                 verknuepfte_aufgabe=task_uid,
             )
             return self.create_event(calendar_name, fields)
