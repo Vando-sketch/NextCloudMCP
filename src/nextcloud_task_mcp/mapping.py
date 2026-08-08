@@ -402,9 +402,20 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
         stripped = stripped[6:].strip()
 
     VALID_PARTS = {
-        "FREQ", "UNTIL", "COUNT", "INTERVAL", "BYSECOND", "BYMINUTE",
-        "BYHOUR", "BYDAY", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO", "BYMONTH",
-        "BYSETPOS", "WKST"
+        "FREQ",
+        "UNTIL",
+        "COUNT",
+        "INTERVAL",
+        "BYSECOND",
+        "BYMINUTE",
+        "BYHOUR",
+        "BYDAY",
+        "BYMONTHDAY",
+        "BYYEARDAY",
+        "BYWEEKNO",
+        "BYMONTH",
+        "BYSETPOS",
+        "WKST",
     }
 
     seen = set()
@@ -453,7 +464,7 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
     if "BYHOUR" in recur:
         if any(h < 0 or h > 23 for h in recur["BYHOUR"]):
             raise InvalidTaskDataError("BYHOUR must be between 0 and 23.")
-            
+
     if anchor is not None and "UNTIL" in recur:
         until_val = recur["UNTIL"][0]
         if isinstance(anchor, datetime):
