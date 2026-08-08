@@ -3598,6 +3598,106 @@ def test_collection_metadata_reused_within_ttl_then_refetched_after(
     assert dav_client.request.call_count == 2
 
 
+def test_calendar_resolution_cache_expires_from_the_collection_fetch_not_resolution_time(
+    service, principal, monkeypatch
+):
+    """Finding 4.1: a `_calendar_cache` entry must expire
+    `_COLLECTION_CACHE_TTL_SECONDS` after the underlying `_collections`
+    fetch, not after the moment the name happened to be resolved.
+
+    Before the fix, `_cache_collection` stamped every entry with
+    `monotonic()` at resolution time. Resolving a name late in the
+    `_collections` TTL window (here, just under 60s after the fetch) then
+    gave that one entry a *second* nearly-full TTL on top of the first,
+    letting it survive up to ~119s stale instead of the advertised ~60s -
+    this is finding 4.1's whole point. Stamping from `_collections_fetched_at`
+    instead anchors every entry to the same fetch, however late it was
+    resolved.
+    """
+    personal = _make_calendar("Personal", "https://cloud.example.com/dav/personal/")
+    personal.todos.return_value = [_todo_obj("t1")]
+    principal.calendars.return_value = [personal]
+
+    fake_now = 1_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+
+    # Warm `_collections` at T=1000 - this alone doesn't populate
+    # `_calendar_cache`.
+    service.list_calendars()
+    assert principal.calendars.call_count == 1
+
+    # Resolve "Personal" at T+59: still inside the `_collections` TTL, so
+    # this doesn't itself trigger a re-fetch - the resolution is served from
+    # the T=1000 snapshot.
+    fake_now = 1_059.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_tasks(list_names=["Personal"])
+    assert principal.calendars.call_count == 1
+
+    # T+61 (61s after the *fetch* at T=1000, only 2s after the resolution at
+    # T+59): past the TTL measured from the fetch. A cache entry wrongly
+    # stamped at resolution time (T+59) would only expire at T+119 and this
+    # would still be a hit - it must not be.
+    fake_now = 1_061.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_tasks(list_names=["Personal"])
+    assert principal.calendars.call_count == 2
+
+
+def test_collections_and_metadata_never_carry_different_fetch_timestamps(
+    service, principal, dav_client, monkeypatch
+):
+    """Finding 4.2: `_collections` and `_collection_meta` must always be
+    refreshed together, from one `_ensure_collections` call, so they can
+    never disagree about which of them is stale.
+
+    Before the fix, the two caches were tracked by independent timestamps
+    (`_collections_fetched_at` and the now-deleted
+    `_collection_meta_fetched_at`) and refreshed by separate code paths, so
+    one could be fresh while the other was stale (or vice versa). This drives
+    both `_list_collections()` (via `list_calendars`) and
+    `_get_collection_meta()` (via `_supports_component`, exercised by
+    `list_task_lists`) across a TTL boundary and asserts the two caches'
+    underlying network calls always move in lockstep - one fetch refreshes
+    both, never just one.
+    """
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    fake_now = 2_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+
+    # First touch the metadata-only path, then the collection-list path:
+    # both must land on the same single fetch.
+    service.list_task_lists()
+    service.list_calendars()
+    assert principal.calendars.call_count == 1
+    assert dav_client.request.call_count == 1
+    assert service._collections_fetched_at == fake_now
+
+    # Interleaved accesses just inside the TTL: still exactly one fetch each,
+    # never one refreshed without the other.
+    fake_now = 2_030.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_calendars()
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+    assert dav_client.request.call_count == 1
+
+    # Past the TTL: both refresh together, from the same `_ensure_collections`
+    # call - never the metadata alone or the collection list alone.
+    fake_now = 2_061.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_task_lists()
+    assert principal.calendars.call_count == 2
+    assert dav_client.request.call_count == 2
+    assert service._collections_fetched_at == fake_now
+    service.list_calendars()
+    assert principal.calendars.call_count == 2
+    assert dav_client.request.call_count == 2
+
+
 # ======================================================================
 # get_agenda / list_events / list_tasks / export_calendar cross-check
 #
@@ -3682,6 +3782,7 @@ def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_colle
     calls = csgo_events.search.call_args_list
     assert len(calls) == 2
     from datetime import timedelta
+
     assert calls[0].kwargs["start"] == calls[1].kwargs["start"] - timedelta(days=1)
     assert calls[0].kwargs["end"] == calls[1].kwargs["end"] + timedelta(days=1)
     assert calls[0].kwargs["expand"] is True and calls[1].kwargs["expand"] is True
@@ -3719,69 +3820,112 @@ def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_colle
         assert found["uid"] == task["uid"]
 
 
-
 def test_create_rename_conflict_refreshes_metadata(service, principal, dav_client):
     personal = _make_calendar("Personal", "https://cloud.example.com/dav/personal/")
     principal.calendars.return_value = [personal]
     dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
-    
+
     # Warm up cache
     service.list_task_lists()
     assert principal.calendars.call_count == 1
     assert dav_client.request.call_count == 1
-    
+
     # Induce a conflict
     principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
-    
+
     with pytest.raises(TaskListAlreadyExistsError):
         service.create_task_list("Groceries")
-        
+
     # The conflict triggers _list_collections(fresh=True).
     # We assert that BOTH caches were refreshed.
     assert principal.calendars.call_count == 2
     assert dav_client.request.call_count == 2
 
 
-
-
-def test_get_agenda_atomic_across_ttl_boundary(
-    service, principal, monkeypatch, dav_client
-):
+def test_get_agenda_atomic_across_ttl_boundary(service, principal, monkeypatch, dav_client):
     csgo_tasks = _make_calendar(
         "CSGO", "https://cloud.example.com/dav/csgo-tasks/", components=["VTODO"]
     )
     csgo_events = _make_calendar(
         "CSGO", "https://cloud.example.com/dav/csgo-events/", components=["VEVENT"]
     )
-    
+
     principal.calendars.return_value = [csgo_tasks, csgo_events]
     dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
-    
+
     fake_now = [1000.0]
-    
+
     def mock_monotonic():
         return fake_now[0]
-        
+
     monkeypatch.setattr(caldav_client_module, "monotonic", mock_monotonic)
-    
+
     # Pre-warm
     service.list_task_lists()
-    
+
     # Now simulate a slow get_agenda where time crosses TTL boundary MID-REQUEST.
     # We can do this by patching _collect_events or _tasks_from_every_list to advance time.
     original_collect_events = service._collect_events
-    
+
     def slow_collect_events(*args, **kwargs):
         fake_now[0] += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS + 1
         return original_collect_events(*args, **kwargs)
-        
+
     monkeypatch.setattr(service, "_collect_events", slow_collect_events)
-    
+
     # Clear the call counts
     principal.calendars.reset_mock()
-    
+
     # Call get_agenda
     service.get_agenda("2026-07-20")
-    
+
     # It should not have re-fetched from the server during get_agenda because the TTL was frozen!
     assert principal.calendars.call_count == 0
+
+    # The freeze must not leak past the call it was set for: `_ttl_frozen` is
+    # reset in `get_agenda`'s `finally`, so even a call that raised partway
+    # through would still release it. Confirmed two ways - the internal flag
+    # itself, and (behaviourally) that the *next* access, now that the fake
+    # clock has moved 61s past the pre-warm fetch, sees the cache as expired
+    # again and re-fetches, rather than staying frozen-fresh forever.
+    assert service._ttl_frozen is False
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+
+
+def test_get_agenda_recovers_from_a_404_mid_call_under_the_frozen_ttl(
+    service, principal, dav_client
+):
+    """The frozen TTL must not defeat `_tasks_from_every_list`'s existing
+    stale-cache recovery (a 404 anywhere in an all-lists pass invalidates the
+    collection caches and retries once, see its docstring). While
+    `get_agenda` holds `_ttl_frozen`, `_cache_expired` treats any
+    already-fetched cache as fresh regardless of age - but
+    `_invalidate_collection_caches` sets `_collections`/`_collection_meta`
+    back to `None`, and a cache with `fetched_at is None` is never exempted
+    by the freeze, so `_ensure_collections` still refetches it. Without that,
+    a task list deleted/recreated server-side during a `get_agenda` call
+    would fail the whole call instead of recovering.
+    """
+    stale_list = _make_calendar(
+        "Stale", "https://cloud.example.com/dav/stale/", components=["VTODO"]
+    )
+    stale_list.todos.side_effect = caldav_error.NotFoundError("410 Gone")
+
+    fresh_list = _make_calendar(
+        "Fresh", "https://cloud.example.com/dav/fresh/", components=["VTODO"]
+    )
+    fresh_list.todos.return_value = [_todo_obj("t1", faellig_datum="2026-07-20T09:00:00")]
+
+    principal.calendars.side_effect = [[stale_list], [fresh_list]]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    result = service.get_agenda("2026-07-20")
+
+    # One initial listing plus exactly one retry after the 404 - not an
+    # unbounded loop, and not swallowed as "no task lists at all".
+    assert principal.calendars.call_count == 2
+    assert [t["uid"] for t in result["aufgaben"]] == ["t1"]
+    # The freeze released normally even though this call took the recovery
+    # path rather than the happy path.
+    assert service._ttl_frozen is False

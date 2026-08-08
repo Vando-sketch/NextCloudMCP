@@ -192,7 +192,7 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Fixed
 
-- **Collection caches bounded by a strict 60-second TTL and unified.** The process-wide collection caches now refresh exactly 60 seconds after their last fetch, protecting against out-of-band deletes or renames (e.g. from the Nextcloud web UI) feeding stale collections to tools forever. The cache lists and metadata are now fetched atomically, avoiding skew windows, and `get_agenda` freezes the TTL for the duration of its query to prevent splitting the agenda across two different server states on slow calls.
+- **Collection caches bounded by a 60-second TTL and unified.** The process-wide collection caches now refresh 60 seconds after their last fetch, protecting against out-of-band deletes or renames (e.g. from the Nextcloud web UI) feeding stale collections to tools forever. The cache lists and metadata are now fetched atomically, avoiding skew windows. `get_agenda` freezes that TTL for the duration of its own query so its events and tasks are read from one consistent server state instead of splitting across two if the TTL lapses mid-call - which means the real worst-case staleness bound is 60 seconds plus the duration of the slowest overlapping `get_agenda` call, not a flat 60 seconds.
 - **`get_agenda` adds a `quelle_url` key to all entries.** Display names are not unique in Nextcloud; this provides the exact collection URL an event or task came from, so ambiguous entries can be uniquely identified.
 
 - **One unreadable due date no longer breaks a whole task listing.** A `DUE`
