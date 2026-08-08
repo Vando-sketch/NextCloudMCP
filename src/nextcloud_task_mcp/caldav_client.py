@@ -3003,7 +3003,7 @@ class CalDavService:
             if list_names is None:
                 tasks = self._tasks_from_every_list(only_open=False)
             else:
-                tasks = self._tasks_from_named_lists(_dedup_strings(list_names), only_open=False)
+                tasks = self._tasks_from_named_lists(list_names, only_open=False)
 
             # Folded for counting - "Arbeit" and "arbeit" are one tag to
             # Nextcloud's UI too - but every spelling is kept so the reported
