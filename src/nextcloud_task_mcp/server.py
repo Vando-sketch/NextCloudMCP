@@ -169,16 +169,25 @@ def build_server(
 
     @mcp.tool
     async def list_tasks(
-        list_name: str,
+        listen_namen: list[str] | None = None,
         nur_offene: bool = True,
         faellig_vor: str | None = None,
         faellig_nach: str | None = None,
         limit: int | None = None,
+        *,
+        prioritaet: str | None = None,
+        tag: str | None = None,
+        suchtext: str | None = None,
+        list_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List tasks in a Nextcloud task list.
+        """List tasks across one, several, or all Nextcloud task lists.
 
         Args:
-            list_name: Display name of the task list.
+            listen_namen: Optional list of task list display names to query;
+                None queries **every** task list on the account. That is one
+                request per list and returns every open task in the account
+                unless something narrows it - pass `listen_namen`, a due-date
+                bound, or `limit` unless you really want the lot.
             nur_offene: If True (default), only return tasks that are not completed.
             faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
@@ -187,10 +196,24 @@ def build_server(
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
             limit: Optional maximum number of results to return (must be > 0).
+            prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
+            tag: Optional category/tag filter (exact match).
+            suchtext: Optional substring filter over title (titel) and notes
+                (notizen). Both it and `tag` ignore case and Unicode spelling
+                ("STRASSE" matches "Straße").
+            list_name: Deprecated alias for `listen_namen` (takes a single list display name).
+                Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
+                is an error.
 
-        If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
-        (due date) at all are excluded - they can't be judged "before"/"after"
-        anything. `limit` is applied after any due-date filtering.
+        An empty string is "no filter" for every filter that takes one -
+        prioritaet, tag, suchtext, faellig_vor and faellig_nach alike. (`limit`
+        still rejects 0: omit it rather than ask for zero results.) An empty
+        `listen_namen` list is an empty scope and returns nothing.
+
+        If `faellig_vor` and/or `faellig_nach` is given, tasks with no readable
+        faellig_datum (due date) are excluded - they can't be judged "before"/"after"
+        anything. Results are sorted by faellig_datum ascending (those tasks last),
+        then by titel. `limit` is applied last, after merging across lists.
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
@@ -202,15 +225,31 @@ def build_server(
             and update_task leaves those untouched), notizen,
             uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            or None if the task doesn't recur; read-only - this server can't
-            create/edit recurrence).
+            create/edit recurrence), liste (the display name of the task list
+            containing the task), and liste_url (the collection URL of the task
+            list, which tells same-named lists apart, though no tool accepts a
+            URL to act on them - an ambiguous name still must be renamed).
         """
+        if list_name is not None and listen_namen is not None:
+            raise ToolError("list_name is the deprecated alias of listen_namen; pass only one")
+
+        target_list_names: list[str] | None
+        if list_name is not None:
+            target_list_names = [list_name]
+        elif isinstance(listen_namen, str):
+            target_list_names = [listen_namen]
+        else:
+            target_list_names = listen_namen
+
         return await _call(
             caldav_service.list_tasks,
-            list_name,
+            list_names=target_list_names,
             only_open=nur_offene,
             due_before=faellig_vor,
             due_after=faellig_nach,
+            prioritaet=prioritaet,
+            tag=tag,
+            suchtext=suchtext,
             limit=limit,
         )
 
@@ -223,9 +262,10 @@ def build_server(
             task_uid: UID of the task to fetch.
 
         Returns:
-            A task dict with the same shape as one entry from list_tasks: uid,
-            titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
-            status, ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
+            A task dict holding what one entry from list_tasks holds, minus its
+            "liste" key (the list is `list_name`, which you passed): uid, titel,
+            start_datum, faellig_datum, prioritaet, fortschritt_prozent, status,
+            ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
             wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)

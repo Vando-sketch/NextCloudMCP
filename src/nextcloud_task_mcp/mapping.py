@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
@@ -895,46 +896,133 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     return local_midnight(parsed)
 
 
+def _task_due_instant(due_text: str | None) -> datetime | None:
+    """A task's own stored `faellig_datum` as a comparable instant, or None.
+
+    None means "cannot be placed on a timeline at all": either the task has no
+    due date, or the value the server stores is not one this server can read
+    (a foreign client's `DUE` holding a bare time or a period, say). Both are
+    treated identically - excluded from a due-date filter, sorted last -
+    because sorting reads *every* task's due date, so raising here would let
+    one unreadable task turn an entire healthy listing into an error.
+    """
+    if due_text is None:
+        return None
+    try:
+        return _to_comparable_datetime(due_text, end_of_day=False)
+    except InvalidTaskDataError:
+        _logger.debug("Ignoring unreadable faellig_datum %r while filtering/sorting", due_text)
+        return None
+
+
+def _collation_key(value: str) -> tuple[str, str]:
+    """A rough locale-independent collation key for a title.
+
+    Raw codepoint order files every umlaut after "Z" ("Ärztin" behind
+    "Zahnarzt"), which reads as no order at all in a German-facing listing.
+    Decomposing (NFKD) and dropping the combining marks sorts "Ä" with "A";
+    case-folding sorts "ärztin" with "Ärztin" and "ß" with "ss", which is
+    also DIN 5007 variant 1's rule. This is not full locale-aware collation -
+    that needs a collation library this server does not depend on - so the
+    original string is kept as a tiebreak to stay deterministic.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    return ("".join(c for c in decomposed if not unicodedata.combining(c)).casefold(), value)
+
+
+def _fold(value: str) -> str:
+    """Normalize text for caseless, spelling-independent matching.
+
+    "ü" has two Unicode spellings (precomposed, or "u" plus a combining
+    diaeresis) that no client is consistent about, and `.lower()` leaves "ß"
+    and "SS" different - both of which matter in a German-language API.
+    NFC-normalizing and case-*folding* (not lowercasing) makes either
+    spelling of an umlaut, and either spelling of a sharp s, match.
+    """
+    return unicodedata.normalize("NFC", value).casefold()
+
+
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, tuple[str, str]]:
+    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
+    titel = _collation_key(str(task.get("titel") or ""))
+    due = _task_due_instant(task.get("faellig_datum"))
+    if due is None:
+        return (1, datetime.max.replace(tzinfo=timezone.utc), titel)
+    return (0, due, titel)
+
+
 def filter_tasks(
     tasks: list[dict[str, Any]],
     *,
     due_before: str | None = None,
     due_after: str | None = None,
+    prioritaet: str | None = None,
+    tag: str | None = None,
+    suchtext: str | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Filter already-`parse_vtodo`-parsed task dicts by due-date range and/or cap the count (C4).
+    """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
-    `due_before`/`due_after` are ISO 8601 date/datetime strings (same format
-    `parse_datetime_input` accepts elsewhere). When either is given, tasks with
-    no `faellig_datum` (due date) are excluded - a task can't be "due before X"
-    or "due after X" if it has no due date at all. See `_to_comparable_datetime`
-    for how date-vs-datetime bounds/values are normalized for comparison.
+    `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is
+    actually given, tasks with no readable `faellig_datum` (due date) are excluded.
+    `prioritaet`: "hoch"/"mittel"/"niedrig", validated against `PRIORITY_LABELS`
+    (unknown value raises `InvalidTaskDataError`).
+    `tag`: exact match against one `tags` entry, `suchtext`: substring match over
+    `titel` and `notizen` (skipping None values); both compare case- and
+    spelling-insensitively (see `_fold`).
 
-    `limit`, if given, must be a positive integer; it caps the number of
-    results returned (applied last, after any due-date filtering).
+    An empty string means "no filter" for every one of them, due bounds included -
+    clients spell an unset argument that way, and these used to disagree about it
+    (an error, an empty result, a no-op, and an error again). `limit` keeps
+    rejecting 0: an integer parameter spells "unset" as None, so 0 is a caller
+    asking for zero results, which is a mistake worth reporting.
+
+    Results are sorted by `faellig_datum` ascending (tasks without a readable due
+    date last), then by `titel` (see `_collation_key`). `limit`, if given, must be a
+    positive integer and caps the number of results returned, applied last.
     """
     if limit is not None and limit <= 0:
         raise InvalidTaskDataError(f"limit must be greater than 0, got {limit}.")
 
-    if due_before is not None or due_after is not None:
-        before_bound = (
-            _to_comparable_datetime(due_before, end_of_day=True) if due_before is not None else None
-        )
-        after_bound = (
-            _to_comparable_datetime(due_after, end_of_day=False) if due_after is not None else None
-        )
+    if prioritaet:
+        if prioritaet not in PRIORITY_LABELS:
+            raise InvalidTaskDataError(
+                f"Unknown prioritaet '{prioritaet}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
+            )
+        tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
+
+    if due_before or due_after:
+        before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
+        after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
         filtered: list[dict[str, Any]] = []
         for task in tasks:
-            due_text = task.get("faellig_datum")
-            if due_text is None:
+            due_dt = _task_due_instant(task.get("faellig_datum"))
+            if due_dt is None:
                 continue
-            due_dt = _to_comparable_datetime(due_text, end_of_day=False)
             if before_bound is not None and due_dt > before_bound:
                 continue
             if after_bound is not None and due_dt < after_bound:
                 continue
             filtered.append(task)
         tasks = filtered
+
+    if tag:
+        wanted = _fold(tag)
+        tasks = [task for task in tasks if any(_fold(t) == wanted for t in task.get("tags") or [])]
+
+    if suchtext:
+        needle = _fold(suchtext)
+        tasks = [
+            task
+            for task in tasks
+            if any(
+                needle in _fold(value)
+                for value in (task.get("titel"), task.get("notizen"))
+                if value is not None
+            )
+        ]
+
+    tasks = sorted(tasks, key=_task_sort_key)
 
     if limit is not None:
         tasks = tasks[:limit]

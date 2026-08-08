@@ -1266,3 +1266,190 @@ def test_filter_tasks_non_positive_limit_raises(limit):
 def test_filter_tasks_invalid_due_bound_raises():
     with pytest.raises(InvalidTaskDataError):
         mapping.filter_tasks([], due_before="not-a-date")
+
+
+def test_filter_tasks_prioritaet():
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch"),
+        dict(_task("2", "2026-07-01"), prioritaet="mittel"),
+        dict(_task("3", "2026-07-01"), prioritaet="niedrig"),
+    ]
+    res = mapping.filter_tasks(tasks, prioritaet="hoch")
+    assert [t["uid"] for t in res] == ["1"]
+
+
+def test_filter_tasks_unknown_prioritaet_raises():
+    with pytest.raises(InvalidTaskDataError, match="Unknown prioritaet 'dringend'"):
+        mapping.filter_tasks([], prioritaet="dringend")
+
+
+def test_filter_tasks_tag():
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Finanzen", "Wichtig"]),
+        dict(_task("2", "2026-07-01"), tags=["Arbeit"]),
+    ]
+    res = mapping.filter_tasks(tasks, tag="finanzen")
+    assert [t["uid"] for t in res] == ["1"]
+
+
+def test_filter_tasks_suchtext():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Milch kaufen", notizen=None),
+        dict(_task("2", "2026-07-01"), titel="Einkauf", notizen="Vollmilch besorgen"),
+        dict(_task("3", "2026-07-01"), titel="Post", notizen="Brief senden"),
+    ]
+    res = mapping.filter_tasks(tasks, suchtext="milch")
+    assert [t["uid"] for t in res] == ["2", "1"]
+
+
+def test_filter_tasks_sorting_due_date_and_no_due_date_and_titel():
+    tasks = [
+        dict(_task("z-due-later", "2026-08-10"), titel="Z Task"),
+        dict(_task("a-due-earlier", "2026-08-01"), titel="A Task"),
+        dict(_task("b-no-due", None), titel="B Task"),
+        dict(_task("a-no-due", None), titel="A Task"),
+    ]
+    res = mapping.filter_tasks(tasks)
+    assert [t["uid"] for t in res] == ["a-due-earlier", "z-due-later", "a-no-due", "b-no-due"]
+
+
+def test_filter_tasks_combination():
+    tasks = [
+        dict(
+            _task("1", "2026-07-10"),
+            prioritaet="hoch",
+            tags=["work"],
+            titel="Bericht schreiben",
+            notizen="Wichtig",
+        ),
+        dict(
+            _task("2", "2026-07-05"),
+            prioritaet="hoch",
+            tags=["work"],
+            titel="Bericht abgeben",
+            notizen="Dringend",
+        ),
+        dict(
+            _task("3", "2026-07-01"),
+            prioritaet="niedrig",
+            tags=["work"],
+            titel="Bericht lesen",
+            notizen="Fine",
+        ),
+        dict(
+            _task("4", "2026-07-02"),
+            prioritaet="hoch",
+            tags=["home"],
+            titel="Bericht zuhause",
+            notizen=None,
+        ),
+    ]
+    res = mapping.filter_tasks(
+        tasks,
+        prioritaet="hoch",
+        tag="WORK",
+        suchtext="bericht",
+        due_before="2026-07-15",
+        limit=1,
+    )
+    assert [t["uid"] for t in res] == ["2"]
+
+
+def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
+    """A VTODO whose DUE this server can't parse must not poison its whole list.
+
+    Sorting reads *every* task's `faellig_datum`, so a single odd value (a
+    bare time, a period, whatever a foreign client wrote) would otherwise
+    turn an entire healthy listing into an error. It sorts with the tasks
+    that have no due date instead.
+    """
+    tasks = [
+        dict(_task("bad", "12:00:00"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+        dict(_task("none", None), titel="Ohne"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["good", "bad", "none"]
+
+
+def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
+    """It can't be judged "before"/"after" anything, exactly like a missing one."""
+    tasks = [
+        dict(_task("bad", "(2026-07-01, 2026-07-02)"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+    ]
+
+    res = mapping.filter_tasks(tasks, due_before="2026-07-31")
+
+    assert [t["uid"] for t in res] == ["good"]
+
+
+def test_filter_tasks_tag_matches_across_unicode_spellings():
+    """ "ü" has two spellings and "ß" uppercases to "SS" - a German API must match both."""
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Büro"]),  # u + combining diaeresis
+        dict(_task("2", "2026-07-01"), tags=["Straße"]),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="Büro")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="STRASSE")] == ["2"]
+
+
+def test_filter_tasks_suchtext_matches_across_unicode_spellings():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Große Wäsche", notizen=None),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="wäsche")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="GROSSE")] == ["1"]
+
+
+def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
+    """Raw codepoint order files every umlaut after "Z", which reads as random."""
+    tasks = [
+        dict(_task("z", "2026-07-01"), titel="Zahnarzt"),
+        dict(_task("ae", "2026-07-01"), titel="Ärztin"),
+        dict(_task("a", "2026-07-01"), titel="Apotheke"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["a", "ae", "z"]
+
+
+def test_filter_tasks_empty_filter_value_means_no_filter():
+    """ "" is how a client spells "unset"; every string filter reads it that way.
+
+    They used to disagree: `prioritaet=""` raised, `tag=""` matched nothing,
+    `suchtext=""` matched everything, and an empty due bound raised too.
+    """
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch", tags=["work"], titel="Bericht"),
+        dict(_task("2", "2026-07-02"), prioritaet=None, tags=[], titel="Anruf"),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, prioritaet="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="", due_after="")] == [
+        "1",
+        "2",
+    ]
+
+
+def test_filter_tasks_empty_due_bound_does_not_exclude_tasks_without_a_due_date():
+    """An empty bound is no bound, so it must not drag in the "has to have a due date" rule."""
+    tasks = [
+        dict(_task("mit", "2026-07-01")),
+        dict(_task("ohne", None)),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["mit", "ohne"]
+
+
+def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
+    """0 is not how an integer parameter spells "unset" - None is - so it stays an error."""
+    with pytest.raises(InvalidTaskDataError):
+        mapping.filter_tasks([], limit=0)
