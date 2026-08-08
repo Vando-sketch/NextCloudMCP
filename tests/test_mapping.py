@@ -1396,7 +1396,138 @@ def test_recurring_task_round_trip_keeps_its_wall_clock_across_dst():
     assert later.utcoffset() == timedelta(hours=1)
 
 
-# --- list_tasks filtering (C4) ---
+# --- ausnahme_daten / EXDATE for tasks (5.8) ---
+
+
+def test_ausnahme_daten_writes_exdate_and_reads_back():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Muell rausbringen",
+        start_datum="2026-07-20",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22", "2026-07-24"],
+    )
+
+    assert "EXDATE" in todo
+    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == ["2026-07-22", "2026-07-24"]
+
+
+def test_ausnahme_daten_replaces_the_whole_exdate_set():
+    """Set, not append - same as the event side."""
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="T",
+        start_datum="2026-07-20",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22"],
+    )
+    _apply(todo, ausnahme_daten=["2026-07-24"])
+
+    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == ["2026-07-24"]
+
+
+def test_ausnahme_daten_of_the_wrong_value_kind_is_rejected():
+    """An all-day series takes date-only exceptions; a datetime entry would be
+    written under one EXDATE with a single TZID next to a DATE value (RFC 5545
+    3.8.5.1 / 3.2.19) and would name no occurrence anyway."""
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="ausnahme_daten"):
+        _apply(
+            todo,
+            titel="T",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=DAILY",
+            ausnahme_daten=["2026-07-22T09:00:00"],
+        )
+
+
+def test_ausnahme_daten_naming_no_occurrence_is_rejected():
+    """An EXDATE that misses the recurrence set cancels nothing and says so
+    nowhere - the task side must not get a weaker version of this check than
+    the event side has."""
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="does not name an occurrence"):
+        _apply(
+            todo,
+            titel="T",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY",  # only Mondays: the 20th, 27th, ...
+            ausnahme_daten=["2026-07-22"],
+        )
+
+
+def test_ausnahme_daten_rejection_message_names_the_task_tools():
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError) as excinfo:
+        _apply(
+            todo,
+            titel="T",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-22"],
+        )
+    assert "list_tasks/get_task" in str(excinfo.value)
+    assert "start_datum" in str(excinfo.value)
+    assert "event" not in str(excinfo.value)
+
+
+def test_clearing_wiederholung_also_drops_exdate_and_rdate():
+    """EXDATE/RDATE without an RRULE are orphans: they cancel and add nothing,
+    and come back to life the day someone sets wiederholung again (5.8)."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Muell\n"
+        "DTSTART;VALUE=DATE:20260720\n"
+        "RRULE:FREQ=DAILY\n"
+        "EXDATE;VALUE=DATE:20260722\n"
+        "RDATE;VALUE=DATE:20260801\n"
+        "END:VTODO\n"
+    )
+    assert "EXDATE" in todo and "RDATE" in todo
+
+    mapping.apply_task_fields(todo, TaskFields(clear=("wiederholung",)))
+
+    assert "RRULE" not in todo
+    assert "EXDATE" not in todo
+    assert "RDATE" not in todo
+    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == []
+
+
+def test_clearing_ausnahme_daten_leaves_the_series_intact():
+    """The inverse: dropping the exceptions must not drop the rule."""
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="T",
+        start_datum="2026-07-20",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22"],
+    )
+
+    mapping.apply_task_fields(todo, TaskFields(clear=("ausnahme_daten",)))
+
+    assert "EXDATE" not in todo
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+
+
+def test_ausnahme_daten_is_anchored_to_the_tasks_own_zone():
+    """One EXDATE property, one set of parameters: the values go on the wire in
+    the zone DTSTART names, or an exception names a different instant than the
+    occurrence it is meant to cancel."""
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="T",
+        start_datum="2026-07-20T09:00:00 America/New_York",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22T15:00:00+02:00"],  # = 09:00 New York
+    )
+
+    ical = todo.to_ical().decode()
+    assert "EXDATE;TZID=America/New_York:20260722T090000" in ical
 
 
 def _task(uid: str, faellig_datum: str | None) -> dict:

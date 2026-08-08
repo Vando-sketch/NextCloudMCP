@@ -9,6 +9,27 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Tasks can recur, and can skip single occurrences.** `create_task` and
+  `update_task` take `wiederholung` (raw RFC 5545 `RRULE`, the same form the
+  event tools use) and `ausnahme_daten` (`EXDATE`), and `list_tasks`/`get_task`
+  return both. A recurring task needs a `start_datum` to recur from - RFC 5545
+  generates the recurrence set from `DTSTART`, not `DUE` - and the rule is
+  validated semantically, not just grammatically: a missing `FREQ`, a duplicate
+  or unknown part, `INTERVAL=0`, `BYMONTH=13`, `UNTIL` together with `COUNT` or
+  before the anchor are all rejected rather than stored as a series no client
+  can resolve.
+  `ausnahme_daten` mirrors the event field of the same name exactly: entries
+  must match the task's own value kind (date-only for an all-day task), and an
+  entry naming no occurrence of the series is rejected instead of stored to
+  cancel nothing. Clearing `wiederholung` drops `EXDATE`/`RDATE` with it rather
+  than orphaning them on the task.
+  Recurring tasks are anchored to the timezone they are written in rather than
+  to a fixed UTC instant, so "every Monday 09:00" stays at 09:00 local across a
+  daylight-saving transition - the rule events have followed since the
+  timezone change below. A task's `DTSTART`/`DUE` can therefore reference a
+  `TZID`, and the matching `VTIMEZONE` is now written alongside it.
+  Note that `complete_task` still ends a series rather than rolling it forward
+  (see under "Changed").
 - **`list_tasks` queries across task lists, and filters like `list_events`.**
   `listen_namen` replaces `list_name`: `null` (the default) queries every task
   list on the account, a list of names queries those, and `[]` is an empty

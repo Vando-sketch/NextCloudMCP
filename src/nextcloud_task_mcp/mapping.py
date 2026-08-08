@@ -55,6 +55,7 @@ _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
     "sichtbarkeit": ("sichtbarkeit", "class"),
     "uebergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
     "wiederholung": ("wiederholung", "rrule"),
+    "ausnahme_daten": ("ausnahme_daten", "exdate"),
 }
 
 
@@ -74,6 +75,9 @@ class TaskFields:
     instead (B3) - see `apply_task_fields` for the accepted names and the
     validation rules (unknown names, and setting+clearing the same field in
     one call, both raise `InvalidTaskDataError`).
+
+    `ausnahme_daten`, when set, *replaces* the task's full EXDATE set (not an
+    append), mirroring `EventFields.ausnahme_daten` down to the validation.
     """
 
     titel: str | None = None
@@ -89,6 +93,7 @@ class TaskFields:
     sichtbarkeit: str | None = None
     uebergeordnete_aufgabe: str | None = None
     wiederholung: str | None = None
+    ausnahme_daten: list[str] | None = None
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
@@ -1043,6 +1048,13 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     a fixed UTC instant slides an hour at every DST transition, and DTSTART and
     DUE anchored to two different zones silently change the task's window at
     the next one (finding 5.7).
+
+    `ausnahme_daten` *replaces* the task's whole EXDATE set, and is validated
+    exactly as `apply_event_fields` validates the event-side field of the same
+    name (literally the same helpers): entries of the wrong value kind, and
+    entries naming no occurrence of the task's series, are rejected rather than
+    stored to cancel nothing. Clearing `wiederholung` also drops EXDATE and
+    RDATE, which mean nothing without a recurrence set (finding 5.8).
     """
     clear = tuple(fields.clear or ())
     _validate_clear(fields, clear)
@@ -1053,6 +1065,15 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         _, ical_name = _CLEAR_SPECS[name]
         if name == "erinnerungen":
             todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
+        elif name == "wiederholung":
+            # EXDATE and RDATE only mean anything relative to a recurrence set.
+            # Dropping the RRULE and leaving them behind orphans them on the
+            # component: they cancel and add nothing, no tool reports them as a
+            # problem, and they silently come back to life the day someone sets
+            # `wiederholung` again (finding 5.8).
+            for orphaned in (ical_name, "exdate", "rdate"):
+                if orphaned is not None and orphaned in todo:
+                    del todo[orphaned]
         elif ical_name is not None and ical_name in todo:
             del todo[ical_name]
 
@@ -1109,6 +1130,27 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         if dtstart_prop is not None:
             anchor_val = getattr(dtstart_prop, "dt", None)
         _set(todo, "rrule", parse_rrule_text(fields.wiederholung, anchor_val))
+    if fields.ausnahme_daten is not None:
+        # Replace, not append: drop every existing EXDATE, then write all
+        # entries as one EXDATE property with a comma-separated value list.
+        # Runs after `wiederholung` above, so setting a rule and its exceptions
+        # in one call checks the exceptions against the rule this call writes.
+        # (`_extract_exdates` reads back all three wire forms other clients may
+        # produce: one property, repeated properties, comma lists.)
+        if "exdate" in todo:
+            del todo["exdate"]
+        if fields.ausnahme_daten:
+            exdate_entries = list(fields.ausnahme_daten)
+            exdate_values = _exdate_values(todo, exdate_entries, noun="task")
+            _check_exdates_match_occurrences(
+                todo,
+                exdate_entries,
+                exdate_values,
+                noun="task",
+                reader="list_tasks/get_task",
+                field_name="start_datum",
+            )
+            todo.add("exdate", exdate_values)
 
     if fields.erinnerungen is not None:
         apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
@@ -1320,6 +1362,7 @@ def parse_vtodo(component) -> dict[str, Any]:
         "notizen": _get_text(component, "description"),
         "uebergeordnete_uid": _extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
+        "ausnahme_daten": _extract_exdates(component),
     }
 
 

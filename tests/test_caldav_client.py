@@ -477,6 +477,7 @@ def test_list_tasks_parses_todos(service, principal):
             "notizen": None,
             "uebergeordnete_uid": None,
             "wiederholung": None,
+            "ausnahme_daten": [],
             "liste": "Personal",
             "liste_url": "https://cloud.example.com/dav/personal/",
         }

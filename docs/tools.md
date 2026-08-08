@@ -102,6 +102,7 @@ Result — one dict per task:
     "notizen": "Belege sammeln",
     "uebergeordnete_uid": null,
     "wiederholung": null,
+    "ausnahme_daten": [],
     "liste": "Privat"
   }
 ]
@@ -160,6 +161,7 @@ dismissed state — use `export_calendar`/`import_ics`.
 `uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — set via `create_task`/`update_task`, see their `wiederholung` parameter.
+`ausnahme_daten` lists the occurrences the series skips (`EXDATE`), `[]` if it has none.
 `liste` is the display name of the task list containing the task — the name every
 other task tool takes. Nextcloud does allow two task lists to carry the *same*
 display name. `liste` cannot tell them apart, but `liste_url` alongside it
@@ -233,6 +235,7 @@ you passed in.
 | `sichtbarkeit` | string enum | no | `CLASS` |
 | `uebergeordnete_aufgabe` | string (UID) | no | `RELATED-TO;RELTYPE=PARENT` |
 | `wiederholung` | string (raw RRULE) | no | `RRULE`, e.g. `"FREQ=WEEKLY;BYDAY=MO"` |
+| `ausnahme_daten` | list of strings (ISO 8601) | no | one `EXDATE` holding every entry |
 
 Returns `{"uid": "<new task uid>"}`.
 
@@ -257,6 +260,32 @@ different spelling.
 
 See "Completing a recurring task" under `complete_task` below for what
 happens to the series once the task is marked done.
+
+Recurring tasks are anchored to the timezone they are written in, not to a
+fixed UTC instant: a task due "every Monday 09:00" stays at 09:00 local across
+a daylight-saving transition. A naive value is anchored to the server's default
+timezone, a value that names an IANA zone (`"2026-07-20T09:00:00 Europe/Berlin"`)
+to that one, and a value carrying only a numeric offset — which is what
+`list_tasks`/`get_task` hand back — keeps the zone the task already has, so
+reading a task and writing it back never re-anchors it.
+
+### Exception dates (`ausnahme_daten`)
+
+`ausnahme_daten` lists occurrences the series should skip, written as one
+`EXDATE` property. Setting it **replaces** the task's whole exception set;
+clearing `"wiederholung"` via `felder_leeren` drops `ausnahme_daten` (and any
+`RDATE`) with it, since neither means anything without a recurrence rule.
+
+Two rules, identical to `create_event`'s field of the same name:
+
+- Every entry must be the same *value kind* as the task's own start: date-only
+  `"YYYY-MM-DD"` values for an all-day task, full datetimes otherwise. A mixed
+  set, or the wrong kind, is rejected.
+- An entry that names no occurrence of the task's `wiederholung` at all — wrong
+  day, wrong hour, or a naive value read in the server's default timezone while
+  the series runs in another — is rejected rather than stored to cancel
+  nothing. Pass the occurrence exactly as `list_tasks`/`get_task` reported its
+  `start_datum`.
 
 ### Reminders (`erinnerungen`)
 
@@ -335,7 +364,11 @@ than change. Accepted values:
 
 `"start_datum"`, `"faellig_datum"`, `"prioritaet"`, `"fortschritt_prozent"`, `"ort"`,
 `"url"`, `"tags"`, `"erinnerungen"`, `"notizen"`, `"sichtbarkeit"`,
-`"uebergeordnete_aufgabe"`, `"wiederholung"`.
+`"uebergeordnete_aufgabe"`, `"wiederholung"`, `"ausnahme_daten"`.
+
+Clearing `"wiederholung"` also drops the task's `ausnahme_daten` (`EXDATE`) and
+any `RDATE`: they cancel and add nothing once the series is gone, and would
+silently come back to life the day the task is made recurring again.
 
 `"titel"` cannot be cleared (a task always needs a title) and is not accepted. Naming
 an unknown field, or naming a field in `felder_leeren` that is *also* given a new

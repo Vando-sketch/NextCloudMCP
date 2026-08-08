@@ -179,7 +179,8 @@ is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
 `wiederholung` (raw RRULE text, or `null` if the task doesn't recur — settable via
-`create_task`/`update_task`), `liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
+`create_task`/`update_task`), `ausnahme_daten` (the occurrences the series skips, `EXDATE`; `[]` if none),
+`liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
 
 Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
@@ -206,6 +207,7 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | `sichtbarkeit` | `CLASS` | `"öffentlich"`→PUBLIC, `"privat"`→PRIVATE, `"vertraulich"`→CONFIDENTIAL |
 | `uebergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
 | `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO"`; requires the task to have a `start_datum` or `faellig_datum` (existing or set in the same call) to recur from |
+| `ausnahme_daten` | `EXDATE` | ISO 8601 occurrences the series skips; each must match `start_datum`'s value kind and name a real occurrence |
 
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
@@ -239,7 +241,9 @@ To remove a property entirely (e.g. delete a due date), list its field name in t
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
 leaves it unchanged. Accepted names: `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
-`uebergeordnete_aufgabe`, `wiederholung` (`titel` cannot be cleared). A field can't be
+`uebergeordnete_aufgabe`, `wiederholung`, `ausnahme_daten` (`titel` cannot be cleared).
+Clearing `wiederholung` also drops the task's `ausnahme_daten` and any `RDATE`, which
+mean nothing without a recurrence rule. A field can't be
 both set and cleared in the same call; `wiederholung`'s anchor requirement is checked
 against the task's final state, so clearing the task's only `start_datum`/`faellig_datum`
 while a recurrence is set or remains is rejected too. See [`docs/tools.md`](docs/tools.md)
