@@ -900,7 +900,13 @@ def build_server(
         Returns:
             {"datum": the day, "termine": event dicts (recurring events
             expanded to that day's occurrences, sorted by start), "aufgaben":
-            open tasks due that day, each with an added "liste" key}.
+            open tasks due that day, each with an added "liste" key}. Every
+            entry in both lists also carries "quelle_url" - the CalDAV URL of
+            the exact calendar/task list it came from (Nextcloud doesn't
+            enforce unique display names, so "kalender"/"liste" alone can't
+            always tell two collections apart). Calendar/task-list listings
+            are cached for up to a minute, so a rename or deletion made in
+            the Nextcloud web UI can take that long to show up here.
         """
         return await _call(
             caldav_service.get_agenda,
