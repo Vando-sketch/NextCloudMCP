@@ -163,9 +163,11 @@ otherwise `null` — **read-only**: this server has no tool to create or edit re
 only surfaces whether/how an existing task recurs.
 `liste` is the display name of the task list containing the task — the name every
 other task tool takes. Nextcloud does allow two task lists to carry the *same*
-display name, and then `liste` cannot tell them apart (neither can any by-name
-call: such a name is reported as ambiguous rather than guessed at). Renaming one
-of them in Nextcloud is the only way to make those tasks addressable.
+display name. `liste` cannot tell them apart, but `liste_url` alongside it
+carries the list's unique collection URL, which you can match against
+`list_task_lists`. However, because no tool accepts a URL to act on, you still
+cannot address such a list by name: it is reported as ambiguous. Renaming one
+of them in Nextcloud is the only way to make those tasks addressable again.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
 
 ### Filtering and Sorting

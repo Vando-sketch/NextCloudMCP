@@ -178,7 +178,7 @@ Returns tasks across one, several, or all task lists (`listen_namen=None` querie
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), and `liste` (the task list's display name — ambiguous in the one case Nextcloud allows two lists to share one).
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), `liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
 
 Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 

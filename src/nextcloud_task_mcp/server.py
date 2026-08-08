@@ -225,10 +225,10 @@ def build_server(
             and update_task leaves those untouched), notizen,
             uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            or None if the task doesn't recur; read-only - this server can't
-            create/edit recurrence), and liste (the display name of the task list
-            containing the task; ambiguous in the one case Nextcloud allows two
-            task lists to share a display name).
+            create/edit recurrence), liste (the display name of the task list
+            containing the task), and liste_url (the collection URL of the task
+            list, which tells same-named lists apart, though no tool accepts a
+            URL to act on them - an ambiguous name still must be renamed).
         """
         if list_name is not None and listen_namen is not None:
             raise ToolError("list_name is the deprecated alias of listen_namen; pass only one")

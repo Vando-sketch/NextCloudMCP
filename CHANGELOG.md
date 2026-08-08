@@ -28,9 +28,11 @@ This project does not yet follow Semantic Versioning releases.
   - Every task dict carries a new **`liste`** key with its task list's display
     name. It is the name every other task tool takes, except in the one case
     Nextcloud permits two task lists to share a display name: `liste` then
-    cannot tell them apart, and neither can any by-name call (such a name is
-    reported as ambiguous rather than guessed at). Renaming one of them in
-    Nextcloud is the only fix.
+    cannot tell them apart, but a new `liste_url` key alongside it carries
+    the list's unique collection URL, which you can match against
+    `list_task_lists`. However, because no tool accepts a URL to act on,
+    such a name is reported as ambiguous by any by-name call. Renaming one
+    of them in Nextcloud is the only way to make those tasks addressable again.
   - The MCP tool keeps `list_name` as a deprecated alias (passing both is an
     error), but the underlying `CalDavService.list_tasks` **renamed** its first
     parameter, so an in-process `list_tasks(list_name=...)` call must become

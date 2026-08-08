@@ -1223,12 +1223,15 @@ class CalDavService:
                 limit=limit,
             )
 
-    def _parse_todos(self, todos: Iterable[Any], list_name: str) -> list[dict[str, Any]]:
+    def _parse_todos(
+        self, todos: Iterable[Any], list_name: str, list_url: str
+    ) -> list[dict[str, Any]]:
         """Parse one list's VTODO objects, stamping each with the list it came from."""
         parsed = []
         for todo in todos:
             task = mapping.parse_vtodo(todo.icalendar_component)
             task["liste"] = list_name
+            task["liste_url"] = list_url
             parsed.append(task)
         return parsed
 
@@ -1246,19 +1249,19 @@ class CalDavService:
         """
 
         def op(calendar: DAVCalendar):
-            return calendar.todos(include_completed=not only_open)
+            return calendar.todos(include_completed=not only_open), str(calendar.url)
 
         tasks: list[dict[str, Any]] = []
         for name in dict.fromkeys(list_names):
             try:
-                todos = self._with_collection(name, "VTODO", op)
+                todos, url = self._with_collection(name, "VTODO", op)
             except TaskMcpError:
                 raise
             except caldav_error.NotFoundError as exc:
                 raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
-            tasks.extend(self._parse_todos(todos, name))
+            tasks.extend(self._parse_todos(todos, name, url))
         return tasks
 
     def _tasks_from_every_list(
@@ -1289,7 +1292,7 @@ class CalDavService:
             try:
                 for name, calendar in self._task_lists():
                     todos = calendar.todos(include_completed=not only_open)
-                    tasks.extend(self._parse_todos(todos, name))
+                    tasks.extend(self._parse_todos(todos, name, str(calendar.url)))
             except caldav_error.NotFoundError as exc:
                 if may_retry:
                     self._invalidate_collection_caches()
