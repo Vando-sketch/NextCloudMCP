@@ -410,14 +410,14 @@ def parse_rrule_text(text: str) -> vRecur:
     return recur
 
 
-def _check_rrule_anchor(todo) -> None:
-    """A recurring VTODO needs a DTSTART or DUE to recur from.
+def _check_rrule_anchor(todo, fields: TaskFields) -> None:
+    """A recurring VTODO needs a DTSTART to recur from.
 
     Runs after all clears/sets in `apply_task_fields`, so it validates the
     component's *final* state - the same rule
     `event_mapping._check_start_end_consistency` follows for DTSTART/DTEND.
     That matters for `update_task`: a call that only sets `wiederholung` must
-    be checked against whatever DTSTART/DUE the stored task already has, not
+    be checked against whatever DTSTART the stored task already has, not
     just the fields passed in this call, so it isn't rejected merely because
     the anchor wasn't repeated here - and, symmetrically, an update that both
     sets `wiederholung` and clears the task's only anchor in the same call
@@ -425,10 +425,15 @@ def _check_rrule_anchor(todo) -> None:
     """
     if "rrule" not in todo:
         return
-    if "dtstart" not in todo and "due" not in todo:
+
+    touched_rrule = fields.wiederholung is not None or "wiederholung" in fields.clear
+    touched_start = fields.start_datum is not None or "start_datum" in fields.clear
+    if not (touched_rrule or touched_start):
+        return
+
+    if "dtstart" not in todo:
         raise InvalidTaskDataError(
-            "wiederholung requires the task to have a start_datum or "
-            "faellig_datum to recur from; neither is set."
+            "wiederholung requires the task to have a start_datum to recur from."
         )
 
 
@@ -716,7 +721,7 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     if fields.erinnerungen is not None:
         apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
 
-    _check_rrule_anchor(todo)
+    _check_rrule_anchor(todo, fields)
 
 
 def mark_completed(todo) -> None:

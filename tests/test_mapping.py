@@ -1152,14 +1152,14 @@ def test_parse_vtodo_wiederholung_is_none_when_not_recurring():
 
 def test_wiederholung_round_trip():
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
     parsed = mapping.parse_vtodo(todo)
     assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
 
 
 def test_wiederholung_can_be_changed():
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
     _apply(todo, wiederholung="FREQ=WEEKLY;BYDAY=TU")
     parsed = mapping.parse_vtodo(todo)
     assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=TU"
@@ -1167,7 +1167,7 @@ def test_wiederholung_can_be_changed():
 
 def test_clear_removes_wiederholung():
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
     mapping.apply_task_fields(todo, TaskFields(clear=("wiederholung",)))
     assert mapping.parse_vtodo(todo)["wiederholung"] is None
 
@@ -1175,7 +1175,7 @@ def test_clear_removes_wiederholung():
 def test_invalid_wiederholung_rejected():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError, match="RRULE"):
-        _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="kaputt")
+        _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="kaputt")
 
 
 def test_wiederholung_empty_result_is_invalid():
@@ -1186,19 +1186,19 @@ def test_wiederholung_empty_result_is_invalid():
         mapping.parse_rrule_text("not-a-valid-rrule")
 
 
-def test_wiederholung_without_start_or_due_rejected():
+def test_wiederholung_without_start_rejected():
     todo = _new_todo()
-    with pytest.raises(InvalidTaskDataError, match="start_datum|faellig_datum"):
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
         _apply(todo, titel="T", wiederholung="FREQ=DAILY")
 
 
 def test_wiederholung_succeeds_when_anchor_already_exists_on_the_task():
     """The anchor check runs against the component's final state (mirrors
     event_mapping._check_start_end_consistency), not just this call's fields -
-    so a call that sets only wiederholung succeeds when faellig_datum was
+    so a call that sets only wiederholung succeeds when start_datum was
     already set on the task by an earlier call."""
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20")
+    _apply(todo, titel="T", start_datum="2026-07-20")
     _apply(todo, wiederholung="FREQ=WEEKLY")
     assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY"
 
@@ -1207,10 +1207,10 @@ def test_wiederholung_rejected_when_call_clears_the_only_anchor():
     """Setting wiederholung while clearing the task's only anchor in the same
     call must still be rejected - the final-state check catches this too."""
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20")
-    with pytest.raises(InvalidTaskDataError, match="start_datum|faellig_datum"):
+    _apply(todo, titel="T", start_datum="2026-07-20")
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
         mapping.apply_task_fields(
-            todo, TaskFields(wiederholung="FREQ=WEEKLY", clear=("faellig_datum",))
+            todo, TaskFields(wiederholung="FREQ=WEEKLY", clear=("start_datum",))
         )
 
 
@@ -1224,9 +1224,24 @@ def test_clearing_the_only_anchor_is_rejected_for_an_already_recurring_task():
     past this and silently produce an unresolvable series.
     """
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=WEEKLY")
-    with pytest.raises(InvalidTaskDataError, match="start_datum|faellig_datum"):
-        mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum",)))
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=WEEKLY")
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        mapping.apply_task_fields(todo, TaskFields(clear=("start_datum",)))
+
+
+def test_anchorless_recurring_task_can_be_edited_without_touching_anchor():
+    """If an invalid task already has an RRULE but no anchor (e.g. from
+    another client via import), edits to other fields must succeed.
+
+    We only reject if the call itself touched the anchor or the rrule.
+    """
+    todo = _new_todo()
+    # Force it into an anchorless state like a foreign client might
+    mapping.apply_task_fields(todo, TaskFields(titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY"))
+    del todo["dtstart"]
+    # Now edit only the title
+    mapping.apply_task_fields(todo, TaskFields(titel="Renamed"))
+    assert mapping.parse_vtodo(todo)["titel"] == "Renamed"
 
 
 def test_wiederholung_is_normalized_to_canonical_rrule_form():
@@ -1238,7 +1253,7 @@ def test_wiederholung_is_normalized_to_canonical_rrule_form():
     guarantee is understood as semantic, not byte-for-byte.
     """
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="byday=mo;freq=weekly")
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="byday=mo;freq=weekly")
     assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
 
 
@@ -1247,7 +1262,7 @@ def test_mark_completed_leaves_wiederholung_intact():
     STATUS/COMPLETED/PERCENT-COMPLETE, it does not touch RRULE or roll the
     series forward to a next occurrence."""
     todo = _new_todo()
-    _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
     mapping.mark_completed(todo)
     parsed = mapping.parse_vtodo(todo)
     assert parsed["wiederholung"] == "FREQ=DAILY"
