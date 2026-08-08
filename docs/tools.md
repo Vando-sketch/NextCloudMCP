@@ -102,6 +102,9 @@ Result — one dict per task:
     "notizen": "Belege sammeln",
     "uebergeordnete_uid": null,
     "wiederholung": null,
+    "ausnahme_daten": [],
+    "wiederholung_von": null,
+    "serie_uid": null,
     "liste": "Privat"
   }
 ]
@@ -159,8 +162,52 @@ dismissed state — use `export_calendar`/`import_ics`.
 
 `uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
-otherwise `null` — **read-only**: this server has no tool to create or edit recurrence, it
-only surfaces whether/how an existing task recurs.
+otherwise `null` — set via `create_task`/`update_task`, see their `wiederholung` parameter.
+`ausnahme_daten` lists the occurrences the series skips (`EXDATE`), `[]` if it has none.
+`wiederholung_von` and `serie_uid` are `null` on a stored task and set only on an
+expanded occurrence — see "Recurring tasks in listings" below.
+
+### Recurring tasks in listings
+
+A recurring task is stored once but is due many times. CalDAV servers do not
+expand `VTODO` series the way they expand `VEVENT`s, so a weekly task used to
+appear exactly once — at its original due date — in every listing, and never
+again: "what is due next week" could not include a series started in March.
+
+When `faellig_vor` is given, `list_tasks` therefore expands each recurring task
+into one row per occurrence due inside the window, computed client-side from
+its `RRULE` (its `ausnahme_daten` are skipped). `get_agenda` does the same for
+its day. **Without `faellig_vor` there is no window to expand into**, and the
+series is returned as the single stored row it is, `wiederholung` intact.
+At most 100 occurrences per task are produced, whatever the window.
+
+An expanded row is a **read-only view of one date in a series**:
+
+| Key | On a stored task | On an expanded occurrence |
+|---|---|---|
+| `uid` | the task's UID | `"<serie_uid>#<occurrence>"` — **not** a task any tool accepts |
+| `serie_uid` | `null` | the stored task's UID |
+| `wiederholung_von` | `null` | the occurrence this row stands for |
+| `wiederholung` | the `RRULE` | `null` — nothing about one occurrence recurs |
+| `start_datum` / `faellig_datum` | as stored | this occurrence's, keeping the stored distance between the two |
+
+Passing an expanded row's `uid` to `update_task`, `complete_task`,
+`delete_task` or `get_task` is an error naming the series, not a silent edit of
+the whole series. To act on the series, pass `serie_uid` — but note that
+`update_task` changes *every* occurrence and `complete_task` **ends** the
+series (see "Completing a recurring task" below). To make a series skip a
+single date, add that date to its `ausnahme_daten`.
+
+Occurrences keep their wall-clock time across daylight-saving transitions: a
+task due "every Monday 09:00" is reported at `09:00+02:00` in summer and
+`09:00+01:00` in winter, not at a fixed UTC instant. A series a foreign client
+anchored to some *other* timezone is expanded in the server's default timezone,
+which differs only between the two zones' transition dates.
+
+Where the expansion cannot be trusted it degrades to the single stored row
+rather than guessing: a series with no due date, an unreadable anchor, a
+`start_datum` and `faellig_datum` of different value kinds, or a rule
+`dateutil` refuses.
 `liste` is the display name of the task list containing the task — the name every
 other task tool takes. Nextcloud does allow two task lists to carry the *same*
 display name. `liste` cannot tell them apart, but `liste_url` alongside it
@@ -233,8 +280,58 @@ you passed in.
 | `notizen` | string | no | `DESCRIPTION` |
 | `sichtbarkeit` | string enum | no | `CLASS` |
 | `uebergeordnete_aufgabe` | string (UID) | no | `RELATED-TO;RELTYPE=PARENT` |
+| `wiederholung` | string (raw RRULE) | no | `RRULE`, e.g. `"FREQ=WEEKLY;BYDAY=MO"` |
+| `ausnahme_daten` | list of strings (ISO 8601) | no | one `EXDATE` holding every entry |
 
 Returns `{"uid": "<new task uid>"}`.
+
+### Recurrence (`wiederholung`)
+
+`wiederholung` is a raw RFC 5545 `RRULE` string, e.g. `"FREQ=DAILY"` or
+`"FREQ=WEEKLY;BYDAY=MO;COUNT=10"` — the same format `create_event`'s
+`wiederholung` accepts and `list_tasks`/`get_task` return. A value that
+doesn't parse as an RRULE is rejected.
+
+A recurring task needs something to recur *from*: a task that ends up with an
+`RRULE` but **neither** `start_datum` nor `faellig_datum` is rejected with a
+speaking error, rather than silently writing a series no client can resolve.
+This is judged on the task's final state, so it also catches clearing the last
+anchor of a task that was already recurring — even when the call doesn't
+mention `wiederholung` at all.
+
+The value read back is the *canonical* form of what you sent, not a verbatim
+echo: part names come back uppercase and in RFC 5545's own order, so
+`"byday=mo;freq=weekly"` reads back as `"FREQ=WEEKLY;BYDAY=MO"`. Same rule,
+different spelling.
+
+See "Completing a recurring task" under `complete_task` below for what
+happens to the series once the task is marked done.
+
+Recurring tasks are anchored to the timezone they are written in, not to a
+fixed UTC instant: a task due "every Monday 09:00" stays at 09:00 local across
+a daylight-saving transition. A naive value is anchored to the server's default
+timezone, a value that names an IANA zone (`"2026-07-20T09:00:00 Europe/Berlin"`)
+to that one, and a value carrying only a numeric offset — which is what
+`list_tasks`/`get_task` hand back — keeps the zone the task already has, so
+reading a task and writing it back never re-anchors it.
+
+### Exception dates (`ausnahme_daten`)
+
+`ausnahme_daten` lists occurrences the series should skip, written as one
+`EXDATE` property. Setting it **replaces** the task's whole exception set;
+clearing `"wiederholung"` via `felder_leeren` drops `ausnahme_daten` (and any
+`RDATE`) with it, since neither means anything without a recurrence rule.
+
+Two rules, identical to `create_event`'s field of the same name:
+
+- Every entry must be the same *value kind* as the task's own start: date-only
+  `"YYYY-MM-DD"` values for an all-day task, full datetimes otherwise. A mixed
+  set, or the wrong kind, is rejected.
+- An entry that names no occurrence of the task's `wiederholung` at all — wrong
+  day, wrong hour, or a naive value read in the server's default timezone while
+  the series runs in another — is rejected rather than stored to cancel
+  nothing. Pass the occurrence exactly as `list_tasks`/`get_task` reported its
+  `start_datum`.
 
 ### Reminders (`erinnerungen`)
 
@@ -298,6 +395,13 @@ Only fields explicitly present in the call are modified; everything else on the 
   `felder_leeren` removes *every* alarm, including the ones that were never listed.
 - A scalar field left as `None`/omitted is left unchanged. To actually remove a
   property (e.g. delete a due date), list its name in `felder_leeren` instead.
+- `wiederholung`'s anchor requirement (see `create_task`'s "Recurrence"
+  section) is checked against the task's *final* state after this call, not
+  just the fields passed here. So calling `update_task` with only
+  `wiederholung` set succeeds as long as the task already has a `start_datum`
+  or `faellig_datum` from before — but clearing the task's only anchor
+  (`felder_leeren=["faellig_datum"]`) while a recurrence is set or remains is
+  rejected the same way.
 
 ### Clearing fields (`felder_leeren`)
 
@@ -306,7 +410,11 @@ than change. Accepted values:
 
 `"start_datum"`, `"faellig_datum"`, `"prioritaet"`, `"fortschritt_prozent"`, `"ort"`,
 `"url"`, `"tags"`, `"erinnerungen"`, `"notizen"`, `"sichtbarkeit"`,
-`"uebergeordnete_aufgabe"`.
+`"uebergeordnete_aufgabe"`, `"wiederholung"`, `"ausnahme_daten"`.
+
+Clearing `"wiederholung"` also drops the task's `ausnahme_daten` (`EXDATE`) and
+any `RDATE`: they cancel and add nothing once the series is gone, and would
+silently come back to life the day the task is made recurring again.
 
 `"titel"` cannot be cleared (a task always needs a title) and is not accepted. Naming
 an unknown field, or naming a field in `felder_leeren` that is *also* given a new
@@ -334,6 +442,34 @@ Marks the task as done: `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPL
 timestamp (current UTC time). Returns `{"uid": "<task_uid>"}`.
 
 Completing a parent task does **not** cascade to its subtasks.
+
+### Completing a recurring task (`wiederholung`)
+
+`complete_task` only ever touches `STATUS`/`COMPLETED`/`PERCENT-COMPLETE` on
+the task itself — it does **not** roll the series forward to a next
+occurrence (no new `DTSTART`/`DUE`, no separate follow-up task object is
+created). This is this server's own observed behaviour, verified by test
+(`test_mapping.py`'s `test_mark_completed_leaves_wiederholung_intact`,
+`test_caldav_client.py`'s `test_complete_task_leaves_rrule_intact`): the
+task's `RRULE` survives completion unchanged, and the task simply comes back
+from `list_tasks`/`get_task` with `status="erledigt"` while still carrying
+its original `wiederholung`.
+
+Practically, **completing a recurring task ends it** as far as this server
+is concerned — to keep a recurring series "going", advance `faellig_datum`
+(via `update_task`) to the next due date yourself instead of calling
+`complete_task`.
+
+Whether the Nextcloud Tasks web app (or another CalDAV client) additionally
+materializes/displays a "next" occurrence once a recurring `VTODO` is marked
+`COMPLETED` this way is **not verified here** — that would require observing
+the app's own client-side behaviour against a live server, which is outside
+what this server's code controls or this test suite checks. An opt-in
+integration test
+(`test_integration.py::test_recurring_task_completion_behaviour_against_a_real_server`,
+gated behind `RUN_INTEGRATION_TESTS=1`) creates a recurring task, completes
+it, and records what comes back from a real server, so this can be confirmed
+independently later.
 
 ---
 

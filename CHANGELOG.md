@@ -9,6 +9,44 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Tasks can recur, and can skip single occurrences.** `create_task` and
+  `update_task` take `wiederholung` (raw RFC 5545 `RRULE`, the same form the
+  event tools use) and `ausnahme_daten` (`EXDATE`), and `list_tasks`/`get_task`
+  return both. A recurring task needs a `start_datum` to recur from - RFC 5545
+  generates the recurrence set from `DTSTART`, not `DUE` - and the rule is
+  validated semantically, not just grammatically: a missing `FREQ`, a duplicate
+  or unknown part, `INTERVAL=0`, `BYMONTH=13`, `UNTIL` together with `COUNT` or
+  before the anchor are all rejected rather than stored as a series no client
+  can resolve.
+  `ausnahme_daten` mirrors the event field of the same name exactly: entries
+  must match the task's own value kind (date-only for an all-day task), and an
+  entry naming no occurrence of the series is rejected instead of stored to
+  cancel nothing. Clearing `wiederholung` drops `EXDATE`/`RDATE` with it rather
+  than orphaning them on the task.
+  Recurring tasks are anchored to the timezone they are written in rather than
+  to a fixed UTC instant, so "every Monday 09:00" stays at 09:00 local across a
+  daylight-saving transition - the rule events have followed since the
+  timezone change below. A task's `DTSTART`/`DUE` can therefore reference a
+  `TZID`, and the matching `VTIMEZONE` is now written alongside it.
+  Note that `complete_task` still ends a series rather than rolling it forward
+  (see under "Changed").
+- **Recurring tasks are readable as a series, not just writable.** CalDAV
+  servers do not expand `VTODO` series the way they expand `VEVENT`s, so a
+  weekly task appeared exactly once in every listing - at its original due date,
+  never again, which made "what is due next week" silently wrong. `list_tasks`
+  with `faellig_vor`, and `get_agenda`, now expand a recurring task
+  client-side into one row per occurrence due inside the queried window
+  (`ausnahme_daten` skipped, at most 100 rows per task). Without `faellig_vor`
+  there is no window to expand into and the series is returned as the single
+  stored row it is, `wiederholung` intact.
+  An expanded row is a **read-only view of one date**: `wiederholung_von` names
+  its occurrence, `serie_uid` points at the stored task, `wiederholung` is
+  `null`, and its own `uid` is a synthetic `"<serie_uid>#<occurrence>"` that
+  `update_task`, `complete_task`, `delete_task` and `get_task` all **reject**
+  with an error naming the series - rather than silently acting on the whole
+  series the caller meant to touch one occurrence of. Two new keys,
+  `wiederholung_von` and `serie_uid`, are therefore present (as `null`) on
+  every task dict.
 - **`list_tasks` queries across task lists, and filters like `list_events`.**
   `listen_namen` replaces `list_name`: `null` (the default) queries every task
   list on the account, a list of names queries those, and `[]` is an empty
@@ -88,6 +126,11 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Changed
 
+- **`complete_task` ends recurring task series.** Completing a recurring task
+  does not automatically roll the series forward to the next occurrence
+  (unlike what the Nextcloud UI might do). Instead, it hard-ends the series by
+  marking the entire recurring task as done. To advance a series, use
+  `update_task` on its `faellig_datum` instead.
 - **One configurable server timezone instead of hardcoded UTC**
   (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Naive datetime input is
   interpreted in that zone, day windows (`get_agenda`, `von`/`bis`,

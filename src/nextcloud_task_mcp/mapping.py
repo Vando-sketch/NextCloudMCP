@@ -10,7 +10,8 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from icalendar import Alarm, vDuration
+from dateutil.rrule import rrulestr
+from icalendar import Alarm, vDuration, vRecur
 
 from .errors import InvalidTaskDataError
 
@@ -53,6 +54,8 @@ _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
     "notizen": ("notizen", "description"),
     "sichtbarkeit": ("sichtbarkeit", "class"),
     "uebergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
+    "wiederholung": ("wiederholung", "rrule"),
+    "ausnahme_daten": ("ausnahme_daten", "exdate"),
 }
 
 
@@ -61,7 +64,7 @@ class TaskFields:
     """The optional task fields shared by create_task/update_task, in one place.
 
     This is the single definition of the (previously hand-copied five times,
-    C3) 13-field task parameter list. The MCP tool functions in `server.py`
+    C3) task parameter list. The MCP tool functions in `server.py`
     keep their own flat, German, umlaut-bearing parameter lists - that's the
     LLM-facing tool contract - and build a `TaskFields` internally; everything
     below that layer (`CalDavService`, `apply_task_fields`) works with this
@@ -72,6 +75,9 @@ class TaskFields:
     instead (B3) - see `apply_task_fields` for the accepted names and the
     validation rules (unknown names, and setting+clearing the same field in
     one call, both raise `InvalidTaskDataError`).
+
+    `ausnahme_daten`, when set, *replaces* the task's full EXDATE set (not an
+    append), mirroring `EventFields.ausnahme_daten` down to the validation.
     """
 
     titel: str | None = None
@@ -86,6 +92,8 @@ class TaskFields:
     notizen: str | None = None
     sichtbarkeit: str | None = None
     uebergeordnete_aufgabe: str | None = None
+    wiederholung: str | None = None
+    ausnahme_daten: list[str] | None = None
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
@@ -385,6 +393,420 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
 
 
+def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur:
+    """Validate and parse raw RFC 5545 RRULE text (e.g. "FREQ=WEEKLY;BYDAY=MO").
+
+    Shared by tasks (VTODO RRULE) and events (`event_mapping._parse_rrule`,
+    a thin wrapper that re-raises as `InvalidEventDataError`) - one parser,
+    one error message, for both. `vRecur.from_ical` silently *skips* parts
+    without '=' instead of raising, so completely unparseable input yields an
+    empty rule - treated as invalid here as well, since an empty RRULE is
+    never what the caller meant.
+    """
+    stripped = text.strip()
+    if stripped.upper().startswith("RRULE:"):
+        stripped = stripped[6:].strip()
+
+    VALID_PARTS = {
+        "FREQ",
+        "UNTIL",
+        "COUNT",
+        "INTERVAL",
+        "BYSECOND",
+        "BYMINUTE",
+        "BYHOUR",
+        "BYDAY",
+        "BYMONTHDAY",
+        "BYYEARDAY",
+        "BYWEEKNO",
+        "BYMONTH",
+        "BYSETPOS",
+        "WKST",
+    }
+
+    seen = set()
+    for part in stripped.split(";"):
+        if not part:
+            continue
+        if "=" not in part:
+            raise InvalidTaskDataError(
+                f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
+                "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
+            )
+        key = part.split("=")[0].upper()
+        if key not in VALID_PARTS:
+            raise InvalidTaskDataError(f"Unknown RRULE part: {key}")
+        if key in seen:
+            raise InvalidTaskDataError(f"Duplicate RRULE part: {key}")
+        seen.add(key)
+
+    if "FREQ" not in seen:
+        raise InvalidTaskDataError("wiederholung requires a FREQ part.")
+    if "UNTIL" in seen and "COUNT" in seen:
+        raise InvalidTaskDataError("wiederholung cannot contain both UNTIL and COUNT.")
+
+    try:
+        recur = vRecur.from_ical(stripped)
+    except Exception:
+        recur = None
+    if not recur:
+        raise InvalidTaskDataError(
+            f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
+            "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
+        )
+
+    if "INTERVAL" in recur:
+        if recur["INTERVAL"][0] < 1:
+            raise InvalidTaskDataError("INTERVAL must be >= 1.")
+    if "COUNT" in recur:
+        if recur["COUNT"][0] < 1:
+            raise InvalidTaskDataError("COUNT must be >= 1.")
+    if "BYMONTHDAY" in recur:
+        if 0 in recur["BYMONTHDAY"]:
+            raise InvalidTaskDataError("BYMONTHDAY cannot be 0.")
+    if "BYMONTH" in recur:
+        if any(m < 1 or m > 12 for m in recur["BYMONTH"]):
+            raise InvalidTaskDataError("BYMONTH must be between 1 and 12.")
+    if "BYHOUR" in recur:
+        if any(h < 0 or h > 23 for h in recur["BYHOUR"]):
+            raise InvalidTaskDataError("BYHOUR must be between 0 and 23.")
+
+    if anchor is not None and "UNTIL" in recur:
+        until_val = recur["UNTIL"][0]
+        if isinstance(anchor, datetime):
+            anchor_dt = anchor.astimezone(timezone.utc)
+            if not isinstance(until_val, datetime):
+                until_dt = datetime.combine(until_val, time.min, tzinfo=timezone.utc)
+            else:
+                until_dt = until_val if until_val.tzinfo else until_val.replace(tzinfo=timezone.utc)
+                until_dt = until_dt.astimezone(timezone.utc)
+            if until_dt < anchor_dt:
+                raise InvalidTaskDataError("UNTIL cannot be before the start date.")
+        else:
+            until_date = until_val.date() if isinstance(until_val, datetime) else until_val
+            if until_date < anchor:
+                raise InvalidTaskDataError("UNTIL cannot be before the start date.")
+
+    return recur
+
+
+# ----------------------------------------------------------------------
+# Shared component/recurrence helpers
+#
+# Everything below is used by *both* VTODOs (this module) and VEVENTs
+# (`event_mapping`), which is why it lives here, the lower of the two layers:
+# `event_mapping` imports `mapping`, so the reverse import would be a cycle.
+# The two helpers that reject bad input raise `InvalidTaskDataError` and are
+# re-raised as `InvalidEventDataError` by thin wrappers on the event side -
+# the same pattern `parse_datetime_input`/`parse_rrule_text` already follow.
+# The German field name (`ausnahme_daten`) and the error wording are shared;
+# only the noun and the tools named in the hint differ per component kind,
+# which is what the `noun`/`reader` arguments carry.
+# ----------------------------------------------------------------------
+
+#: How many occurrences of a series `_check_exdates_match_occurrences` expands
+#: before giving up on proving that an exception date names one of them, and
+#: how far `_expand_recurring_tasks` will scan a rule for in-window
+#: occurrences. Ten thousand covers any plausible real series (192 years of
+#: weekly occurrences, 27 of daily ones) and takes ~20 ms even for a
+#: per-second rule.
+_RECURRENCE_SCAN_LIMIT = 10_000
+
+
+def _component_start(component) -> date | datetime | None:
+    """The component's DTSTART value, or None if it has none this module can read.
+
+    A `date` for an all-day component, a `datetime` otherwise - the two kinds
+    every other value of the component has to agree with.
+    """
+    prop = component.get("dtstart")
+    value = getattr(prop, "dt", None) if prop is not None else None
+    return value if isinstance(value, (date, datetime)) else None
+
+
+def _component_zone(component) -> tzinfo | None:
+    """The zone the component's DTSTART is expressed in, or None.
+
+    None for an all-day (date-valued) or absent DTSTART, and for a floating
+    one - none of those anchor anything to a zone.
+    """
+    value = _component_start(component)
+    return value.tzinfo if isinstance(value, datetime) else None
+
+
+def _wire_zone(zone: tzinfo | None) -> tzinfo:
+    """The zone a component's values are written in, given its DTSTART's zone.
+
+    An IANA zone is written as a `TZID` reference (with a matching VTIMEZONE,
+    see `caldav_client._sync_vtimezones`); anything else - a bare UTC instant,
+    or a fixed offset left by another client - is written as UTC, since
+    `icalendar` would otherwise emit a nonstandard `TZID="UTC+02:00"` naming no
+    real zone. Shared by everything that has to put several values of one
+    component into the same form: DTSTART/DTEND/DUE (`_anchored`) and EXDATE
+    (`_exdate_values`).
+    """
+    return zone if isinstance(zone, ZoneInfo) else timezone.utc
+
+
+def _anchored(value: date | datetime, zone: tzinfo | None) -> date | datetime:
+    """Express a datetime in the component's own zone, keeping the instant.
+
+    Whichever zone a value arrived in - the default one this server attaches to
+    naive input, or the plain UTC `parse_datetime_input` turns an explicit
+    "+02:00" into - it is written in the zone the component's DTSTART already
+    uses. Three things depend on that:
+
+    - `get_event` -> `update_event` must not re-anchor a recurring event to a
+      fixed UTC instant, the one form that reintroduces DST drift;
+    - the same for `get_task` -> `update_task` on a recurring VTODO: a series
+      anchored to a UTC instant slides an hour at every DST transition, which
+      is only visible once the listings expand it (finding 5.7);
+    - DTSTART and DTEND (and DTSTART and DUE) must not end up anchored to
+      *different* zones. Two such ends are the same instant apart on the day
+      they are written and an hour apart after the next transition in either
+      zone, so the component silently changes length and nothing in the write
+      path can see it (finding 2.5).
+
+    Only the spelling changes; the instant stays whatever the input meant,
+    including the rule that a naive value means the server's default timezone.
+    Moving a component to another zone is done by *naming* that zone, which
+    `apply_event_fields`/`apply_task_fields` handle before calling this
+    (`names_timezone`).
+
+    `zone` is None when the component has no datetime DTSTART to anchor to (an
+    all-day or absent one), and dates carry no zone at all: both pass through.
+    Values always come from `parse_datetime_input(keep_zone=True)`, so a
+    datetime here is aware.
+    """
+    if zone is None or not isinstance(value, datetime):
+        return value
+    return value.astimezone(_wire_zone(zone))
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Make a datetime comparable: a naive value is read in the default zone.
+
+    Same rule as `parse_datetime_input`; our own writes always produce aware
+    datetimes, but components written by other clients may carry "floating"
+    local times, and those must mean the same thing here as everywhere else in
+    the server - reading them as UTC instead would make free/busy and sorting
+    disagree with the day windows by the zone's offset.
+    """
+    if value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=get_default_timezone())
+
+
+def _exdate_values(component, entries: list[str], *, noun: str = "event") -> list[date | datetime]:
+    """Parse `ausnahme_daten` entries into values anchored to the DTSTART.
+
+    Every value of one EXDATE property shares that property's parameters, so
+    they must all be expressed the same way: in the zone DTSTART names when it
+    has one, in UTC otherwise. Mixing them lets `icalendar` write a single
+    `TZID=` next to a value that still carries its own `Z` suffix - forbidden
+    by RFC 5545 3.2.19, and invisible when read back - and, more importantly,
+    an exception date only cancels an occurrence when it names the same moment
+    the recurrence set produced, which is DTSTART's moment in DTSTART's zone.
+
+    Only the spelling is adjusted: each entry keeps the instant it parsed to,
+    including the rule that a naive entry means the server's default timezone.
+
+    For the same reason - one property, one set of parameters - every entry
+    must be the same *kind* as the component's own start: date-only entries for
+    an all-day one, datetimes otherwise. A mixed set (or the wrong kind) is
+    rejected rather than written: `icalendar` would put a DATE and a DATE-TIME
+    under one property with a single `TZID`, which RFC 5545 3.8.5.1 (one value
+    type per property) and 3.2.19 (no TZID on a value without local time) both
+    forbid, and which reads back looking fine. A date-only exception on a timed
+    series names no occurrence of it in any case.
+    """
+    start_value = _component_start(component)
+    all_day = start_value is not None and not isinstance(start_value, datetime)
+
+    target = _wire_zone(_component_zone(component))
+    values: list[date | datetime] = []
+    for entry in entries:
+        value = parse_datetime_input(entry, keep_zone=True)
+        if isinstance(value, datetime):
+            value = value.astimezone(target)
+        values.append(value)
+
+    kinds = {isinstance(value, datetime) for value in values}
+    if start_value is not None:
+        kinds.add(not all_day)
+    if len(kinds) > 1:
+        if start_value is None:
+            raise InvalidTaskDataError(
+                "ausnahme_daten entries must all be of one kind: either date-only "
+                "'YYYY-MM-DD' values or full datetimes, not both."
+            )
+        expected = "date-only 'YYYY-MM-DD' values" if all_day else "full datetimes"
+        state = "all-day" if all_day else "not all-day"
+        raise InvalidTaskDataError(
+            f"ausnahme_daten entries must match the {noun}'s start: use {expected}, "
+            f"because the {noun} is {state}."
+        )
+    return values
+
+
+def _occurrence_key(value: date | datetime, *, all_day: bool) -> date | datetime:
+    """Identity of one occurrence, for comparing exception dates against a series.
+
+    An all-day series is compared by date (`dateutil` yields its occurrences as
+    naive midnights); a timed one by instant, so an exception written in the
+    component's zone and an occurrence computed in it match whatever offset
+    each side happens to be spelled with.
+    """
+    if all_day:
+        return value.date() if isinstance(value, datetime) else value
+    return _as_utc(value).astimezone(timezone.utc) if isinstance(value, datetime) else value
+
+
+def _rdate_values(component) -> list[date | datetime]:
+    """Every RDATE value on the component (extra dates of the recurrence set)."""
+    rdate = component.get("rdate")
+    if rdate is None:
+        return []
+    entries = rdate if isinstance(rdate, list) else [rdate]
+    values: list[date | datetime] = []
+    for entry in entries:
+        for item in getattr(entry, "dts", []):
+            value = getattr(item, "dt", None)
+            if isinstance(value, (date, datetime)):
+                values.append(value)
+    return values
+
+
+def _extract_exdates(component) -> list[str]:
+    """Read all EXDATE values as ISO strings, whatever wire form they use.
+
+    icalendar exposes a single EXDATE property as one vDDDLists (which may
+    itself hold several comma-separated values) and repeated EXDATE
+    properties as a list of vDDDLists - both forms occur in the wild, and
+    `apply_event_fields`/`apply_task_fields` only ever write the
+    single-property form.
+    """
+    exdate = component.get("exdate")
+    if exdate is None:
+        return []
+    entries = exdate if isinstance(exdate, list) else [exdate]
+    result: list[str] = []
+    for entry in entries:
+        dts = getattr(entry, "dts", None)
+        if dts is not None:
+            for item in dts:
+                formatted = format_datetime_output(item.dt)
+                if formatted:
+                    result.append(formatted)
+        else:
+            value: Any = getattr(entry, "dt", None)
+            if value is not None and hasattr(value, "isoformat"):
+                formatted = format_datetime_output(value)
+                if formatted:
+                    result.append(formatted)
+            else:
+                result.append(str(entry))
+    return result
+
+
+def _check_exdates_match_occurrences(
+    component,
+    entries: list[str],
+    values: list[date | datetime],
+    *,
+    noun: str = "event",
+    reader: str = "list_events/get_event",
+    field_name: str = "start",
+) -> None:
+    """Reject an exception date that names no occurrence of the series.
+
+    An EXDATE only cancels something when it names exactly a moment the
+    recurrence set produces. Miss it - by a day, by an hour, or by writing a
+    naive value that means the server's default timezone while the series runs
+    on another one - and the exception is stored, the occurrence stays, and
+    nothing anywhere says so. That silence was half of finding 2.2; the zone
+    anchoring above removed the most common cause, this reports what is left.
+
+    Deliberately best-effort, and never a false alarm:
+
+    - without an RRULE there is no occurrence set to check against (an EXDATE
+      on a non-recurring component is pointless, but that is not this check's
+      business), and neither is there when the rule or DTSTART is one
+      `dateutil` refuses;
+    - RDATE values count as occurrences too, being part of the same set;
+    - the scan stops after `_RECURRENCE_SCAN_LIMIT` occurrences and passes.
+      A per-second rule would otherwise be expanded a year deep to prove a
+      point, and "we could not check this cheaply" must not read as "this is
+      wrong".
+    """
+    rrule_prop = component.get("rrule")
+    dtstart_value = _component_start(component)
+    if rrule_prop is None or dtstart_value is None or not values:
+        return
+    all_day = not isinstance(dtstart_value, datetime)
+
+    wanted: dict[Any, str] = {}
+    for spec, value in zip(entries, values, strict=True):
+        wanted.setdefault(_occurrence_key(value, all_day=all_day), spec)
+    for extra in _rdate_values(component):
+        wanted.pop(_occurrence_key(extra, all_day=all_day), None)
+    if not wanted:
+        return
+    latest = max(wanted)
+
+    try:
+        # `_extract_rrule`, not `rrule_prop.to_ical()`: a component carrying a
+        # duplicated RRULE property exposes a *list* here, and `.to_ical()` on
+        # a list raises AttributeError (finding 5.6, same crash, same fix).
+        rule = rrulestr(str(_extract_rrule(component)), dtstart=dtstart_value)
+        for index, occurrence in enumerate(rule):
+            if index >= _RECURRENCE_SCAN_LIMIT:
+                return
+            key = _occurrence_key(occurrence, all_day=all_day)
+            wanted.pop(key, None)
+            if not wanted:
+                return
+            if key > latest:
+                break  # occurrences ascend, so nothing further can match
+    except (ValueError, TypeError, OverflowError):
+        return  # a rule (or a DTSTART) dateutil cannot expand proves nothing
+
+    spec = next(iter(wanted.values()))
+    raise InvalidTaskDataError(
+        f"ausnahme_daten entry '{spec}' does not name an occurrence of this {noun}'s "
+        f"wiederholung, so it would cancel nothing. Pass the occurrence exactly as "
+        f"{reader} reported its '{field_name}' - a value without a timezone is "
+        f"read in the server's default timezone, not in the {noun}'s."
+    )
+
+
+def _check_rrule_anchor(todo, fields: TaskFields) -> None:
+    """A recurring VTODO needs a DTSTART to recur from.
+
+    Runs after all clears/sets in `apply_task_fields`, so it validates the
+    component's *final* state - the same rule
+    `event_mapping._check_start_end_consistency` follows for DTSTART/DTEND.
+    That matters for `update_task`: a call that only sets `wiederholung` must
+    be checked against whatever DTSTART the stored task already has, not
+    just the fields passed in this call, so it isn't rejected merely because
+    the anchor wasn't repeated here - and, symmetrically, an update that both
+    sets `wiederholung` and clears the task's only anchor in the same call
+    must still be rejected.
+    """
+    if "rrule" not in todo:
+        return
+
+    touched_rrule = fields.wiederholung is not None or "wiederholung" in fields.clear
+    touched_start = fields.start_datum is not None or "start_datum" in fields.clear
+    if not (touched_rrule or touched_start):
+        return
+
+    if "dtstart" not in todo:
+        raise InvalidTaskDataError(
+            "wiederholung requires the task to have a start_datum to recur from."
+        )
+
+
 def _set(component, name: str, value: Any, parameters: dict[str, str] | None = None) -> None:
     """Set a property to exactly one value, replacing any existing one.
 
@@ -619,6 +1041,20 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     clearing and setting the same field in one call, or naming an unknown
     field (including "titel", which cannot be cleared), raises
     `InvalidTaskDataError`.
+
+    `start_datum`/`faellig_datum` keep the zone they name and are otherwise
+    written in the zone the task's DTSTART already uses (`_anchored`), exactly
+    as `apply_event_fields` does for DTSTART/DTEND. A recurring VTODO pinned to
+    a fixed UTC instant slides an hour at every DST transition, and DTSTART and
+    DUE anchored to two different zones silently change the task's window at
+    the next one (finding 5.7).
+
+    `ausnahme_daten` *replaces* the task's whole EXDATE set, and is validated
+    exactly as `apply_event_fields` validates the event-side field of the same
+    name (literally the same helpers): entries of the wrong value kind, and
+    entries naming no occurrence of the task's series, are rejected rather than
+    stored to cancel nothing. Clearing `wiederholung` also drops EXDATE and
+    RDATE, which mean nothing without a recurrence set (finding 5.8).
     """
     clear = tuple(fields.clear or ())
     _validate_clear(fields, clear)
@@ -629,15 +1065,40 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         _, ical_name = _CLEAR_SPECS[name]
         if name == "erinnerungen":
             todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
+        elif name == "wiederholung":
+            # EXDATE and RDATE only mean anything relative to a recurrence set.
+            # Dropping the RRULE and leaving them behind orphans them on the
+            # component: they cancel and add nothing, no tool reports them as a
+            # problem, and they silently come back to life the day someone sets
+            # `wiederholung` again (finding 5.8).
+            for orphaned in (ical_name, "exdate", "rdate"):
+                if orphaned is not None and orphaned in todo:
+                    del todo[orphaned]
         elif ical_name is not None and ical_name in todo:
             del todo[ical_name]
+
+    # The zone the task is already anchored to, read before its DTSTART is
+    # replaced, so every value written below goes on the wire in that one zone
+    # instead of each keeping whichever zone it happened to parse in.
+    zone = _component_zone(todo)
 
     if fields.titel is not None:
         _set(todo, "summary", fields.titel)
     if fields.start_datum is not None:
-        _set(todo, "dtstart", parse_datetime_input(fields.start_datum))
+        start_value = parse_datetime_input(fields.start_datum, keep_zone=True)
+        if not names_timezone(fields.start_datum):
+            # A start that names no zone means "this instant", not "this task
+            # now lives in that zone" - so it is written in the task's own.
+            # Naming a zone explicitly is how a task is *moved* to one, and
+            # then everything below follows the new anchor.
+            start_value = _anchored(start_value, zone)
+        _set(todo, "dtstart", start_value)
+        zone = _component_zone(todo)
     if fields.faellig_datum is not None:
-        _set(todo, "due", parse_datetime_input(fields.faellig_datum))
+        due_value = parse_datetime_input(fields.faellig_datum, keep_zone=True)
+        if not names_timezone(fields.faellig_datum):
+            due_value = _anchored(due_value, zone)
+        _set(todo, "due", due_value)
     if fields.prioritaet is not None:
         _set(todo, "priority", priority_label_to_ical(fields.prioritaet))
     if fields.fortschritt_prozent is not None:
@@ -663,9 +1124,38 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
             fields.uebergeordnete_aufgabe,
             parameters={"RELTYPE": "PARENT"},
         )
+    if fields.wiederholung is not None:
+        anchor_val = None
+        dtstart_prop = todo.get("dtstart")
+        if dtstart_prop is not None:
+            anchor_val = getattr(dtstart_prop, "dt", None)
+        _set(todo, "rrule", parse_rrule_text(fields.wiederholung, anchor_val))
+    if fields.ausnahme_daten is not None:
+        # Replace, not append: drop every existing EXDATE, then write all
+        # entries as one EXDATE property with a comma-separated value list.
+        # Runs after `wiederholung` above, so setting a rule and its exceptions
+        # in one call checks the exceptions against the rule this call writes.
+        # (`_extract_exdates` reads back all three wire forms other clients may
+        # produce: one property, repeated properties, comma lists.)
+        if "exdate" in todo:
+            del todo["exdate"]
+        if fields.ausnahme_daten:
+            exdate_entries = list(fields.ausnahme_daten)
+            exdate_values = _exdate_values(todo, exdate_entries, noun="task")
+            _check_exdates_match_occurrences(
+                todo,
+                exdate_entries,
+                exdate_values,
+                noun="task",
+                reader="list_tasks/get_task",
+                field_name="start_datum",
+            )
+            todo.add("exdate", exdate_values)
 
     if fields.erinnerungen is not None:
         apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
+
+    _check_rrule_anchor(todo, fields)
 
 
 def mark_completed(todo) -> None:
@@ -719,15 +1209,17 @@ def _extract_parent_uid(component) -> str | None:
 def _extract_rrule(component) -> str | None:
     """Return the task's RRULE as raw RFC 5545 text (e.g. "FREQ=WEEKLY;BYDAY=MO"), or None.
 
-    Read-only (C5): this server has no way to create/edit recurrence, only
-    surface whether/how a task already recurs. `icalendar` exposes RRULE as a
-    `vRecur` property; `.to_ical()` serializes it back to the same textual form
-    RFC 5545 (and Nextcloud Tasks) uses, rather than exposing icalendar's
-    internal dict representation.
+    `icalendar` exposes RRULE as a `vRecur` property; `.to_ical()` serializes
+    it back to the same textual form RFC 5545 (and Nextcloud Tasks) uses,
+    rather than exposing icalendar's internal dict representation. This is
+    the read side of `wiederholung` - see `parse_rrule_text`/`TaskFields.wiederholung`
+    for the write side (`create_task`/`update_task`).
     """
     rrule = component.get("rrule")
     if rrule is None:
         return None
+    if isinstance(rrule, list):
+        rrule = rrule[0]
     return rrule.to_ical().decode()
 
 
@@ -870,6 +1362,11 @@ def parse_vtodo(component) -> dict[str, Any]:
         "notizen": _get_text(component, "description"),
         "uebergeordnete_uid": _extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
+        "ausnahme_daten": _extract_exdates(component),
+        # Both only ever set by `_expand_recurring_tasks`: a stored VTODO is a
+        # series or a plain task, never one occurrence of one.
+        "wiederholung_von": None,
+        "serie_uid": None,
     }
 
 
@@ -951,6 +1448,200 @@ def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, tuple[str, str]
     return (0, due, titel)
 
 
+#: Separates a series UID from the occurrence it identifies in the synthetic
+#: UID an expanded instance carries ("<series uid>#2026-09-08T10:00:00+02:00").
+#: A real Nextcloud task UID is a UUID, and `split_occurrence_uid` additionally
+#: requires the suffix to parse as a date/datetime, so a foreign UID that
+#: happens to contain a "#" is not mistaken for an occurrence.
+_OCCURRENCE_UID_SEPARATOR = "#"
+
+#: How many occurrences of one recurring task a listing will expand. The
+#: queried window is the real bound (`_expand_recurring_tasks` only runs with an
+#: upper one); this is the backstop for a window wide enough that a per-minute
+#: rule would otherwise fill the whole listing with one task.
+_TASK_EXPANSION_LIMIT = 100
+
+
+def split_occurrence_uid(task_uid: str) -> tuple[str, str | None]:
+    """Split an expanded instance's UID into (series UID, occurrence), or (uid, None).
+
+    The write tools address a task by UID, and an expanded instance is not a
+    stored task - there is nothing at that UID to edit, complete or delete. So
+    instances carry a UID that is deliberately *not* the series' own, and the
+    write paths use this to say so in as many words instead of silently acting
+    on the whole series (finding 5.1).
+
+    The occurrence part must itself parse as a date/datetime; anything else is
+    treated as an ordinary UID that merely contains a "#".
+    """
+    series_uid, separator, occurrence = task_uid.rpartition(_OCCURRENCE_UID_SEPARATOR)
+    if not separator or not series_uid:
+        return task_uid, None
+    try:
+        parse_datetime_input(occurrence)
+    except InvalidTaskDataError:
+        return task_uid, None
+    return series_uid, occurrence
+
+
+def _rule_from_task(anchor: date | datetime, rrule_text: str) -> tuple[Any, date | datetime] | None:
+    """A `dateutil` rule for a parsed task's series, or None if it can't be built.
+
+    The anchor arrives as the ISO string `parse_vtodo` produced, i.e. carrying a
+    bare numeric offset rather than the zone name the component actually uses.
+    Handing that straight to `dateutil` would generate every occurrence at that
+    one *fixed* offset, so an occurrence after the next DST transition would
+    come back an hour off the wall clock the series means - reintroducing on the
+    read side exactly the drift finding 5.7 removed on the write side. Attaching
+    the server's default zone (a real `ZoneInfo`, which recomputes its offset
+    per instant) instead keeps a "every Monday 09:00" series at 09:00 local
+    year-round.
+
+    This is exact for every task this server writes, since 5.7 anchors those to
+    the default zone. A series a foreign client anchored to some *other* zone is
+    expanded in the default zone instead, which differs only between the two
+    zones' transition dates - and `list_tasks` reports every timestamp in the
+    default zone anyway.
+    """
+    if isinstance(anchor, datetime):
+        anchor = anchor.astimezone(get_default_timezone())
+    try:
+        return rrulestr(rrule_text, dtstart=anchor), anchor
+    except (ValueError, TypeError, OverflowError):
+        return None  # a rule dateutil refuses expands to nothing we can trust
+
+
+def _due_instant(value: date | datetime) -> datetime:
+    """Where an occurrence's due value sits on the timeline, for window checks."""
+    return _as_utc(value) if isinstance(value, datetime) else local_midnight(value)
+
+
+def _expand_recurring_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    window_start: datetime | None,
+    window_end: datetime | None,
+) -> list[dict[str, Any]]:
+    """Replace each recurring task with the occurrences due inside the window.
+
+    CalDAV servers do not expand VTODO series the way they expand VEVENTs, so a
+    recurring task used to appear exactly once in every listing - at its
+    original due date, never again (finding 5.1). This computes the missing
+    occurrences client-side from the RRULE, using the same `dateutil` machinery
+    `_check_exdates_match_occurrences` already uses.
+
+    Bounded three ways, because an RRULE need not terminate:
+
+    - it only runs at all when `window_end` is set, i.e. when the caller asked
+      for tasks due before some date. Without an upper bound there is no window
+      to expand into, and the series is left as the single master row it is
+      today - `wiederholung` intact - rather than flooding an unfiltered
+      `list_tasks` with a hundred copies of every recurring task;
+    - occurrences ascend, so the scan stops at the first one past `window_end`;
+    - and `_TASK_EXPANSION_LIMIT`/`_RECURRENCE_SCAN_LIMIT` cap what one task can
+      emit and scan even so.
+
+    A task is left untouched (one master row) whenever the expansion cannot be
+    trusted: no rule, no due date to place occurrences on, an unreadable anchor,
+    a start and due of different value kinds, or a rule `dateutil` refuses.
+    Degrading to today's behaviour is always safe; inventing occurrences is not.
+
+    Each emitted instance is marked so no caller can mistake it for the stored
+    task: `wiederholung_von` names the occurrence, `wiederholung` is `None`
+    (nothing about an instance recurs), `serie_uid` points at the stored task,
+    and `uid` is a synthetic "<series uid>#<occurrence>" that every write path
+    rejects by name (`split_occurrence_uid`). An instance is a read-only view of
+    one date in a series; `update_task`/`complete_task` act on series, and take
+    `serie_uid`.
+    """
+    if window_end is None:
+        return tasks
+
+    expanded: list[dict[str, Any]] = []
+    for task in tasks:
+        occurrences = _occurrences_of(task, window_start=window_start, window_end=window_end)
+        if occurrences is None:
+            expanded.append(task)
+        else:
+            expanded.extend(occurrences)
+    return expanded
+
+
+def _occurrences_of(
+    task: dict[str, Any],
+    *,
+    window_start: datetime | None,
+    window_end: datetime,
+) -> list[dict[str, Any]] | None:
+    """The in-window instances of one recurring task, or None to leave it as is."""
+    rrule_text = task.get("wiederholung")
+    due_text = task.get("faellig_datum")
+    if not rrule_text or not due_text:
+        # No rule, or nothing due to place the occurrences on: a task with no
+        # DUE is excluded from a due-filtered listing either way.
+        return None
+
+    start_text = task.get("start_datum")
+    try:
+        due_anchor = parse_datetime_input(due_text, keep_zone=True)
+        # RFC 5545 generates the recurrence set from DTSTART; DUE only rides
+        # along at a fixed distance from it. A DUE-only series is a foreign
+        # client's, and anchoring on DUE is the best reading available.
+        anchor = parse_datetime_input(start_text, keep_zone=True) if start_text else due_anchor
+    except InvalidTaskDataError:
+        return None
+    if type(anchor) is not type(due_anchor):
+        # An all-day start with a timed due (or vice versa) has no well-defined
+        # offset between them - refuse rather than guess.
+        return None
+
+    built = _rule_from_task(anchor, str(rrule_text))
+    if built is None:
+        return None
+    rule, anchor = built
+    all_day = not isinstance(anchor, datetime)
+    # How far DUE sits from DTSTART. Aware datetimes subtract as instants, so
+    # the two anchors' spellings do not matter; adding it back to an occurrence
+    # is wall-clock arithmetic in the occurrence's own zone, which is what keeps
+    # a "09:00 -> 17:00" task 09:00 -> 17:00 on both sides of a transition.
+    shift = due_anchor - anchor if start_text else timedelta(0)
+
+    skipped = set()
+    for entry in task.get("ausnahme_daten") or []:
+        try:
+            value = parse_datetime_input(entry, keep_zone=True)
+        except InvalidTaskDataError:
+            continue  # an EXDATE this server cannot read cancels nothing
+        skipped.add(_occurrence_key(value, all_day=all_day))
+
+    instances: list[dict[str, Any]] = []
+    for index, occurrence in enumerate(rule):
+        if index >= _RECURRENCE_SCAN_LIMIT or len(instances) >= _TASK_EXPANSION_LIMIT:
+            break
+        occ_start: date | datetime = occurrence.date() if all_day else occurrence
+        occ_due = occ_start + shift
+        placed = _due_instant(occ_due)
+        if placed > window_end:
+            break  # occurrences ascend: nothing further can fall inside
+        if window_start is not None and placed < window_start:
+            continue  # before the window, and not one of this task's results
+        if _occurrence_key(occ_start, all_day=all_day) in skipped:
+            continue
+
+        occurrence_id = format_datetime_output(occ_start)
+        instance = dict(task)
+        instance["wiederholung"] = None
+        instance["wiederholung_von"] = occurrence_id
+        instance["ausnahme_daten"] = []
+        instance["serie_uid"] = task.get("uid")
+        instance["uid"] = f"{task.get('uid')}{_OCCURRENCE_UID_SEPARATOR}{occurrence_id}"
+        if start_text:
+            instance["start_datum"] = occurrence_id
+        instance["faellig_datum"] = format_datetime_output(occ_due)
+        instances.append(instance)
+    return instances
+
+
 def filter_tasks(
     tasks: list[dict[str, Any]],
     *,
@@ -991,9 +1682,14 @@ def filter_tasks(
             )
         tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
 
+    before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
+    after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
+
+    # Before the due filter: expansion turns one recurring task into the rows
+    # the filter then trims to the window exactly.
+    tasks = _expand_recurring_tasks(tasks, window_start=after_bound, window_end=before_bound)
+
     if due_before or due_after:
-        before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
-        after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
         filtered: list[dict[str, Any]] = []
         for task in tasks:
             due_dt = _task_due_instant(task.get("faellig_datum"))

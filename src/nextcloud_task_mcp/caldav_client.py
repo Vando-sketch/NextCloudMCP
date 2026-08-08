@@ -525,7 +525,11 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     """
     seen_tzids = {str(c.get("TZID", "")) for c in vcal.subcomponents if c.name == "VTIMEZONE"}
     zones: dict[str, ZoneInfo] = {}
-    for prop_name in ("dtstart", "dtend"):
+    # "due" is the VTODO counterpart of "dtend": since finding 5.7,
+    # `mapping.apply_task_fields` anchors DTSTART/DUE the way
+    # `apply_event_fields` anchors DTSTART/DTEND, so a *task* can reference a
+    # TZID here too and needs the same VTIMEZONE written alongside it.
+    for prop_name in ("dtstart", "dtend", "due"):
         prop = component.get(prop_name)
         if prop is None:
             continue
@@ -551,6 +555,32 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
             0, Timezone.from_tzinfo(zone, tzid=tzid, last_date=_VTIMEZONE_HORIZON)
         )
         seen_tzids.add(tzid)
+
+
+def _reject_occurrence_uid(task_uid: str) -> None:
+    """Refuse a UID that names one expanded occurrence rather than a stored task.
+
+    `list_tasks`/`get_agenda` expand a recurring task into the occurrences due
+    inside the queried window (`mapping._expand_recurring_tasks`). Those rows
+    are a read-only view of dates in a series - there is no stored task at their
+    UID to edit, complete or delete, and this server has no way to materialize
+    one occurrence as its own component.
+
+    Every task tool that takes a UID checks this, so passing an instance's UID
+    back fails with an explanation naming the series' own UID, instead of
+    silently doing something to the *whole series* that the caller meant to do
+    to one date (finding 5.1).
+    """
+    series_uid, occurrence = mapping.split_occurrence_uid(task_uid)
+    if occurrence is None:
+        return
+    raise InvalidTaskDataError(
+        f"'{task_uid}' identifies the occurrence on {occurrence} of a recurring task, "
+        "not a task on its own - single occurrences cannot be edited, completed or "
+        f"deleted. Use the series' own uid '{series_uid}' (reported as 'serie_uid' on "
+        "every expanded instance) to act on the whole series, or add the occurrence to "
+        "the series' ausnahme_daten to skip just that one."
+    )
 
 
 class CalDavService:
@@ -1321,7 +1351,9 @@ class CalDavService:
         i.e. an unknown one.
 
         `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
-        parsed results via `mapping.filter_tasks`. Each task dict gains a "liste"
+        parsed results via `mapping.filter_tasks`, which also expands recurring
+        tasks into their occurrences when `due_before` bounds the window (see
+        `mapping._expand_recurring_tasks`). Each task dict gains a "liste"
         key set to its task list display name. That name is what every other task
         tool takes, with one honest exception: Nextcloud permits two task lists to
         share a display name, and then "liste" cannot tell them apart (nor can any
@@ -1467,6 +1499,7 @@ class CalDavService:
             vcal = Calendar()
             vcal.add("prodid", "-//nextcloud-task-mcp//EN")
             vcal.add("version", "2.0")
+            _sync_vtimezones(vcal, todo)
             vcal.add_component(todo)
             ical_text = vcal.to_ical().decode("utf-8")
 
@@ -1485,11 +1518,20 @@ class CalDavService:
 
     def update_task(self, list_name: str, task_uid: str, fields: mapping.TaskFields) -> None:
         """Update only the given (non-None) fields of an existing task."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
                 todo_obj = calendar.get_todo_by_uid(task_uid)
-                mapping.apply_task_fields(todo_obj.icalendar_component, fields)
+                master = None
+                for component in todo_obj.icalendar_instance.walk("VTODO"):
+                    if "recurrence-id" not in component:
+                        master = component
+                        break
+                if master is None:
+                    master = todo_obj.icalendar_component
+                mapping.apply_task_fields(master, fields)
+                _sync_vtimezones(todo_obj.icalendar_instance, master)
                 todo_obj.save()
 
             try:
@@ -1503,6 +1545,7 @@ class CalDavService:
 
     def get_task(self, list_name: str, task_uid: str) -> dict[str, Any]:
         """Return a single task, parsed into the server's German task dict."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -1520,6 +1563,7 @@ class CalDavService:
 
     def complete_task(self, list_name: str, task_uid: str) -> None:
         """Mark a task as completed (STATUS, PERCENT-COMPLETE, COMPLETED timestamp)."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -1538,6 +1582,7 @@ class CalDavService:
 
     def delete_task(self, list_name: str, task_uid: str) -> None:
         """Permanently delete a task."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -2236,6 +2281,7 @@ class CalDavService:
                 beschreibung=task.get("notizen"),
                 ort=task.get("ort"),
                 tags=task.get("tags") or None,
+                wiederholung=task.get("wiederholung"),
                 verknuepfte_aufgabe=task_uid,
             )
             return self.create_event(calendar_name, fields)
