@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from dateutil.rrule import rrulestr
 from icalendar import Alarm, vDuration, vRecur
 
 from .errors import InvalidTaskDataError
@@ -482,6 +483,296 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
                 raise InvalidTaskDataError("UNTIL cannot be before the start date.")
 
     return recur
+
+
+# ----------------------------------------------------------------------
+# Shared component/recurrence helpers
+#
+# Everything below is used by *both* VTODOs (this module) and VEVENTs
+# (`event_mapping`), which is why it lives here, the lower of the two layers:
+# `event_mapping` imports `mapping`, so the reverse import would be a cycle.
+# The two helpers that reject bad input raise `InvalidTaskDataError` and are
+# re-raised as `InvalidEventDataError` by thin wrappers on the event side -
+# the same pattern `parse_datetime_input`/`parse_rrule_text` already follow.
+# The German field name (`ausnahme_daten`) and the error wording are shared;
+# only the noun and the tools named in the hint differ per component kind,
+# which is what the `noun`/`reader` arguments carry.
+# ----------------------------------------------------------------------
+
+#: How many occurrences of a series `_check_exdates_match_occurrences` expands
+#: before giving up on proving that an exception date names one of them, and
+#: how far `_expand_recurring_tasks` will scan a rule for in-window
+#: occurrences. Ten thousand covers any plausible real series (192 years of
+#: weekly occurrences, 27 of daily ones) and takes ~20 ms even for a
+#: per-second rule.
+_RECURRENCE_SCAN_LIMIT = 10_000
+
+
+def _component_start(component) -> date | datetime | None:
+    """The component's DTSTART value, or None if it has none this module can read.
+
+    A `date` for an all-day component, a `datetime` otherwise - the two kinds
+    every other value of the component has to agree with.
+    """
+    prop = component.get("dtstart")
+    value = getattr(prop, "dt", None) if prop is not None else None
+    return value if isinstance(value, (date, datetime)) else None
+
+
+def _component_zone(component) -> tzinfo | None:
+    """The zone the component's DTSTART is expressed in, or None.
+
+    None for an all-day (date-valued) or absent DTSTART, and for a floating
+    one - none of those anchor anything to a zone.
+    """
+    value = _component_start(component)
+    return value.tzinfo if isinstance(value, datetime) else None
+
+
+def _wire_zone(zone: tzinfo | None) -> tzinfo:
+    """The zone a component's values are written in, given its DTSTART's zone.
+
+    An IANA zone is written as a `TZID` reference (with a matching VTIMEZONE,
+    see `caldav_client._sync_vtimezones`); anything else - a bare UTC instant,
+    or a fixed offset left by another client - is written as UTC, since
+    `icalendar` would otherwise emit a nonstandard `TZID="UTC+02:00"` naming no
+    real zone. Shared by everything that has to put several values of one
+    component into the same form: DTSTART/DTEND/DUE (`_anchored`) and EXDATE
+    (`_exdate_values`).
+    """
+    return zone if isinstance(zone, ZoneInfo) else timezone.utc
+
+
+def _anchored(value: date | datetime, zone: tzinfo | None) -> date | datetime:
+    """Express a datetime in the component's own zone, keeping the instant.
+
+    Whichever zone a value arrived in - the default one this server attaches to
+    naive input, or the plain UTC `parse_datetime_input` turns an explicit
+    "+02:00" into - it is written in the zone the component's DTSTART already
+    uses. Three things depend on that:
+
+    - `get_event` -> `update_event` must not re-anchor a recurring event to a
+      fixed UTC instant, the one form that reintroduces DST drift;
+    - the same for `get_task` -> `update_task` on a recurring VTODO: a series
+      anchored to a UTC instant slides an hour at every DST transition, which
+      is only visible once the listings expand it (finding 5.7);
+    - DTSTART and DTEND (and DTSTART and DUE) must not end up anchored to
+      *different* zones. Two such ends are the same instant apart on the day
+      they are written and an hour apart after the next transition in either
+      zone, so the component silently changes length and nothing in the write
+      path can see it (finding 2.5).
+
+    Only the spelling changes; the instant stays whatever the input meant,
+    including the rule that a naive value means the server's default timezone.
+    Moving a component to another zone is done by *naming* that zone, which
+    `apply_event_fields`/`apply_task_fields` handle before calling this
+    (`names_timezone`).
+
+    `zone` is None when the component has no datetime DTSTART to anchor to (an
+    all-day or absent one), and dates carry no zone at all: both pass through.
+    Values always come from `parse_datetime_input(keep_zone=True)`, so a
+    datetime here is aware.
+    """
+    if zone is None or not isinstance(value, datetime):
+        return value
+    return value.astimezone(_wire_zone(zone))
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Make a datetime comparable: a naive value is read in the default zone.
+
+    Same rule as `parse_datetime_input`; our own writes always produce aware
+    datetimes, but components written by other clients may carry "floating"
+    local times, and those must mean the same thing here as everywhere else in
+    the server - reading them as UTC instead would make free/busy and sorting
+    disagree with the day windows by the zone's offset.
+    """
+    if value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=get_default_timezone())
+
+
+def _exdate_values(component, entries: list[str], *, noun: str = "event") -> list[date | datetime]:
+    """Parse `ausnahme_daten` entries into values anchored to the DTSTART.
+
+    Every value of one EXDATE property shares that property's parameters, so
+    they must all be expressed the same way: in the zone DTSTART names when it
+    has one, in UTC otherwise. Mixing them lets `icalendar` write a single
+    `TZID=` next to a value that still carries its own `Z` suffix - forbidden
+    by RFC 5545 3.2.19, and invisible when read back - and, more importantly,
+    an exception date only cancels an occurrence when it names the same moment
+    the recurrence set produced, which is DTSTART's moment in DTSTART's zone.
+
+    Only the spelling is adjusted: each entry keeps the instant it parsed to,
+    including the rule that a naive entry means the server's default timezone.
+
+    For the same reason - one property, one set of parameters - every entry
+    must be the same *kind* as the component's own start: date-only entries for
+    an all-day one, datetimes otherwise. A mixed set (or the wrong kind) is
+    rejected rather than written: `icalendar` would put a DATE and a DATE-TIME
+    under one property with a single `TZID`, which RFC 5545 3.8.5.1 (one value
+    type per property) and 3.2.19 (no TZID on a value without local time) both
+    forbid, and which reads back looking fine. A date-only exception on a timed
+    series names no occurrence of it in any case.
+    """
+    start_value = _component_start(component)
+    all_day = start_value is not None and not isinstance(start_value, datetime)
+
+    target = _wire_zone(_component_zone(component))
+    values: list[date | datetime] = []
+    for entry in entries:
+        value = parse_datetime_input(entry, keep_zone=True)
+        if isinstance(value, datetime):
+            value = value.astimezone(target)
+        values.append(value)
+
+    kinds = {isinstance(value, datetime) for value in values}
+    if start_value is not None:
+        kinds.add(not all_day)
+    if len(kinds) > 1:
+        if start_value is None:
+            raise InvalidTaskDataError(
+                "ausnahme_daten entries must all be of one kind: either date-only "
+                "'YYYY-MM-DD' values or full datetimes, not both."
+            )
+        expected = "date-only 'YYYY-MM-DD' values" if all_day else "full datetimes"
+        state = "all-day" if all_day else "not all-day"
+        raise InvalidTaskDataError(
+            f"ausnahme_daten entries must match the {noun}'s start: use {expected}, "
+            f"because the {noun} is {state}."
+        )
+    return values
+
+
+def _occurrence_key(value: date | datetime, *, all_day: bool) -> date | datetime:
+    """Identity of one occurrence, for comparing exception dates against a series.
+
+    An all-day series is compared by date (`dateutil` yields its occurrences as
+    naive midnights); a timed one by instant, so an exception written in the
+    component's zone and an occurrence computed in it match whatever offset
+    each side happens to be spelled with.
+    """
+    if all_day:
+        return value.date() if isinstance(value, datetime) else value
+    return _as_utc(value).astimezone(timezone.utc) if isinstance(value, datetime) else value
+
+
+def _rdate_values(component) -> list[date | datetime]:
+    """Every RDATE value on the component (extra dates of the recurrence set)."""
+    rdate = component.get("rdate")
+    if rdate is None:
+        return []
+    entries = rdate if isinstance(rdate, list) else [rdate]
+    values: list[date | datetime] = []
+    for entry in entries:
+        for item in getattr(entry, "dts", []):
+            value = getattr(item, "dt", None)
+            if isinstance(value, (date, datetime)):
+                values.append(value)
+    return values
+
+
+def _extract_exdates(component) -> list[str]:
+    """Read all EXDATE values as ISO strings, whatever wire form they use.
+
+    icalendar exposes a single EXDATE property as one vDDDLists (which may
+    itself hold several comma-separated values) and repeated EXDATE
+    properties as a list of vDDDLists - both forms occur in the wild, and
+    `apply_event_fields`/`apply_task_fields` only ever write the
+    single-property form.
+    """
+    exdate = component.get("exdate")
+    if exdate is None:
+        return []
+    entries = exdate if isinstance(exdate, list) else [exdate]
+    result: list[str] = []
+    for entry in entries:
+        dts = getattr(entry, "dts", None)
+        if dts is not None:
+            for item in dts:
+                formatted = format_datetime_output(item.dt)
+                if formatted:
+                    result.append(formatted)
+        else:
+            value: Any = getattr(entry, "dt", None)
+            if value is not None and hasattr(value, "isoformat"):
+                formatted = format_datetime_output(value)
+                if formatted:
+                    result.append(formatted)
+            else:
+                result.append(str(entry))
+    return result
+
+
+def _check_exdates_match_occurrences(
+    component,
+    entries: list[str],
+    values: list[date | datetime],
+    *,
+    noun: str = "event",
+    reader: str = "list_events/get_event",
+    field_name: str = "start",
+) -> None:
+    """Reject an exception date that names no occurrence of the series.
+
+    An EXDATE only cancels something when it names exactly a moment the
+    recurrence set produces. Miss it - by a day, by an hour, or by writing a
+    naive value that means the server's default timezone while the series runs
+    on another one - and the exception is stored, the occurrence stays, and
+    nothing anywhere says so. That silence was half of finding 2.2; the zone
+    anchoring above removed the most common cause, this reports what is left.
+
+    Deliberately best-effort, and never a false alarm:
+
+    - without an RRULE there is no occurrence set to check against (an EXDATE
+      on a non-recurring component is pointless, but that is not this check's
+      business), and neither is there when the rule or DTSTART is one
+      `dateutil` refuses;
+    - RDATE values count as occurrences too, being part of the same set;
+    - the scan stops after `_RECURRENCE_SCAN_LIMIT` occurrences and passes.
+      A per-second rule would otherwise be expanded a year deep to prove a
+      point, and "we could not check this cheaply" must not read as "this is
+      wrong".
+    """
+    rrule_prop = component.get("rrule")
+    dtstart_value = _component_start(component)
+    if rrule_prop is None or dtstart_value is None or not values:
+        return
+    all_day = not isinstance(dtstart_value, datetime)
+
+    wanted: dict[Any, str] = {}
+    for spec, value in zip(entries, values, strict=True):
+        wanted.setdefault(_occurrence_key(value, all_day=all_day), spec)
+    for extra in _rdate_values(component):
+        wanted.pop(_occurrence_key(extra, all_day=all_day), None)
+    if not wanted:
+        return
+    latest = max(wanted)
+
+    try:
+        # `_extract_rrule`, not `rrule_prop.to_ical()`: a component carrying a
+        # duplicated RRULE property exposes a *list* here, and `.to_ical()` on
+        # a list raises AttributeError (finding 5.6, same crash, same fix).
+        rule = rrulestr(str(_extract_rrule(component)), dtstart=dtstart_value)
+        for index, occurrence in enumerate(rule):
+            if index >= _RECURRENCE_SCAN_LIMIT:
+                return
+            key = _occurrence_key(occurrence, all_day=all_day)
+            wanted.pop(key, None)
+            if not wanted:
+                return
+            if key > latest:
+                break  # occurrences ascend, so nothing further can match
+    except (ValueError, TypeError, OverflowError):
+        return  # a rule (or a DTSTART) dateutil cannot expand proves nothing
+
+    spec = next(iter(wanted.values()))
+    raise InvalidTaskDataError(
+        f"ausnahme_daten entry '{spec}' does not name an occurrence of this {noun}'s "
+        f"wiederholung, so it would cancel nothing. Pass the occurrence exactly as "
+        f"{reader} reported its '{field_name}' - a value without a timezone is "
+        f"read in the server's default timezone, not in the {noun}'s."
+    )
 
 
 def _check_rrule_anchor(todo, fields: TaskFields) -> None:
