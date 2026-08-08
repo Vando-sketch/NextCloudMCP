@@ -68,6 +68,7 @@ def build_server(
     `service`/`notes_service` can be injected for testing; default to a real
     CalDavService/NotesService built from `settings`.
     """
+    mapping.set_default_timezone(settings.default_timezone)
     allowed_redirect_domains = settings.oauth_allowed_redirect_domains
     if allowed_redirect_domains is None and not is_local_hostname(
         urlparse(settings.public_base_url).hostname
@@ -168,17 +169,33 @@ def build_server(
 
     @mcp.tool
     async def list_tasks(
-        list_name: str,
+        listen_namen: list[str] | None = None,
         nur_offene: bool = True,
         faellig_vor: str | None = None,
         faellig_nach: str | None = None,
         limit: int | None = None,
+        *,
+        prioritaet: str | None = None,
+        tag: str | None = None,
+        suchtext: str | None = None,
+        list_name: str | None = None,
     ) -> list[dict[str, Any]]:
-        """List tasks in a Nextcloud task list.
+        """List tasks across one, several, or all Nextcloud task lists.
 
         Args:
-            list_name: Display name of the task list.
-            nur_offene: If True (default), only return tasks that are not completed.
+            listen_namen: Optional list of task list display names to query;
+                None queries **every** task list on the account. That is one
+                request per list and returns every open task in the account
+                unless something narrows it - pass `listen_namen`, a due-date
+                bound, or `limit` unless you really want the lot.
+            nur_offene: If True (default), only return tasks that are not
+                completed - "not completed" here means STATUS is neither
+                COMPLETED nor CANCELLED (and no COMPLETED timestamp is set):
+                a task with status="abgesagt" is excluded just like one with
+                status="erledigt", it is not treated as "still open". This is
+                the caldav library's own three-way "pending" query
+                (`Calendar.todos(include_completed=...)`), not something this
+                server layers on top.
             faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
                 tasks due at any time on that day.
@@ -186,14 +203,48 @@ def build_server(
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
             limit: Optional maximum number of results to return (must be > 0).
+            prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
+            tag: Optional category/tag filter (exact match).
+            suchtext: Optional substring filter over title (titel) and notes
+                (notizen). Both it and `tag` ignore case and Unicode spelling
+                ("STRASSE" matches "Straße").
+            list_name: Deprecated alias for `listen_namen` (takes a single list display name).
+                Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
+                is an error.
 
-        If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
-        (due date) at all are excluded - they can't be judged "before"/"after"
-        anything. `limit` is applied after any due-date filtering.
+        An empty string is "no filter" for every filter that takes one -
+        prioritaet, tag, suchtext, faellig_vor and faellig_nach alike. (`limit`
+        still rejects 0: omit it rather than ask for zero results.) An empty
+        `listen_namen` list is an empty scope and returns nothing.
+
+        If `faellig_vor` and/or `faellig_nach` is given, tasks with no readable
+        faellig_datum (due date) are excluded - they can't be judged "before"/"after"
+        anything. Results are sorted by faellig_datum ascending (those tasks last),
+        then by titel. `limit` is applied last, after merging across lists.
+
+        Recurring tasks (wiederholung) and `faellig_vor`: a recurring task is
+        stored once but is due many times, so when `faellig_vor` is given it is
+        expanded into one row per occurrence due inside the window - that is the
+        only way "what is due next week" can include a weekly task started in
+        March. Without `faellig_vor` there is no window to expand into and the
+        series is returned as the single row it is stored as, wiederholung
+        intact. At most 100 occurrences per task are produced.
+
+        What an expanded row is, and is not: it is a read-only view of one date
+        in a series. `wiederholung_von` names its occurrence, `wiederholung` is
+        None, `serie_uid` is the stored task's uid, and its own `uid` is a
+        synthetic "<serie_uid>#<occurrence>" that update_task, complete_task,
+        delete_task and get_task all reject with an explanation. To act on the
+        series, pass `serie_uid` - but note that update_task changes every
+        occurrence and complete_task ends the whole series (it does not roll it
+        forward). To make the series skip one date, add that date to its
+        ausnahme_daten via update_task.
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
-            prioritaet, fortschritt_prozent, status, ort, url, tags, erinnerungen
+            prioritaet, fortschritt_prozent, status ("offen"/"in-arbeit"/
+            "erledigt"/"abgesagt" - see update_task's status parameter to set
+            it), ort, url, tags, erinnerungen
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
@@ -201,15 +252,35 @@ def build_server(
             and update_task leaves those untouched), notizen,
             uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            or None if the task doesn't recur; read-only - this server can't
-            create/edit recurrence).
+            or None if the task doesn't recur or is an expanded occurrence -
+            see create_task/update_task to set it), ausnahme_daten (the
+            occurrences the series skips, [] if none), wiederholung_von and
+            serie_uid (both None unless the row is an expanded occurrence, see
+            above), liste (the display name of the task list
+            containing the task), and liste_url (the collection URL of the task
+            list, which tells same-named lists apart, though no tool accepts a
+            URL to act on them - an ambiguous name still must be renamed).
         """
+        if list_name is not None and listen_namen is not None:
+            raise ToolError("list_name is the deprecated alias of listen_namen; pass only one")
+
+        target_list_names: list[str] | None
+        if list_name is not None:
+            target_list_names = [list_name]
+        elif isinstance(listen_namen, str):
+            target_list_names = [listen_namen]
+        else:
+            target_list_names = listen_namen
+
         return await _call(
             caldav_service.list_tasks,
-            list_name,
+            list_names=target_list_names,
             only_open=nur_offene,
             due_before=faellig_vor,
             due_after=faellig_nach,
+            prioritaet=prioritaet,
+            tag=tag,
+            suchtext=suchtext,
             limit=limit,
         )
 
@@ -222,9 +293,10 @@ def build_server(
             task_uid: UID of the task to fetch.
 
         Returns:
-            A task dict with the same shape as one entry from list_tasks: uid,
-            titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
-            status, ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
+            A task dict holding what one entry from list_tasks holds, minus its
+            "liste" key (the list is `list_name`, which you passed): uid, titel,
+            start_datum, faellig_datum, prioritaet, fortschritt_prozent, status,
+            ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
             wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
@@ -244,6 +316,8 @@ def build_server(
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -267,12 +341,23 @@ def build_server(
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
+            wiederholung: Optional recurrence rule as raw RFC 5545 RRULE text,
+                e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE. Requires the task to
+                have a start_datum or faellig_datum (in this same call) to
+                recur from - a task with neither is rejected.
+            ausnahme_daten: Optional ISO 8601 dates/datetimes of skipped
+                occurrences of a recurring task -> EXDATE. Each entry must be
+                the same value kind as the task's start_datum (date-only for an
+                all-day task, a full datetime otherwise) and must name an
+                occurrence the wiederholung actually produces; an entry that
+                would cancel nothing is rejected rather than stored.
 
         Date/time semantics for start_datum and faellig_datum: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
         (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
         datetime; a *naive* datetime (no UTC offset, e.g.
-        "2026-07-20T14:00:00") is interpreted as UTC. A datetime may instead
+        "2026-07-20T14:00:00") is interpreted in the server's default timezone
+        (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin). A datetime may instead
         be followed by a space and an IANA timezone name, e.g.
         "2026-07-20T14:00:00 Europe/Berlin" - the correct offset (standard or
         daylight time) is then resolved for that specific date, so callers
@@ -295,6 +380,8 @@ def build_server(
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -315,6 +402,9 @@ def build_server(
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
+        status: str | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
@@ -325,15 +415,34 @@ def build_server(
             (all other args): Same meaning and mapping as in create_task; a field
                 left as None is left unchanged on the existing task. Date/time
                 semantics also match create_task: a "YYYY-MM-DD" value creates an
-                all-day entry, and naive datetimes are interpreted as UTC.
+                all-day entry, and naive datetimes are interpreted in the
+                server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin).
+                wiederholung's anchor requirement (start_datum or faellig_datum)
+                is checked against the task's final state, so setting only
+                wiederholung succeeds as long as the task already has a
+                start_datum or faellig_datum from before this call.
+            status: Optional "offen" / "in-arbeit" / "erledigt" / "abgesagt" ->
+                STATUS. "erledigt" behaves like complete_task (also sets
+                PERCENT-COMPLETE=100 and the COMPLETED timestamp); "offen" is
+                the reopen path for a task completed by mistake (removes
+                COMPLETED and resets PERCENT-COMPLETE to 0); "in-arbeit" and
+                "abgesagt" only set STATUS. If this call also passes
+                fortschritt_prozent, that explicit value wins over whatever
+                percentage status would otherwise derive. An unknown value is
+                a speaking error naming the accepted labels; nothing is
+                written to the task in that case. Not accepted in
+                felder_leeren - set status="offen" to reopen a task instead.
             felder_leeren: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
                 Accepted values: "start_datum", "faellig_datum", "prioritaet",
                 "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
-                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe". "titel"
-                cannot be cleared. Naming an unknown field, or naming a field
-                here that is *also* given a new value in the same call, is an
-                error.
+                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe",
+                "wiederholung", "ausnahme_daten". Clearing "wiederholung" also
+                drops the task's ausnahme_daten (EXDATE) and any RDATE, which
+                cancel and add nothing once the series is gone. "titel" cannot
+                be cleared. Naming an unknown
+                field, or naming a field here that is *also* given a new
+                value in the same call, is an error.
 
         Returns:
             {"uid": task_uid} on success.
@@ -351,6 +460,9 @@ def build_server(
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
+            status=status,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)
@@ -359,6 +471,16 @@ def build_server(
     @mcp.tool
     async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
+
+        Warning: for a recurring task, completing it (unlike in the Nextcloud
+        UI) does not automatically roll the series forward to the next
+        occurrence; instead, it hard-ends the series by marking the entire
+        recurring task as done. To advance a series instead, use
+        `update_task` on its `faellig_datum`.
+
+        A task completed by mistake can be reopened afterwards with
+        update_task's status="offen" (removes COMPLETED, resets
+        PERCENT-COMPLETE to 0) - there is no separate "uncomplete" tool.
 
         Args:
             list_name: Display name of the task list containing the task.
@@ -383,6 +505,23 @@ def build_server(
         """
         await _call(caldav_service.delete_task, list_name, task_uid)
         return {"uid": task_uid}
+
+    @mcp.tool
+    async def move_task(list_name: str, task_uid: str, ziel_liste: str) -> dict[str, str]:
+        """Verschiebt eine Aufgabe in eine andere Aufgabenliste.
+
+        Args:
+            list_name: Anzeige-Name der Quell-Aufgabenliste.
+            task_uid: UID der zu verschiebenden Aufgabe.
+            ziel_liste: Anzeige-Name der Ziel-Aufgabenliste.
+
+        Returns:
+            {"uid": ..., "von": Quell-Liste, "nach": Ziel-Liste,
+            "methode": "MOVE" | "kopiert"}
+        """
+
+        res: dict[str, str] = await _call(caldav_service.move_task, list_name, task_uid, ziel_liste)
+        return res
 
     @mcp.tool
     async def list_calendars() -> list[dict[str, Any]]:
@@ -477,8 +616,9 @@ def build_server(
                 their individual occurrences within [von, bis] (both bounds
                 required); each occurrence carries wiederholung_von.
 
-        Naive datetimes (no UTC offset) are interpreted as UTC, like everywhere
-        else in this server.
+        Naive datetimes (no UTC offset) are interpreted in the server's default
+        timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin), like everywhere else
+        in this server.
 
         Returns:
             Event dicts sorted by start, each with keys: uid, titel, start,
@@ -547,7 +687,8 @@ def build_server(
             kalender_name: Display name of the target event calendar.
             titel: Event title (VEVENT SUMMARY).
             start: ISO 8601 start -> DTSTART. Exactly "YYYY-MM-DD" creates an
-                all-day event; naive datetimes are interpreted as UTC. A
+                all-day event; naive datetimes are interpreted in the server's default
+                timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin). A
                 datetime may instead be followed by a space and an IANA
                 timezone name (e.g. "2026-07-20T14:00:00 Europe/Berlin") to
                 have the correct standard/daylight offset resolved for that
@@ -695,6 +836,109 @@ def build_server(
         return {"uid": event_uid}
 
     @mcp.tool
+    async def update_events(
+        kalender_name: str,
+        event_uids: list[str],
+        titel: str | None = None,
+        start: str | None = None,
+        ende: str | None = None,
+        ort: str | None = None,
+        beschreibung: str | None = None,
+        tags: list[str] | None = None,
+        status: str | None = None,
+        sichtbarkeit: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
+        erinnerungen: list[str] | None = None,
+        url: str | None = None,
+        verknuepfte_aufgabe: str | None = None,
+        teilnehmer: list[dict[str, Any]] | None = None,
+        felder_leeren: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update multiple events in a calendar with the same field patch.
+
+        The patch is validated up front before any writes take place. If the patch
+        is invalid or empty, the call fails immediately and no events are changed.
+
+        Args:
+            kalender_name: Display name of the calendar containing the events.
+            event_uids: List of event UIDs to update. Max 200 UIDs per call.
+                Empty list is rejected. Duplicate UIDs are deduplicated while
+                preserving order.
+            (all other args): Same meaning and mapping as in update_event; fields left
+                as None are left unchanged. To clear fields, pass their names in
+                felder_leeren.
+
+        Returns:
+            Dict containing kalender_name, erfolgreich count, fehlgeschlagen count,
+            and ergebnisse list with per-UID statuses.
+        """
+        fields = event_mapping.EventFields(
+            titel=titel,
+            start=start,
+            ende=ende,
+            ort=ort,
+            beschreibung=beschreibung,
+            tags=tags,
+            status=status,
+            sichtbarkeit=sichtbarkeit,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
+            erinnerungen=erinnerungen,
+            url=url,
+            verknuepfte_aufgabe=verknuepfte_aufgabe,
+            teilnehmer=teilnehmer,
+            clear=tuple(felder_leeren) if felder_leeren else (),
+        )
+        res: dict[str, Any] = await _call(
+            caldav_service.update_events, kalender_name, event_uids, fields
+        )
+        return res
+
+    @mcp.tool
+    async def delete_events(kalender_name: str, event_uids: list[str]) -> dict[str, Any]:
+        """Permanently delete multiple events from a calendar.
+
+        WARNING: this is irreversible from this server's point of view, and a
+        batch multiplies the damage a wrong UID list does. Confirm the list
+        with the user before calling this.
+
+        A UID that does not exist is reported as a failed entry; the other
+        events are still deleted.
+
+        Args:
+            kalender_name: Display name of the calendar containing the events.
+            event_uids: List of event UIDs to delete. Max 200 UIDs per call.
+                Empty list is rejected. Duplicate UIDs are deduplicated while
+                preserving order.
+
+        Returns:
+            Dict containing kalender_name, erfolgreich count, fehlgeschlagen count,
+            and ergebnisse list with per-UID statuses.
+        """
+        res: dict[str, Any] = await _call(caldav_service.delete_events, kalender_name, event_uids)
+        return res
+
+    @mcp.tool
+    async def move_event(kalender_name: str, event_uid: str, ziel_kalender: str) -> dict[str, str]:
+        """Verschiebt einen Kalendereintrag in einen anderen Kalender.
+
+        Args:
+            kalender_name: Anzeige-Name des Quell-Kalenders.
+            event_uid: UID des zu verschiebenden Kalendereintrags.
+            ziel_kalender: Anzeige-Name des Ziel-Kalenders.
+
+        Returns:
+            {"uid": ..., "von": Quell-Kalender, "nach": Ziel-Kalender,
+            "methode": "MOVE" | "kopiert"}
+        """
+
+        res: dict[str, str] = await _call(
+            caldav_service.move_event, kalender_name, event_uid, ziel_kalender
+        )
+        return res
+
+    @mcp.tool
     async def respond_to_event(
         kalender_name: str,
         event_uid: str,
@@ -801,11 +1045,15 @@ def build_server(
         task_uid: str,
         kalender_name: str,
         start: str | None = None,
-        dauer_minuten: int = 60,
+        dauer_minuten: int | None = None,
+        ende: str | None = None,
+        beschreibung: str | None = None,
+        erinnerungen: list[str] | None = None,
+        sichtbarkeit: str | None = None,
     ) -> dict[str, str]:
         """Create a calendar event from an existing task (timeboxing) and link them.
 
-        Title, notes, location and tags are copied from the task. The event is
+        Title, location and tags are copied from the task. The event is
         linked back to the task via RELATED-TO (the "zeitblock" semantics of
         link_task_to_event); the task itself is not modified. The new event's
         verknuepfte_aufgaben will show this task with beziehung "zeitblock",
@@ -817,9 +1065,23 @@ def build_server(
             kalender_name: Display name of the calendar for the new event.
             start: Optional ISO 8601 start for the event; defaults to the
                 task's faellig_datum (due date). Fails if neither is given. A
-                date-only start produces a one-day all-day event.
-            dauer_minuten: Event duration in minutes (default 60); ignored for
-                all-day events.
+                date-only start produces a one-day all-day event, and then
+                ende (if given) must also be a date - see create_event's
+                start/ende consistency rule.
+            dauer_minuten: Event duration in minutes; ignored for all-day
+                events. Mutually exclusive with ende - giving both is an
+                error naming both. With neither given, the event runs 60
+                minutes.
+            ende: Optional explicit ISO 8601 end for the event, as an
+                alternative to dauer_minuten (giving both is an error).
+            beschreibung: Optional event description. Left as None (the
+                default), the task's notizen are copied as before; an
+                explicit "" sets an empty description instead of inheriting
+                notizen.
+            erinnerungen: Optional reminders for the new event, same format
+                as create_event's erinnerungen -> VALARM.
+            sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" for
+                the new event -> CLASS.
 
         Returns:
             {"uid": the new event's UID, "task_uid": task_uid}.
@@ -831,6 +1093,10 @@ def build_server(
             kalender_name,
             start,
             dauer_minuten,
+            ende,
+            beschreibung,
+            erinnerungen,
+            sichtbarkeit,
         )
         return {"uid": new_uid, "task_uid": task_uid}
 
@@ -844,7 +1110,8 @@ def build_server(
 
         Args:
             datum: The day as a date-only "YYYY-MM-DD" string. Day boundaries
-                are UTC, consistent with the naive-input-is-UTC rule used
+                are constructed in the server's default timezone (`MCP_DEFAULT_TIMEZONE`,
+                default Europe/Berlin), consistent with the naive-input rule used
                 everywhere else in this server.
             kalender_namen: Optional list of event calendars to include;
                 None means all.
@@ -854,11 +1121,51 @@ def build_server(
         Returns:
             {"datum": the day, "termine": event dicts (recurring events
             expanded to that day's occurrences, sorted by start), "aufgaben":
-            open tasks due that day, each with an added "liste" key}.
+            open tasks due that day, each with an added "liste" key}. Recurring
+            *tasks* are expanded to that day's occurrences too - see list_tasks
+            for what an expanded row can and cannot be used for (in short: read
+            it, act on its "serie_uid", never on its own "uid"). Every
+            entry in both lists also carries "quelle_url" - the CalDAV URL of
+            the exact calendar/task list it came from (Nextcloud doesn't
+            enforce unique display names, so "kalender"/"liste" alone can't
+            always tell two collections apart). Calendar/task-list listings
+            are cached for up to a minute, so a rename or deletion made in
+            the Nextcloud web UI can take that long to show up here.
         """
         return await _call(
             caldav_service.get_agenda,
             datum,
+            calendar_names=kalender_namen,
+            list_names=listen_namen,
+        )
+
+    @mcp.tool
+    async def list_tags(
+        kalender_namen: list[str] | None = None,
+        listen_namen: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Aggregierte Tags (CATEGORIES) und Häufigkeit über Sammlungen abrufen.
+
+        Liest alle VEVENT-Termine und VTODO-Aufgaben (inklusive erledigter Aufgaben)
+        aus den angegebenen Kalendern und Listen. Die Zusammenfassung erfolgt
+        case-insensitiv; als Tag-Name wird die häufigste Schreibweise gemeldet, bei
+        Gleichstand die alphabetisch erste - damit zwei gleiche Aufrufe nicht
+        unterschiedlich antworten, nur weil der Server anders sortiert hat.
+
+        HINWEIS: Dies ist eine aufwendige Operation, da die Sammlungen vollständig
+        ohne Zeitfenster ausgelesen werden; solange sie läuft, warten andere
+        Aufrufe auf dieselbe CalDAV-Verbindung.
+
+        Args:
+            kalender_namen: Liste von Kalendernamen. None = alle Kalender, [] = keine Kalender.
+            listen_namen: Liste von Aufgabenlisten-Namen. None = alle Listen, [] = keine Listen.
+
+        Returns:
+            Eine Liste von {"tag": Tag-Name, "anzahl": Anzahl} Dicts, sortiert nach
+            anzahl absteigend, bei Gleichstand alphabetisch nach tag.
+        """
+        return await _call(
+            caldav_service.list_tags,
             calendar_names=kalender_namen,
             list_names=listen_namen,
         )
@@ -873,7 +1180,8 @@ def build_server(
 
         Args:
             von: ISO 8601 start of the range. Naive datetimes are interpreted
-                as UTC; a date-only value means the start of that day.
+                in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin);
+                a date-only value means the start of that day.
             bis: ISO 8601 end of the range. A date-only value includes that
                 entire day.
             benutzer: Optional Nextcloud user id or email of another account
@@ -1151,6 +1459,23 @@ def build_server(
             Matching notes, same shape as list_notizen's return value (no content).
         """
         return await _call_notes(notes_svc.search_notes(suchtext, kategorie))
+
+    @mcp.tool
+    async def delete_notiz(notiz_id: int) -> dict[str, int]:
+        """Permanently delete a Nextcloud note.
+
+        WARNING: this is irreversible from this server's point of view -
+        this server cannot restore a deleted note. Confirm with the user
+        before calling this.
+
+        Args:
+            notiz_id: The note's id, as returned by list_notizen/search_notizen.
+
+        Returns:
+            {"id": notiz_id} on success.
+        """
+        await _call_notes(notes_svc.delete_note(notiz_id))
+        return {"id": notiz_id}
 
     return mcp
 

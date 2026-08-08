@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
@@ -34,15 +35,16 @@ def is_local_hostname(hostname: str | None) -> bool:
 class Settings:
     """Runtime configuration, always read from environment variables."""
 
+    # The effective CalDAV DAV root URL. When NEXTCLOUD_CALDAV_URL is unset or empty,
+    # from_env() derives it from NEXTCLOUD_BASE_URL (notes_base_url) as
+    # <base>/remote.php/dav/.
     caldav_url: str
     caldav_username: str
     caldav_password: str
-    # The Notes app's REST API (notes_client.py) lives under a plain Nextcloud
-    # web path (/index.php/apps/notes/api/v1/...), not under the CalDAV DAV
-    # root above - deriving one URL from the other by string-stripping would
-    # be fragile (custom reverse-proxy paths), so this is its own required
-    # setting. Reuses caldav_username/caldav_password for Basic Auth - same
-    # Nextcloud account, same app password.
+    # Base URL of the Nextcloud instance (no path). Required. Used for the Notes
+    # app REST API (notes_client.py) and as the base from which NEXTCLOUD_CALDAV_URL
+    # is derived when unset. Reuses caldav_username/caldav_password for Basic Auth -
+    # same Nextcloud account, same app password.
     notes_base_url: str
     public_base_url: str
     oauth_password: str | None
@@ -57,8 +59,19 @@ class Settings:
     # (D5) - PersonalAuthProvider previously minted refresh tokens with
     # expires_at=None (never expire); see personal_auth.py LOCAL PATCH 4.
     oauth_refresh_token_expiry_seconds: int = 180 * 24 * 60 * 60
+    default_timezone: str = "Europe/Berlin"
 
     def __post_init__(self) -> None:
+        # Validated here rather than where a datetime is first parsed: an
+        # unusable zone name must stop the server at startup, not surface as a
+        # failing tool call hours later.
+        try:
+            ZoneInfo(self.default_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ConfigError(
+                f"MCP_DEFAULT_TIMEZONE is not a known IANA timezone name: "
+                f"{self.default_timezone!r} (e.g. 'Europe/Berlin', or 'UTC')."
+            ) from exc
         if self.oauth_password == _PLACEHOLDER_OAUTH_PASSWORD:
             raise ConfigError(
                 "MCP_OAUTH_PASSWORD is set to the placeholder value from "
@@ -93,25 +106,16 @@ class Settings:
                 "docs/deployment.md."
             )
 
-        # A http:// NEXTCLOUD_CALDAV_URL sends the Nextcloud app password in
-        # cleartext Basic Auth on every request. Require https:// unless the URL
-        # genuinely points at a local address, or the operator has explicitly
-        # opted in via NEXTCLOUD_ALLOW_INSECURE_HTTP=1 (local testing only). (D8)
-        parsed_caldav = urlparse(self.caldav_url)
-        caldav_is_https = parsed_caldav.scheme == "https"
-        caldav_is_local = is_local_hostname(parsed_caldav.hostname)
-        if not caldav_is_https and not (caldav_is_local or self.allow_insecure_http):
-            raise ConfigError(
-                "NEXTCLOUD_CALDAV_URL must use https:// - a http:// URL sends the "
-                "Nextcloud app password in cleartext Basic Auth. Use an https:// URL, "
-                "or set NEXTCLOUD_ALLOW_INSECURE_HTTP=1 if NEXTCLOUD_CALDAV_URL "
-                "genuinely points at a local address (localhost/127.0.0.1/::1) for "
-                "testing."
-            )
-
-        # Same cleartext-credential risk as NEXTCLOUD_CALDAV_URL above, and the
-        # same escape hatch (NEXTCLOUD_ALLOW_INSECURE_HTTP is shared across both
-        # Nextcloud HTTP clients - one "I understand this is insecure" flag).
+        # A http:// URL sends the Nextcloud app password in cleartext Basic Auth
+        # on every request. Require https:// unless the URL genuinely points at a
+        # local address, or the operator has explicitly opted in via
+        # NEXTCLOUD_ALLOW_INSECURE_HTTP=1 (local testing only). (D8)
+        #
+        # NEXTCLOUD_BASE_URL is checked *first* because the CalDAV URL is derived
+        # from it when NEXTCLOUD_CALDAV_URL is unset: with the checks the other
+        # way round, a http:// base URL would be reported as a problem with
+        # NEXTCLOUD_CALDAV_URL - a variable that is then nowhere in the
+        # operator's environment.
         parsed_notes = urlparse(self.notes_base_url)
         notes_is_https = parsed_notes.scheme == "https"
         notes_is_local = is_local_hostname(parsed_notes.hostname)
@@ -120,6 +124,24 @@ class Settings:
                 "NEXTCLOUD_BASE_URL must use https:// - a http:// URL sends the "
                 "Nextcloud app password in cleartext Basic Auth. Use an https:// URL, "
                 "or set NEXTCLOUD_ALLOW_INSECURE_HTTP=1 if NEXTCLOUD_BASE_URL "
+                "genuinely points at a local address (localhost/127.0.0.1/::1) for "
+                "testing."
+            )
+
+        # Same cleartext-credential risk, same escape hatch
+        # (NEXTCLOUD_ALLOW_INSECURE_HTTP is shared across both Nextcloud HTTP
+        # clients - one "I understand this is insecure" flag). Reaching this
+        # check with a non-https URL means NEXTCLOUD_CALDAV_URL was set
+        # explicitly, since a derived one inherits the base URL's scheme, which
+        # the check above already accepted.
+        parsed_caldav = urlparse(self.caldav_url)
+        caldav_is_https = parsed_caldav.scheme == "https"
+        caldav_is_local = is_local_hostname(parsed_caldav.hostname)
+        if not caldav_is_https and not (caldav_is_local or self.allow_insecure_http):
+            raise ConfigError(
+                "NEXTCLOUD_CALDAV_URL must use https:// - a http:// URL sends the "
+                "Nextcloud app password in cleartext Basic Auth. Use an https:// URL, "
+                "or set NEXTCLOUD_ALLOW_INSECURE_HTTP=1 if NEXTCLOUD_CALDAV_URL "
                 "genuinely points at a local address (localhost/127.0.0.1/::1) for "
                 "testing."
             )
@@ -176,11 +198,34 @@ class Settings:
                 f"NEXTCLOUD_HTTP_TIMEOUT_SECONDS must be an integer, got: {timeout_raw!r}"
             ) from exc
 
+        default_timezone = default_timezone_from_env()
+
+        notes_base_url = require("NEXTCLOUD_BASE_URL")
+        # A base URL is an origin plus an optional install subdirectory - never
+        # a query or fragment. Both are plausible leftovers from copying the URL
+        # out of a browser address bar, and appending the DAV path to one
+        # produces a nonsense endpoint ("...?ref=1/remote.php/dav/") that still
+        # passes every scheme/host check, so the server would start and only
+        # fail on the first CalDAV request. Reject it here instead.
+        parsed_base = urlparse(notes_base_url)
+        if parsed_base.query or parsed_base.fragment:
+            raise ConfigError(
+                "NEXTCLOUD_BASE_URL must not contain a query string or fragment: "
+                f"{notes_base_url!r}. Use the plain instance URL, e.g. "
+                "'https://cloud.example.com' (or 'https://cloud.example.com/nextcloud' "
+                "for a subdirectory install)."
+            )
+
+        caldav_url_raw = os.environ.get("NEXTCLOUD_CALDAV_URL", "").strip()
+        caldav_url = (
+            caldav_url_raw if caldav_url_raw else f"{notes_base_url.rstrip('/')}/remote.php/dav/"
+        )
+
         return cls(
-            caldav_url=require("NEXTCLOUD_CALDAV_URL"),
+            caldav_url=caldav_url,
             caldav_username=require("NEXTCLOUD_USERNAME"),
             caldav_password=require("NEXTCLOUD_APP_PASSWORD"),
-            notes_base_url=require("NEXTCLOUD_BASE_URL"),
+            notes_base_url=notes_base_url,
             public_base_url=require("PUBLIC_BASE_URL"),
             oauth_password=os.environ.get("MCP_OAUTH_PASSWORD", "").strip() or None,
             oauth_state_dir=os.environ.get("MCP_OAUTH_STATE_DIR", ".oauth-state"),
@@ -191,4 +236,16 @@ class Settings:
             port=port,
             allow_insecure_http=allow_insecure_http,
             caldav_timeout_seconds=caldav_timeout_seconds,
+            default_timezone=default_timezone,
         )
+
+
+def default_timezone_from_env() -> str:
+    """`MCP_DEFAULT_TIMEZONE`, or the shipped default when it is unset/empty.
+
+    Split out of `Settings.from_env` so the admin CLI - which has no reason to
+    require a full server configuration just to print a token expiry - can
+    format its timestamps in the same zone the server uses.
+    """
+    configured = os.environ.get("MCP_DEFAULT_TIMEZONE", "").strip()
+    return configured or Settings.default_timezone

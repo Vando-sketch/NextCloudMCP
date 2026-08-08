@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import logging
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from icalendar import Calendar, Todo
@@ -218,14 +220,16 @@ def test_extract_alarms_round_trip_absolute():
         erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
     )
     parsed = mapping.parse_vtodo(todo)
-    # Note: "...Z" input reads back as "+00:00", and both spellings name the
-    # same instant, so they collapse into one alarm.
-    assert parsed["erinnerungen"] == ["2026-08-07T09:00:00+00:00"]
+    # Both spellings name the same instant, so `apply_alarms` collapses them
+    # into one alarm; reading it back formats it in the server's default
+    # timezone (Europe/Berlin, +02:00 in August), the same convention
+    # DTSTART/DUE follow.
+    assert parsed["erinnerungen"] == ["2026-08-07T11:00:00+02:00"]
 
 
 def test_extract_alarms_preserves_order():
     todo = _new_todo()
-    reminders = ["-P1D", "-PT30M", "2026-08-07T09:00:00+00:00"]
+    reminders = ["-P1D", "-PT30M", "2026-08-07T11:00:00+02:00"]
     _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=reminders)
     parsed = mapping.parse_vtodo(todo)
     assert parsed["erinnerungen"] == reminders
@@ -238,7 +242,26 @@ def test_extract_alarms_no_valarm_returns_empty():
     assert parsed["erinnerungen"] == []
 
 
-def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
+def test_extract_alarms_skips_valarm_without_trigger_or_invalid_trigger():
+    from icalendar import Alarm
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
+
+    alarm_without_trigger = Alarm()
+    alarm_without_trigger.add("action", "DISPLAY")
+    todo.add_component(alarm_without_trigger)
+
+    alarm_with_invalid_trigger = Alarm()
+    alarm_with_invalid_trigger.add("action", "DISPLAY")
+    alarm_with_invalid_trigger["trigger"] = "unsupported-trigger"
+    todo.add_component(alarm_with_invalid_trigger)
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_extract_alarms_absolute_with_offset_formats_in_default_timezone():
     todo = _new_todo()
     _apply(
         todo,
@@ -247,7 +270,7 @@ def test_extract_alarms_absolute_with_offset_normalizes_to_utc():
         erinnerungen=["2026-07-19T11:00:00+02:00"],
     )
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T09:00:00+00:00"]
+    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def _todo_with_tzid_trigger(tzid: str) -> Todo:
@@ -274,11 +297,12 @@ END:VTODO
 
 
 def test_extract_alarms_resolves_foreign_tzid_trigger():
-    """A TRIGGER;TZID=... written by another client is not UTC.
+    """A TRIGGER;TZID=... written by another client is resolved, not read as UTC.
 
     Reading it as UTC would shift the reminder by the zone's offset (two hours
-    for Berlin in July). The value keeps its own zone on the way out, like
-    DTSTART/DUE do.
+    for Berlin in July). The resolved instant is then formatted in the
+    server's default timezone on the way out, the same convention DTSTART/DUE
+    follow.
     """
     todo = _todo_with_tzid_trigger("Europe/Berlin")
     assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
@@ -290,6 +314,31 @@ def test_extract_alarms_resolves_windows_tzid_trigger():
     assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
+def test_extract_alarms_unknown_tzid_via_manual_alarm_is_skipped():
+    """A TZID this server cannot resolve is not silently read as UTC.
+
+    Guessing a zone would shift the reminder by hours, so it is left out of
+    `erinnerungen`, and the VALARM itself is left untouched - same behaviour
+    as `test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm`
+    below, exercised here through an alarm built directly with `icalendar`
+    rather than parsed from ICS text.
+    """
+    from icalendar import Alarm
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+
+    alarm = Alarm()
+    alarm.add("action", "DISPLAY")
+    alarm.add("description", "Reminder")
+    alarm.add("trigger", datetime(2026, 7, 19, 11, 0, 0), parameters={"TZID": "Mars/Olympus"})
+    todo.add_component(alarm)
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["erinnerungen"] == []
+    assert any(c.name == "VALARM" for c in todo.subcomponents)
+
+
 def test_extract_alarms_resolves_prefixed_tzid_trigger():
     """Evolution and older clients prefix the IANA name with a namespace path."""
     todo = _todo_with_tzid_trigger("/freeassociation.sourceforge.net/Europe/Berlin")
@@ -297,15 +346,24 @@ def test_extract_alarms_resolves_prefixed_tzid_trigger():
 
 
 def test_extract_alarms_resolves_prefixed_three_segment_tzid_trigger():
-    """Some IANA names have three segments, so two trailing segments is not enough."""
+    """Some IANA names have three segments, so two trailing segments is not enough.
+
+    11:00 America/Indiana/Knox (-05:00 in July) is 18:00 in the server's
+    default timezone (Europe/Berlin, +02:00 in July) - the value is resolved
+    in its stored zone, then rendered in the default one on the way out.
+    """
     todo = _todo_with_tzid_trigger("/softwarestudio.org/Olson_20011030_5/America/Indiana/Knox")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00-05:00"]
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T18:00:00+02:00"]
 
 
 def test_extract_alarms_naive_trigger_without_tzid_is_utc():
-    """RFC 5545 requires absolute triggers in UTC, so an unqualified one is taken at its word."""
+    """RFC 5545 requires absolute triggers in UTC, so an unqualified one is taken at its word.
+
+    11:00 UTC reads back as 13:00 in the server's default timezone
+    (Europe/Berlin, +02:00 in July).
+    """
     todo = _todo_with_tzid_trigger("")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+00:00"]
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T13:00:00+02:00"]
 
 
 def test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm():
@@ -580,6 +638,146 @@ def test_mark_completed_sets_status_and_percent():
     assert "completed" in todo
 
 
+# --- Task status (update_task's status parameter) ---
+
+
+@pytest.mark.parametrize(
+    ("label", "ical_value"),
+    [
+        ("offen", "NEEDS-ACTION"),
+        ("in-arbeit", "IN-PROCESS"),
+        ("erledigt", "COMPLETED"),
+        ("abgesagt", "CANCELLED"),
+    ],
+)
+def test_task_status_label_to_ical(label, ical_value):
+    assert mapping.task_status_label_to_ical(label) == ical_value
+
+
+def test_task_status_label_to_ical_unknown_raises():
+    with pytest.raises(InvalidTaskDataError, match="Unknown status"):
+        mapping.task_status_label_to_ical("fertig")
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["offen", "in-arbeit", "erledigt", "abgesagt"],
+)
+def test_apply_task_fields_status_round_trips(label):
+    """Every status label round-trips through apply_task_fields/parse_vtodo."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", status=label)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+
+
+def test_apply_task_fields_status_erledigt_sets_percent_and_completed():
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "erledigt"
+    assert parsed["fortschritt_prozent"] == 100
+    assert "completed" in todo
+
+
+def test_apply_task_fields_status_offen_reopens_completed_task():
+    """status="offen" is the reopen path: removes COMPLETED, resets percent to 0."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt")
+    assert "completed" in todo
+
+    _apply(todo, status="offen")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+    assert parsed["fortschritt_prozent"] == 0
+    assert "completed" not in todo
+
+
+@pytest.mark.parametrize("label", ["in-arbeit", "abgesagt"])
+def test_apply_task_fields_status_in_arbeit_and_abgesagt_keep_progress(label):
+    """in-arbeit/abgesagt keep whatever progress was recorded."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", fortschritt_prozent=42)
+    _apply(todo, status=label)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+    assert parsed["fortschritt_prozent"] == 42
+    assert "completed" not in todo
+
+
+@pytest.mark.parametrize("label", ["in-arbeit", "abgesagt", "offen"])
+def test_apply_task_fields_leaving_erledigt_drops_completed_timestamp(label):
+    """No non-completed status may keep a COMPLETED timestamp around.
+
+    caldav's pending filter (`todos(include_completed=False)`, what nur_offene
+    and get_agenda run on) drops any VTODO that merely *has* a COMPLETED
+    property, whatever its STATUS says - so a task moved off "erledigt" while
+    keeping the timestamp would report its new status and still be invisible
+    in every open-task listing.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt")
+    assert "completed" in todo
+
+    _apply(todo, status=label)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+    assert "completed" not in todo
+
+
+def test_apply_task_fields_explicit_fortschritt_prozent_wins_over_status():
+    """status="erledigt" would derive 100%, but an explicit fortschritt_prozent
+    in the same call must win (write-ordering requirement)."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt", fortschritt_prozent=55)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "erledigt"
+    assert parsed["fortschritt_prozent"] == 55
+
+    # And the reverse: status="offen" would derive 0%, explicit wins here too.
+    _apply(todo, status="offen", fortschritt_prozent=10)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+    assert parsed["fortschritt_prozent"] == 10
+
+
+def test_apply_task_fields_unknown_status_raises_and_does_not_write():
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+    with pytest.raises(InvalidTaskDataError, match="Unknown status"):
+        _apply(todo, status="fertig")
+    # Nothing about the task changed - not even STATUS was written.
+    assert "status" not in todo
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+    assert parsed["faellig_datum"] == "2026-07-20"
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "label"),
+    [
+        ("NEEDS-ACTION", "offen"),
+        ("IN-PROCESS", "in-arbeit"),
+        ("COMPLETED", "erledigt"),
+        ("CANCELLED", "abgesagt"),
+        ("SOME-OTHER-STATUS", "offen"),
+    ],
+)
+def test_parse_vtodo_status_values(raw_status, label):
+    todo = _new_todo()
+    todo.add("summary", "Task")
+    todo.add("status", raw_status)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+
+
+def test_parse_vtodo_missing_status_reads_as_offen():
+    todo = _new_todo()
+    todo.add("summary", "Task")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+
+
 # --- All-day dates (B1) ---
 
 
@@ -624,11 +822,235 @@ def test_non_canonical_date_strings_are_not_treated_as_all_day(text):
 # --- Naive datetimes are UTC (B2) ---
 
 
-def test_naive_datetime_input_is_interpreted_as_utc():
+def test_naive_datetime_input_is_interpreted_in_default_timezone():
+    # July date (summer): Europe/Berlin is +02:00 -> UTC 12:00
+    summer = mapping.parse_datetime_input("2026-07-20T14:00:00")
+    assert isinstance(summer, datetime)
+    assert summer.tzinfo == timezone.utc
+    assert summer == datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+
+    # January date (winter): Europe/Berlin is +01:00 -> UTC 13:00
+    winter = mapping.parse_datetime_input("2026-01-20T14:00:00")
+    assert isinstance(winter, datetime)
+    assert winter.tzinfo == timezone.utc
+    assert winter == datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)
+
+    # keep_zone=True attaches default ZoneInfo
+    summer_keep = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(summer_keep, datetime)
+    assert summer_keep.tzinfo == ZoneInfo("Europe/Berlin")
+    assert summer_keep == datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+
+
+def test_set_default_timezone_utc_reproduces_old_expectations():
+    mapping.set_default_timezone("UTC")
     result = mapping.parse_datetime_input("2026-07-20T14:00:00")
-    assert isinstance(result, datetime)  # narrows away the `date` half of the return type
+    assert isinstance(result, datetime)
     assert result.tzinfo == timezone.utc
     assert result.hour == 14
+
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T14:00:00")
+    res = mapping.parse_vtodo(todo)
+    assert res["faellig_datum"] == "2026-07-20T14:00:00+00:00"
+
+
+@pytest.mark.parametrize("zone_name", ["UTC", "Etc/UTC", "Etc/GMT", "Universal"])
+def test_utc_default_timezone_is_kept_as_plain_utc(zone_name):
+    """A zone that *is* UTC never becomes a TZID reference.
+
+    `keep_zone=True` normally attaches the default zone as a `ZoneInfo`, which
+    `icalendar` writes as `DTSTART;TZID=<key>:...`. For UTC that would be a
+    TZID reference to a VTIMEZONE with a single zero-offset observance instead
+    of the plain `...Z` form every client understands - and
+    `MCP_DEFAULT_TIMEZONE=UTC` is documented to restore exactly the old,
+    pre-default-timezone wire format.
+    """
+    mapping.set_default_timezone(zone_name)
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result.tzinfo is timezone.utc
+    assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+
+
+def test_default_timezone_set_to_a_plain_tzinfo_is_used_as_is():
+    """`set_default_timezone` also takes a `tzinfo` - the tzdata-less fallback path."""
+    mapping.set_default_timezone(timezone.utc)
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+    assert mapping.local_midnight(date(2026, 7, 20)).isoformat() == "2026-07-20T00:00:00+00:00"
+
+
+def test_explicit_utc_zone_name_input_is_kept_as_plain_utc():
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00 UTC", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result.tzinfo is timezone.utc
+
+
+def test_missing_tzdata_falls_back_to_utc_instead_of_crashing_on_import(monkeypatch, caplog):
+    """The shipped default zone is resolved defensively at import time.
+
+    A Python install without the IANA database (a slim container, Windows
+    without `tzdata`) makes `ZoneInfo("Europe/Berlin")` raise at *import*, so
+    every tool would fail with an unhandled `ZoneInfoNotFoundError` traceback
+    from the module header - before the config layer gets to report anything.
+    """
+
+    def _no_tzdata(name):
+        raise ZoneInfoNotFoundError(f"No time zone found with key {name}")
+
+    monkeypatch.setattr(mapping, "ZoneInfo", _no_tzdata)
+    with caplog.at_level(logging.WARNING, logger="nextcloud_task_mcp.mapping"):
+        assert mapping._initial_default_timezone() is timezone.utc
+    assert "MCP_DEFAULT_TIMEZONE" in caplog.text
+
+
+def test_naive_datetime_round_trip():
+    """Write a naive datetime, read it back: same wall-clock time with local offset."""
+    todo = _new_todo()
+    _apply(todo, titel="Roundtrip", faellig_datum="2026-07-20T14:00:00")
+    res = mapping.parse_vtodo(todo)
+    assert res["faellig_datum"] == "2026-07-20T14:00:00+02:00"
+
+
+def test_naive_datetime_round_trip_in_winter():
+    """The output offset is resolved per date, not frozen at the summer one."""
+    todo = _new_todo()
+    _apply(todo, titel="Roundtrip", faellig_datum="2026-01-20T14:00:00")
+    res = mapping.parse_vtodo(todo)
+    assert res["faellig_datum"] == "2026-01-20T14:00:00+01:00"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        (date(2026, 7, 20), "2026-07-20"),
+        (datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc), "2026-07-20T14:00:00+02:00"),
+        (datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc), "2026-01-20T14:00:00+01:00"),
+        # A floating (naive) value from a foreign client is already local.
+        (datetime(2026, 7, 20, 14, 0), "2026-07-20T14:00:00+02:00"),
+        # An explicit foreign zone is converted, not passed through.
+        (
+            datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("America/New_York")),
+            "2026-07-20T20:00:00+02:00",
+        ),
+    ],
+)
+def test_format_datetime_output(value, expected):
+    assert mapping.format_datetime_output(value) == expected
+
+
+def test_due_filter_bounds_follow_dst_transition():
+    """The spring-forward day is 23 hours long, and the bounds must know it.
+
+    Local midnight on 2026-03-29 is 23:00 UTC the previous day (CET, +01:00);
+    local end-of-day is already CEST (+02:00). A frozen offset would place one
+    of the two bounds an hour off and silently drop or add tasks.
+    """
+    start = mapping._to_comparable_datetime("2026-03-29", end_of_day=False)
+    end = mapping._to_comparable_datetime("2026-03-29", end_of_day=True)
+    assert start.utcoffset() == timedelta(hours=1)
+    assert end.utcoffset() == timedelta(hours=2)
+    # Compared as instants (subtracting two datetimes sharing one ZoneInfo
+    # would compare wall clocks and hide the missing hour).
+    elapsed = end.astimezone(timezone.utc) - start.astimezone(timezone.utc)
+    assert elapsed == timedelta(hours=22, minutes=59, seconds=59)
+
+
+def test_local_times_inside_a_dst_gap_or_overlap_resolve_by_fold():
+    """Wall-clock times that don't exist, or exist twice, still resolve.
+
+    On 2026-03-29 Europe/Berlin jumps 02:00 -> 03:00, so "02:30" never
+    happens; on 2026-10-25 it falls back 03:00 -> 02:00, so "02:30" happens
+    twice. `zoneinfo` resolves both with the pre-transition offset
+    (`fold=0`) rather than raising - pinned here because "the server refuses
+    a timestamp twice a year" would be a nasty surprise in production.
+    """
+    nonexistent = mapping.parse_datetime_input("2026-03-29T02:30:00")
+    assert isinstance(nonexistent, datetime)
+    assert nonexistent == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+
+    ambiguous = mapping.parse_datetime_input("2026-10-25T02:30:00")
+    assert isinstance(ambiguous, datetime)
+    assert ambiguous == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+
+def test_gap_wall_time_is_settled_before_it_is_stored_with_its_zone():
+    """A wall time inside the spring-forward gap is moved to a real one.
+
+    With the zone kept (`keep_zone=True`, what events do), "02:30" on
+    2026-03-29 would otherwise be written verbatim as
+    `DTSTART;TZID=Europe/Berlin:20260329T023000` - a wall clock reading that
+    never happens, which every client is free to resolve its own way. The
+    instant is unchanged (01:30 UTC, `fold=0`), only its spelling in the zone
+    is made a real one.
+    """
+    settled = mapping.parse_datetime_input("2026-03-29T02:30:00", keep_zone=True)
+    assert isinstance(settled, datetime)
+    assert settled.astimezone(timezone.utc) == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+    assert (settled.hour, settled.minute) == (3, 30)
+    assert settled.utcoffset() == timedelta(hours=2)
+
+    named = mapping.parse_datetime_input("2026-03-29T02:30:00 Europe/Berlin", keep_zone=True)
+    assert isinstance(named, datetime)
+    assert (named.hour, named.minute) == (3, 30)
+
+
+def test_ambiguous_wall_time_keeps_its_spelling_when_the_zone_is_kept():
+    """The autumn overlap needs no rescue: "02:30" happens, just twice.
+
+    `fold=0` (the earlier of the two instants) is the documented choice; the
+    gap handling above must not rewrite this one to 03:30.
+    """
+    kept = mapping.parse_datetime_input("2026-10-25T02:30:00", keep_zone=True)
+    assert isinstance(kept, datetime)
+    assert (kept.hour, kept.minute) == (2, 30)
+    # A wall time inside a fold compares unequal to any other zone's datetime
+    # (PEP 495), so the instant is checked after an explicit conversion.
+    assert kept.astimezone(timezone.utc) == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+
+def test_local_midnight_in_a_zone_whose_day_starts_an_hour_late():
+    """Some zones jump at 00:00, so that day has no midnight at all.
+
+    America/Santiago goes 00:00 -> 01:00 on 2026-09-06. `zoneinfo` resolves
+    the missing reading to the right instant either way (the transition itself
+    *is* the day's first moment), but a bound that is printed - `get_free_busy`
+    reports the window it used - must not read as a time that never struck.
+    """
+    mapping.set_default_timezone("America/Santiago")
+    start = mapping.local_midnight(date(2026, 9, 6))
+
+    assert start.astimezone(timezone.utc) == datetime(2026, 9, 6, 4, 0, tzinfo=timezone.utc)
+    assert start.isoformat() == "2026-09-06T01:00:00-03:00"
+
+
+def test_local_midnight_on_an_ordinary_day_is_midnight():
+    assert mapping.local_midnight(date(2026, 7, 20)).isoformat() == "2026-07-20T00:00:00+02:00"
+
+
+def test_due_filter_bounds_are_real_readings_in_a_midnight_transition_zone():
+    """The same rule for the end-of-day bound `faellig_vor` builds."""
+    mapping.set_default_timezone("America/Santiago")
+    start = mapping._to_comparable_datetime("2026-09-06", end_of_day=False)
+    end = mapping._to_comparable_datetime("2026-09-06", end_of_day=True)
+
+    assert start.isoformat() == "2026-09-06T01:00:00-03:00"
+    assert end.isoformat() == "2026-09-06T23:59:59-03:00"
+    assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(
+        hours=22, minutes=59, seconds=59
+    )
+
+
+def test_absolute_reminder_is_written_to_the_wire_in_utc():
+    """RFC 5545 demands a UTC absolute TRIGGER - only the *display* is local."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["2026-07-19T11:00:00"])
+    ical_text = todo.to_ical().decode()
+    assert "TRIGGER;VALUE=DATE-TIME:20260719T090000Z" in ical_text
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_named_timezone_input_resolves_dst_offset_for_the_date():
@@ -657,17 +1079,8 @@ def test_unknown_timezone_name_falls_back_to_plain_datetime_error():
 
 
 def test_offset_datetime_input_is_normalized_to_utc():
-    """An explicit offset must survive as the same instant, but stored in UTC.
-
-    `icalendar` serializes a fixed-offset tzinfo (e.g. "+02:00") as
-    DTSTART;TZID="UTC+02:00":... without ever writing the matching
-    VTIMEZONE component that TZID requires - CalDAV clients that don't
-    recognize it fall back to their local zone, shifting the moment (and
-    often the calendar day). Normalizing to UTC here means it's written
-    with a plain "Z" suffix instead, which every client understands.
-    """
     result = mapping.parse_datetime_input("2026-07-20T14:00:00+02:00")
-    assert isinstance(result, datetime)  # narrows away the `date` half of the return type
+    assert isinstance(result, datetime)
     assert result.tzinfo == timezone.utc
     assert result == datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 
@@ -861,7 +1274,7 @@ def test_extract_parent_uid_ignores_non_parent_reltype():
     assert parsed["uebergeordnete_uid"] is None
 
 
-# --- Recurrence surfaced read-only (C5) ---
+# --- Recurrence (RRULE), now writable ---
 
 
 def test_parse_vtodo_surfaces_rrule_as_raw_text():
@@ -877,7 +1290,670 @@ def test_parse_vtodo_wiederholung_is_none_when_not_recurring():
     assert parsed["wiederholung"] is None
 
 
-# --- list_tasks filtering (C4) ---
+def test_wiederholung_round_trip():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_wiederholung_can_be_changed():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    _apply(todo, wiederholung="FREQ=WEEKLY;BYDAY=TU")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=TU"
+
+
+def test_clear_removes_wiederholung():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    mapping.apply_task_fields(todo, TaskFields(clear=("wiederholung",)))
+    assert mapping.parse_vtodo(todo)["wiederholung"] is None
+
+
+def test_invalid_wiederholung_rejected():
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="RRULE"):
+        _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="kaputt")
+
+
+def test_wiederholung_empty_result_is_invalid():
+    # vRecur.from_ical silently skips parts without '=' instead of raising, so
+    # completely unparseable input yields an empty rule - must still be
+    # treated as invalid, not silently written as a no-op RRULE.
+    with pytest.raises(InvalidTaskDataError, match="RRULE"):
+        mapping.parse_rrule_text("not-a-valid-rrule")
+
+
+def test_wiederholung_semantic_validations():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20")
+
+    # Missing FREQ
+    with pytest.raises(InvalidTaskDataError, match="FREQ"):
+        _apply(todo, wiederholung="INTERVAL=2")
+
+    # Duplicate parts
+    with pytest.raises(InvalidTaskDataError, match="Duplicate"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;FREQ=DAILY")
+
+    # Values
+    with pytest.raises(InvalidTaskDataError, match="INTERVAL must be >= 1"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;INTERVAL=0")
+    with pytest.raises(InvalidTaskDataError, match="COUNT must be >= 1"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;COUNT=0")
+    with pytest.raises(InvalidTaskDataError, match="BYMONTHDAY cannot be 0"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;BYMONTHDAY=0")
+    with pytest.raises(InvalidTaskDataError, match="BYMONTH must be between 1 and 12"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;BYMONTH=13")
+    with pytest.raises(InvalidTaskDataError, match="BYHOUR must be between 0 and 23"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;BYHOUR=99")
+
+    # UNTIL and COUNT together
+    with pytest.raises(InvalidTaskDataError, match="UNTIL and COUNT"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;UNTIL=20261231T000000Z;COUNT=5")
+
+    # Unknown parts
+    with pytest.raises(InvalidTaskDataError, match="Unknown"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;UNKNOWN=1")
+
+    # UNTIL before anchor
+    with pytest.raises(InvalidTaskDataError, match="UNTIL cannot be before the start date"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;UNTIL=20260101T000000Z")
+
+
+def test_wiederholung_strips_rrule_prefix():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="RRULE:FREQ=DAILY")
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+
+
+def test_extract_rrule_handles_duplicate_rrule_property():
+    """A duplicated RRULE property from import_ics must not crash reads."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\nUID:task-1\nSUMMARY:Task\nRRULE:FREQ=DAILY\nRRULE:FREQ=WEEKLY\nEND:VTODO\n"
+    )
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+
+
+def test_wiederholung_without_start_rejected():
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        _apply(todo, titel="T", wiederholung="FREQ=DAILY")
+
+
+def test_wiederholung_rejected_with_only_faellig_datum_as_anchor():
+    """5.4: RFC 5545 builds the recurrence-set from DTSTART, not DUE - a task
+    with only a faellig_datum (DUE) is not a resolvable anchor for a
+    recurrence, even though DUE alone is a perfectly valid non-recurring
+    task. This must be rejected the same way as no anchor at all."""
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=DAILY")
+
+
+def test_wiederholung_succeeds_when_anchor_already_exists_on_the_task():
+    """The anchor check runs against the component's final state (mirrors
+    event_mapping._check_start_end_consistency), not just this call's fields -
+    so a call that sets only wiederholung succeeds when start_datum was
+    already set on the task by an earlier call."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20")
+    _apply(todo, wiederholung="FREQ=WEEKLY")
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY"
+
+
+def test_wiederholung_rejected_when_call_clears_the_only_anchor():
+    """Setting wiederholung while clearing the task's only anchor in the same
+    call must still be rejected - the final-state check catches this too."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20")
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        mapping.apply_task_fields(
+            todo, TaskFields(wiederholung="FREQ=WEEKLY", clear=("start_datum",))
+        )
+
+
+def test_clearing_the_only_anchor_is_rejected_for_an_already_recurring_task():
+    """The RRULE need not be part of the call to be orphaned by it.
+
+    Clearing a recurring task's only anchor leaves an RRULE nothing can be
+    resolved against, whether the recurrence arrived in this call or an
+    earlier one - the check looks at the component, never at the fields.
+    Narrowing it to "only validate when wiederholung is being set" would slip
+    past this and silently produce an unresolvable series.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=WEEKLY")
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        mapping.apply_task_fields(todo, TaskFields(clear=("start_datum",)))
+
+
+def test_anchorless_recurring_task_can_be_edited_without_touching_anchor():
+    """If an invalid task already has an RRULE but no anchor (e.g. from
+    another client via import), edits to other fields must succeed.
+
+    We only reject if the call itself touched the anchor or the rrule.
+    """
+    todo = _new_todo()
+    # Force it into an anchorless state like a foreign client might
+    mapping.apply_task_fields(
+        todo, TaskFields(titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    )
+    del todo["dtstart"]
+    # Now edit only the title
+    mapping.apply_task_fields(todo, TaskFields(titel="Renamed"))
+    assert mapping.parse_vtodo(todo)["titel"] == "Renamed"
+
+
+def test_wiederholung_is_normalized_to_canonical_rrule_form():
+    """Non-canonical input reads back canonical, not verbatim.
+
+    `icalendar`'s vRecur uppercases part names and emits them in its own
+    order, so a caller that sends lowercase or reordered parts gets an
+    equivalent - not identical - string back. Pinned so the round-trip
+    guarantee is understood as semantic, not byte-for-byte.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="byday=mo;freq=weekly")
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_mark_completed_leaves_wiederholung_intact():
+    """Pins this server's own observed behaviour: complete_task only sets
+    STATUS/COMPLETED/PERCENT-COMPLETE, it does not touch RRULE or roll the
+    series forward to a next occurrence."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    mapping.mark_completed(todo)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["wiederholung"] == "FREQ=DAILY"
+    assert parsed["status"] == "erledigt"
+
+
+# --- zone anchoring for tasks (5.7) ---
+
+
+def test_naive_task_datetime_is_written_in_the_default_zone_not_collapsed_to_utc():
+    """A naive start/due means "this wall clock in the server's zone", and is
+    stored that way (DTSTART;TZID=Europe/Berlin) rather than as the equivalent
+    UTC instant. The instant is identical either way - what differs is whether
+    a recurrence anchored on it survives a DST transition (5.7)."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00")
+
+    assert todo.get("dtstart").dt.tzinfo == ZoneInfo("Europe/Berlin")
+    assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in todo.to_ical().decode()
+
+
+def test_task_due_is_anchored_to_the_zone_dtstart_already_uses():
+    """DTSTART and DUE must not end up in two different zones: they would be
+    the same instant apart today and an hour apart after the next transition in
+    either zone, silently changing the task's window (the VTODO half of 2.5)."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00 America/New_York")
+    # A bare offset is what parse_vtodo hands back, i.e. what a read/write
+    # round trip through get_task -> update_task feeds in.
+    _apply(todo, faellig_datum="2026-07-20T17:00:00+02:00")
+
+    assert todo.get("due").dt.tzinfo == ZoneInfo("America/New_York")
+    assert todo.get("due").dt.tzinfo == todo.get("dtstart").dt.tzinfo
+    # Same instant, only respelled.
+    assert todo.get("due").dt == datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+
+
+def test_naming_a_zone_explicitly_re_anchors_the_task():
+    """Naming an IANA zone is how a caller *moves* a task to one - it wins over
+    the zone the component already has, unlike a bare offset."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00 America/New_York")
+    _apply(todo, start_datum="2026-07-20T09:00:00 Europe/Berlin")
+
+    assert todo.get("dtstart").dt.tzinfo == ZoneInfo("Europe/Berlin")
+
+
+def test_recurring_task_round_trip_keeps_its_wall_clock_across_dst():
+    """The reason 5.7 matters. get_task reports DTSTART as a bare offset;
+    feeding that straight back into update_task (which is what an edit of any
+    other field alongside it looks like) must leave the series anchored to
+    Europe/Berlin, so it still means "09:00 local" after the autumn transition.
+    Collapsed to a UTC instant it would mean 08:00 local from November on.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-09-01T09:00:00", wiederholung="FREQ=WEEKLY")
+
+    # get_task -> update_task: the stored task already has its DTSTART, and the
+    # value handed back in carries only a numeric offset.
+    round_tripped = mapping.parse_vtodo(todo)["start_datum"]
+    assert round_tripped == "2026-09-01T09:00:00+02:00"
+    _apply(todo, titel="T (bearbeitet)", start_datum=round_tripped)
+
+    anchor = todo.get("dtstart").dt
+    assert anchor.tzinfo == ZoneInfo("Europe/Berlin")
+    later = anchor + timedelta(weeks=9)  # 2026-11-03, past the 2026-10-25 switch
+    assert later.astimezone(ZoneInfo("Europe/Berlin")).hour == 9
+    assert later.utcoffset() == timedelta(hours=1)
+
+
+# --- ausnahme_daten / EXDATE for tasks (5.8) ---
+
+
+def test_ausnahme_daten_writes_exdate_and_reads_back():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Muell rausbringen",
+        start_datum="2026-07-20",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22", "2026-07-24"],
+    )
+
+    assert "EXDATE" in todo
+    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == ["2026-07-22", "2026-07-24"]
+
+
+def test_ausnahme_daten_replaces_the_whole_exdate_set():
+    """Set, not append - same as the event side."""
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="T",
+        start_datum="2026-07-20",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22"],
+    )
+    _apply(todo, ausnahme_daten=["2026-07-24"])
+
+    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == ["2026-07-24"]
+
+
+def test_ausnahme_daten_of_the_wrong_value_kind_is_rejected():
+    """An all-day series takes date-only exceptions; a datetime entry would be
+    written under one EXDATE with a single TZID next to a DATE value (RFC 5545
+    3.8.5.1 / 3.2.19) and would name no occurrence anyway."""
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="ausnahme_daten"):
+        _apply(
+            todo,
+            titel="T",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=DAILY",
+            ausnahme_daten=["2026-07-22T09:00:00"],
+        )
+
+
+def test_ausnahme_daten_naming_no_occurrence_is_rejected():
+    """An EXDATE that misses the recurrence set cancels nothing and says so
+    nowhere - the task side must not get a weaker version of this check than
+    the event side has."""
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="does not name an occurrence"):
+        _apply(
+            todo,
+            titel="T",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY",  # only Mondays: the 20th, 27th, ...
+            ausnahme_daten=["2026-07-22"],
+        )
+
+
+def test_ausnahme_daten_rejection_message_names_the_task_tools():
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError) as excinfo:
+        _apply(
+            todo,
+            titel="T",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY",
+            ausnahme_daten=["2026-07-22"],
+        )
+    assert "list_tasks/get_task" in str(excinfo.value)
+    assert "start_datum" in str(excinfo.value)
+    assert "event" not in str(excinfo.value)
+
+
+def test_clearing_wiederholung_also_drops_exdate_and_rdate():
+    """EXDATE/RDATE without an RRULE are orphans: they cancel and add nothing,
+    and come back to life the day someone sets wiederholung again (5.8)."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Muell\n"
+        "DTSTART;VALUE=DATE:20260720\n"
+        "RRULE:FREQ=DAILY\n"
+        "EXDATE;VALUE=DATE:20260722\n"
+        "RDATE;VALUE=DATE:20260801\n"
+        "END:VTODO\n"
+    )
+    assert "EXDATE" in todo and "RDATE" in todo
+
+    mapping.apply_task_fields(todo, TaskFields(clear=("wiederholung",)))
+
+    assert "RRULE" not in todo
+    assert "EXDATE" not in todo
+    assert "RDATE" not in todo
+    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == []
+
+
+def test_clearing_ausnahme_daten_leaves_the_series_intact():
+    """The inverse: dropping the exceptions must not drop the rule."""
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="T",
+        start_datum="2026-07-20",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22"],
+    )
+
+    mapping.apply_task_fields(todo, TaskFields(clear=("ausnahme_daten",)))
+
+    assert "EXDATE" not in todo
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+
+
+def test_ausnahme_daten_is_anchored_to_the_tasks_own_zone():
+    """One EXDATE property, one set of parameters: the values go on the wire in
+    the zone DTSTART names, or an exception names a different instant than the
+    occurrence it is meant to cancel."""
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="T",
+        start_datum="2026-07-20T09:00:00 America/New_York",
+        wiederholung="FREQ=DAILY",
+        ausnahme_daten=["2026-07-22T15:00:00+02:00"],  # = 09:00 New York
+    )
+
+    ical = todo.to_ical().decode()
+    assert "EXDATE;TZID=America/New_York:20260722T090000" in ical
+
+
+# --- expanding recurring tasks into their occurrences (5.1) ---
+
+
+def _recurring(uid: str = "task-1", **kwargs) -> dict:
+    """A parsed task dict for a recurring task, built through the real mapping.
+
+    Goes VTODO -> apply_task_fields -> parse_vtodo, so the dicts the expansion
+    sees are exactly the ones `list_tasks` builds - including the bare numeric
+    offsets `parse_vtodo` writes, which is what the expansion has to re-anchor.
+    """
+    todo = _new_todo(uid)
+    _apply(todo, titel=uid, **kwargs)
+    return mapping.parse_vtodo(todo)
+
+
+def test_recurring_task_without_an_upper_bound_stays_a_single_master_row():
+    """An unfiltered `list_tasks` has no window to expand into: the series stays
+    the one row it has always been, `wiederholung` intact. Expanding here would
+    put a hundred copies of every recurring task into every plain listing and
+    strip the rule from all of them."""
+    tasks = [
+        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
+    ]
+
+    result = mapping.filter_tasks(tasks)
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
+    assert result[0]["wiederholung_von"] is None
+    assert result[0]["serie_uid"] is None
+
+
+def test_recurring_task_expands_into_the_queried_window():
+    """The finding itself: a weekly task used to appear exactly once, at its
+    original due date, and never again."""
+    tasks = [
+        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-22")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-09-01",
+        "2026-09-08",
+        "2026-09-15",
+        "2026-09-22",
+    ]
+
+
+def test_expanded_instances_are_marked_and_carry_a_uid_no_write_path_accepts():
+    """An instance must not be mistakable for the stored task: nothing about it
+    recurs, it names its occurrence, it points at the series, and its uid is one
+    `split_occurrence_uid` recognises so every write path can refuse it."""
+    tasks = [
+        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
+    ]
+
+    instance = mapping.filter_tasks(tasks, due_before="2026-09-08")[1]
+
+    assert instance["wiederholung"] is None
+    assert instance["wiederholung_von"] == "2026-09-08"
+    assert instance["serie_uid"] == "task-1"
+    assert instance["uid"] != "task-1"
+    assert mapping.split_occurrence_uid(instance["uid"]) == ("task-1", "2026-09-08")
+
+
+def test_expansion_stops_at_the_hard_instance_cap():
+    """An unbounded rule inside a wide window must not fill the listing."""
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01T00:00:00",
+            faellig_datum="2026-09-01T00:00:00",
+            wiederholung="FREQ=MINUTELY",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert len(result) == mapping._TASK_EXPANSION_LIMIT
+
+
+def test_expansion_honours_count():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=DAILY;COUNT=3",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+
+
+def test_expansion_honours_until():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01T09:00:00",
+            faellig_datum="2026-09-01T09:00:00",
+            # 09:00 Europe/Berlin on the 3rd, the form RFC 5545 requires
+            # alongside a DATE-TIME DTSTART.
+            wiederholung="FREQ=DAILY;UNTIL=20260903T070000Z",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-09-01T09:00:00+02:00",
+        "2026-09-02T09:00:00+02:00",
+        "2026-09-03T09:00:00+02:00",
+    ]
+
+
+def test_a_rule_dateutil_refuses_leaves_the_master_row_alone():
+    """A DATE-TIME UNTIL on an all-day series is invalid per RFC 5545 3.3.10 and
+    `dateutil` rejects it outright. "We cannot expand this" must degrade to
+    today's single master row, never to a wrong or empty answer."""
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=DAILY;UNTIL=20260903T000000Z",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung"] == "FREQ=DAILY;UNTIL=20260903T000000Z"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_expanded_occurrences_keep_their_wall_clock_across_dst():
+    """Where a naive re-parse of `parse_vtodo`'s "+02:00" output goes wrong: it
+    pins the series to a fixed offset, so every occurrence after the autumn
+    transition comes back an hour early. The read side must preserve what 5.7
+    preserves on the write side."""
+    tasks = [
+        _recurring(
+            start_datum="2026-10-19T09:00:00",
+            faellig_datum="2026-10-19T17:00:00",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-11-03")
+
+    assert [t["start_datum"] for t in result] == [
+        "2026-10-19T09:00:00+02:00",
+        "2026-10-26T09:00:00+01:00",  # not 08:00+01:00
+        "2026-11-02T09:00:00+01:00",
+    ]
+
+
+def test_expansion_keeps_the_distance_between_start_and_due():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01T09:00:00",
+            faellig_datum="2026-09-03T17:00:00",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-11")
+
+    assert [(t["start_datum"], t["faellig_datum"]) for t in result] == [
+        ("2026-09-01T09:00:00+02:00", "2026-09-03T17:00:00+02:00"),
+        ("2026-09-08T09:00:00+02:00", "2026-09-10T17:00:00+02:00"),
+    ]
+
+
+def test_expansion_skips_ausnahme_daten():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=DAILY",
+            ausnahme_daten=["2026-09-02"],
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-04")
+
+    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-03", "2026-09-04"]
+
+
+def test_occurrences_before_the_window_do_not_consume_the_instance_cap():
+    """A daily series started long before `faellig_nach` must still fill the
+    queried window, not be truncated by the occurrences it skipped to get there."""
+    tasks = [
+        _recurring(start_datum="2026-01-01", faellig_datum="2026-01-01", wiederholung="FREQ=DAILY")
+    ]
+
+    result = mapping.filter_tasks(tasks, due_after="2026-12-01", due_before="2026-12-05")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-12-01",
+        "2026-12-02",
+        "2026-12-03",
+        "2026-12-04",
+        "2026-12-05",
+    ]
+
+
+def test_non_recurring_tasks_are_left_alone_by_expansion():
+    tasks = [_recurring(faellig_datum="2026-09-01")]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-22")
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_a_series_whose_start_and_due_disagree_in_kind_is_not_expanded():
+    """An all-day DTSTART with a timed DUE (only a foreign client writes that)
+    has no well-defined distance between the two - the master row is returned as
+    it is rather than guessing one."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Fremd\n"
+        "DTSTART;VALUE=DATE:20260901\n"
+        "DUE:20260901T150000Z\n"
+        "RRULE:FREQ=WEEKLY\n"
+        "END:VTODO\n"
+    )
+
+    result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-22")
+
+    assert len(result) == 1
+    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_a_series_with_an_unreadable_anchor_is_not_expanded():
+    """A period-valued DTSTART (a foreign client's) reads back as something no
+    date parser accepts. It must leave the master row alone, not raise - one
+    unreadable task must never turn a whole healthy listing into an error."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Fremd\n"
+        "DTSTART;VALUE=PERIOD:20260901T090000Z/PT1H\n"
+        "DUE:20260901T100000Z\n"
+        "RRULE:FREQ=DAILY\n"
+        "END:VTODO\n"
+    )
+
+    result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-05")
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_an_unreadable_exception_date_cancels_nothing_and_does_not_raise():
+    """Same rule for EXDATE: one this server cannot read skips no occurrence,
+    and must not take the expansion (or the listing) down with it."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Fremd\n"
+        "DTSTART;VALUE=DATE:20260901\n"
+        "DUE;VALUE=DATE:20260901\n"
+        "RRULE:FREQ=DAILY\n"
+        "EXDATE;VALUE=PERIOD:20260902T000000Z/PT1H\n"
+        "END:VTODO\n"
+    )
+
+    result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-03")
+
+    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+
+
+def test_split_occurrence_uid_leaves_an_ordinary_uid_alone():
+    """A stored UID that merely contains a "#" must not read as an occurrence."""
+    assert mapping.split_occurrence_uid("wei#rd-uid") == ("wei#rd-uid", None)
+    assert mapping.split_occurrence_uid("plain-uid") == ("plain-uid", None)
+    assert mapping.split_occurrence_uid("u1#2026-09-08") == ("u1", "2026-09-08")
 
 
 def _task(uid: str, faellig_datum: str | None) -> dict:
@@ -935,8 +2011,9 @@ def test_filter_tasks_due_before_and_after_combined_is_a_range():
 
 def test_filter_tasks_date_only_due_before_bound_includes_all_day_task_on_boundary():
     # An all-day task due exactly on the faellig_vor date must still be
-    # included: the bound expands to the end of that day (23:59:59 UTC), and
-    # the task's own all-day due date compares as its start-of-day instant.
+    # included: the bound expands to the end of that day (23:59:59 in the
+    # server's default timezone), and the task's own all-day due date
+    # compares as its start-of-day instant.
     tasks = [_task("boundary", "2026-07-20")]
     result = mapping.filter_tasks(tasks, due_before="2026-07-20")
     assert [t["uid"] for t in result] == ["boundary"]
@@ -992,3 +2069,190 @@ def test_filter_tasks_non_positive_limit_raises(limit):
 def test_filter_tasks_invalid_due_bound_raises():
     with pytest.raises(InvalidTaskDataError):
         mapping.filter_tasks([], due_before="not-a-date")
+
+
+def test_filter_tasks_prioritaet():
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch"),
+        dict(_task("2", "2026-07-01"), prioritaet="mittel"),
+        dict(_task("3", "2026-07-01"), prioritaet="niedrig"),
+    ]
+    res = mapping.filter_tasks(tasks, prioritaet="hoch")
+    assert [t["uid"] for t in res] == ["1"]
+
+
+def test_filter_tasks_unknown_prioritaet_raises():
+    with pytest.raises(InvalidTaskDataError, match="Unknown prioritaet 'dringend'"):
+        mapping.filter_tasks([], prioritaet="dringend")
+
+
+def test_filter_tasks_tag():
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Finanzen", "Wichtig"]),
+        dict(_task("2", "2026-07-01"), tags=["Arbeit"]),
+    ]
+    res = mapping.filter_tasks(tasks, tag="finanzen")
+    assert [t["uid"] for t in res] == ["1"]
+
+
+def test_filter_tasks_suchtext():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Milch kaufen", notizen=None),
+        dict(_task("2", "2026-07-01"), titel="Einkauf", notizen="Vollmilch besorgen"),
+        dict(_task("3", "2026-07-01"), titel="Post", notizen="Brief senden"),
+    ]
+    res = mapping.filter_tasks(tasks, suchtext="milch")
+    assert [t["uid"] for t in res] == ["2", "1"]
+
+
+def test_filter_tasks_sorting_due_date_and_no_due_date_and_titel():
+    tasks = [
+        dict(_task("z-due-later", "2026-08-10"), titel="Z Task"),
+        dict(_task("a-due-earlier", "2026-08-01"), titel="A Task"),
+        dict(_task("b-no-due", None), titel="B Task"),
+        dict(_task("a-no-due", None), titel="A Task"),
+    ]
+    res = mapping.filter_tasks(tasks)
+    assert [t["uid"] for t in res] == ["a-due-earlier", "z-due-later", "a-no-due", "b-no-due"]
+
+
+def test_filter_tasks_combination():
+    tasks = [
+        dict(
+            _task("1", "2026-07-10"),
+            prioritaet="hoch",
+            tags=["work"],
+            titel="Bericht schreiben",
+            notizen="Wichtig",
+        ),
+        dict(
+            _task("2", "2026-07-05"),
+            prioritaet="hoch",
+            tags=["work"],
+            titel="Bericht abgeben",
+            notizen="Dringend",
+        ),
+        dict(
+            _task("3", "2026-07-01"),
+            prioritaet="niedrig",
+            tags=["work"],
+            titel="Bericht lesen",
+            notizen="Fine",
+        ),
+        dict(
+            _task("4", "2026-07-02"),
+            prioritaet="hoch",
+            tags=["home"],
+            titel="Bericht zuhause",
+            notizen=None,
+        ),
+    ]
+    res = mapping.filter_tasks(
+        tasks,
+        prioritaet="hoch",
+        tag="WORK",
+        suchtext="bericht",
+        due_before="2026-07-15",
+        limit=1,
+    )
+    assert [t["uid"] for t in res] == ["2"]
+
+
+def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
+    """A VTODO whose DUE this server can't parse must not poison its whole list.
+
+    Sorting reads *every* task's `faellig_datum`, so a single odd value (a
+    bare time, a period, whatever a foreign client wrote) would otherwise
+    turn an entire healthy listing into an error. It sorts with the tasks
+    that have no due date instead.
+    """
+    tasks = [
+        dict(_task("bad", "12:00:00"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+        dict(_task("none", None), titel="Ohne"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["good", "bad", "none"]
+
+
+def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
+    """It can't be judged "before"/"after" anything, exactly like a missing one."""
+    tasks = [
+        dict(_task("bad", "(2026-07-01, 2026-07-02)"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+    ]
+
+    res = mapping.filter_tasks(tasks, due_before="2026-07-31")
+
+    assert [t["uid"] for t in res] == ["good"]
+
+
+def test_filter_tasks_tag_matches_across_unicode_spellings():
+    """ "ü" has two spellings and "ß" uppercases to "SS" - a German API must match both."""
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Büro"]),  # u + combining diaeresis
+        dict(_task("2", "2026-07-01"), tags=["Straße"]),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="Büro")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="STRASSE")] == ["2"]
+
+
+def test_filter_tasks_suchtext_matches_across_unicode_spellings():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Große Wäsche", notizen=None),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="wäsche")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="GROSSE")] == ["1"]
+
+
+def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
+    """Raw codepoint order files every umlaut after "Z", which reads as random."""
+    tasks = [
+        dict(_task("z", "2026-07-01"), titel="Zahnarzt"),
+        dict(_task("ae", "2026-07-01"), titel="Ärztin"),
+        dict(_task("a", "2026-07-01"), titel="Apotheke"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["a", "ae", "z"]
+
+
+def test_filter_tasks_empty_filter_value_means_no_filter():
+    """ "" is how a client spells "unset"; every string filter reads it that way.
+
+    They used to disagree: `prioritaet=""` raised, `tag=""` matched nothing,
+    `suchtext=""` matched everything, and an empty due bound raised too.
+    """
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch", tags=["work"], titel="Bericht"),
+        dict(_task("2", "2026-07-02"), prioritaet=None, tags=[], titel="Anruf"),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, prioritaet="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="", due_after="")] == [
+        "1",
+        "2",
+    ]
+
+
+def test_filter_tasks_empty_due_bound_does_not_exclude_tasks_without_a_due_date():
+    """An empty bound is no bound, so it must not drag in the "has to have a due date" rule."""
+    tasks = [
+        dict(_task("mit", "2026-07-01")),
+        dict(_task("ohne", None)),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["mit", "ohne"]
+
+
+def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
+    """0 is not how an integer parameter spells "unset" - None is - so it stays an error."""
+    with pytest.raises(InvalidTaskDataError):
+        mapping.filter_tasks([], limit=0)

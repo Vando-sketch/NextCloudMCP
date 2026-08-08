@@ -40,23 +40,24 @@ Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 uv sync
 cp .env.example .env
-# edit .env with your Nextcloud CalDAV URL, an app password, and PUBLIC_BASE_URL
+# edit .env with your Nextcloud base URL, an app password, and PUBLIC_BASE_URL
 ```
 
 Generate a Nextcloud app password under **Settings → Security → Devices & sessions**
-(never use your account password). The CalDAV URL is your DAV endpoint root, typically:
+(never use your account password). `NEXTCLOUD_BASE_URL` is required — your Nextcloud
+instance's base URL with no path, typically:
 
 ```
-https://<your-nextcloud-domain>/remote.php/dav/
+https://<your-nextcloud-domain>
 ```
 
-Must be `https://` - the server refuses to start with a `http://` CalDAV URL unless it
+Must be `https://` — the server refuses to start with a `http://` URL unless it
 points at a local address (`localhost`/`127.0.0.1`/`::1`) or `NEXTCLOUD_ALLOW_INSECURE_HTTP=1`
 is set, since `http://` sends the app password above in cleartext Basic Auth.
 
-The Notes tools use a separate, plain JSON REST API (unrelated to CalDAV), so they
-also need `NEXTCLOUD_BASE_URL` - your Nextcloud instance's base URL with no path, e.g.
-`https://<your-nextcloud-domain>`. Same https/app-password rules as the CalDAV URL above.
+`NEXTCLOUD_CALDAV_URL` is optional and defaults to `<base>/remote.php/dav/`. It is only
+needed when your DAV endpoint is not `<base>/remote.php/dav/` (e.g. if CalDAV sits behind a
+different host or proxy path). Both URLs must point at the same Nextcloud instance.
 
 `PUBLIC_BASE_URL` is the exact URL clients will use to reach this server - see
 [Authentication](#authentication) below for why this has to match precisely.
@@ -172,26 +173,27 @@ Returns all available Nextcloud task lists (calendars supporting VTODO) as
 Event-only calendars (e.g. Nextcloud's default "Personal" calendar) are
 excluded — `list_calendars` is their counterpart.
 
-### `list_tasks(list_name, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None)`
+### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
 
-Returns tasks in a list. `nur_offene=True` (default) excludes completed tasks. Each task
+Returns tasks across one, several, or all task lists (`listen_namen=None` queries *every* list on the account, unbounded unless you narrow it; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed *and* cancelled tasks - this is the underlying `caldav` library's own "pending" query (any `STATUS` of `COMPLETED`/`CANCELLED`, or a `COMPLETED` timestamp, counts as not-open), not a choice layered on top here. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
-`fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
+`fortschritt_prozent`, `status` (`"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"` -
+**breaking change:** two more values than before, settable via `update_task`'s `status`
+parameter), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only).
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — settable via
+`create_task`/`update_task`), `ausnahme_daten` (the occurrences the series skips, `EXDATE`; `[]` if none),
+`wiederholung_von` and `serie_uid` (both `null` unless the row is an expanded occurrence, see below),
+`liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
 
-A date-only `start_datum`/`faellig_datum` (e.g. `"2026-07-20"`) is an all-day entry;
-anything else is a datetime.
+**Recurring tasks:** with `faellig_vor` given, a recurring task is expanded into one row per occurrence due inside the window (capped at 100 per task) — otherwise "what is due next week" could never include a weekly task started in March. Without `faellig_vor` the series is returned as the single stored row it is, `wiederholung` intact. An expanded row is a *read-only view of one date*: `wiederholung_von` names its occurrence, `serie_uid` points at the stored task, and its own `uid` is rejected by `update_task`/`complete_task`/`delete_task`/`get_task` rather than silently acting on the whole series. See [`docs/tools.md`](docs/tools.md).
 
-`faellig_vor`/`faellig_nach` optionally filter to tasks due before/after a given ISO 8601
-date or datetime (a date-only bound covers the whole day); either one excludes tasks with
-no due date at all. `limit` (must be `> 0`) caps the number of results, applied after any
-due-date filtering. See [`docs/tools.md`](docs/tools.md) for the exact boundary semantics.
+Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
 ### `get_task(list_name, task_uid)`
 
-Fetches a single task by UID, without listing the whole task list. Returns the same
-dict shape as one entry from `list_tasks`.
+Fetches a single task by UID, without listing the whole task list. Returns what one
+entry from `list_tasks` holds, minus its `liste` key.
 
 ### `create_task(list_name, titel, ...)`
 
@@ -210,41 +212,79 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | `notizen` | `DESCRIPTION` | |
 | `sichtbarkeit` | `CLASS` | `"öffentlich"`→PUBLIC, `"privat"`→PRIVATE, `"vertraulich"`→CONFIDENTIAL |
 | `uebergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
+| `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO"`; requires the task to have a `start_datum` or `faellig_datum` (existing or set in the same call) to recur from |
+| `ausnahme_daten` | `EXDATE` | ISO 8601 occurrences the series skips; each must match `start_datum`'s value kind and name a real occurrence |
 
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
 `faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
-date raises an error. Absolute reminders without a UTC offset are interpreted as UTC (per
-RFC 5545, VALARM triggers must be in UTC). Reading a reminder and writing it back is safe —
-the alarm is recognized as already present and left alone — but the strings are normalized
-(`"-P1W"` reads back as `"-P7D"`, `"...Z"` as `"+00:00"`). Alarms whose trigger this format
+date raises an error. Absolute reminders without a UTC offset are interpreted in the server's
+default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`) and stored as UTC per RFC
+5545; reading them back formats the same instant in the default timezone, so the string may
+differ from what was written. Reading a reminder and writing it back is safe — the alarm is
+recognized as already present and left alone — but the strings are normalized (`"-P1W"` reads
+back as `"-P7D"`, `"...Z"` as the default timezone's offset). Alarms whose trigger this format
 cannot express are not listed, and are never touched by a write; see `docs/tools.md`.
 
-**Date/time semantics** (applies to `start_datum`, `faellig_datum`, and absolute
+> **BREAKING CHANGE**: Server timezone handling uses a single configurable default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC-hardcoded behavior.
+
+**Date/time semantics** (applies to `start_datum`, `faellig_datum`, `start`, `ende`, and absolute
 `erinnerungen` entries): a value of exactly `"YYYY-MM-DD"` creates an all-day entry
 (`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
-offset) is interpreted as UTC.
+offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
+Returned timestamps carry the default timezone's offset (e.g. `+02:00`).
+An event keeps the timezone it is anchored to, so a value read from `get_event` can be written
+straight back through `update_event` without the event losing that anchor — which is what keeps
+a recurring event on its wall-clock time across daylight-saving changes.
 
 ### `update_task(list_name, task_uid, ...)`
 
-Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
-changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
-the reminders `list_tasks` shows; `felder_leeren` clears *every* alarm instead.
+Same fields as `create_task`, all optional except `task_uid`, plus `status`. Only fields
+you pass are changed; everything else on the task is left untouched. Passing `erinnerungen`
+replaces the reminders `list_tasks` shows; `felder_leeren` clears *every* alarm instead.
+
+**`status`** (`"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"`) sets `STATUS`.
+`"erledigt"` behaves exactly like `complete_task` (also sets `PERCENT-COMPLETE=100` and
+the `COMPLETED` timestamp); `"offen"` is the **reopen** path for a task completed by
+mistake (removes `COMPLETED`, resets `PERCENT-COMPLETE` to `0`); `"in-arbeit"`/`"abgesagt"`
+only set `STATUS`. If the same call also passes `fortschritt_prozent`, that explicit value
+wins over whatever percentage `status` would derive. An unknown value is a speaking error
+naming the four accepted labels, and writes nothing. `status` is not accepted in
+`felder_leeren` - use `status="offen"` to reopen instead.
+
+> **BREAKING CHANGE**: task `status` now has **four** values instead of two
+> (`"offen"`/`"in-arbeit"`/`"erledigt"`/`"abgesagt"`) and is directly settable via this
+> parameter, not just an implicit read-only result of `complete_task`.
 
 To remove a property entirely (e.g. delete a due date), list its field name in the
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
 leaves it unchanged. Accepted names: `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
-`uebergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
-cleared in the same call. See [`docs/tools.md`](docs/tools.md) for details and examples.
+`uebergeordnete_aufgabe`, `wiederholung`, `ausnahme_daten` (`titel` and `status` cannot be
+cleared). Clearing `wiederholung` also drops the task's `ausnahme_daten` and any `RDATE`,
+which mean nothing without a recurrence rule. A field can't be both set and cleared in the
+same call; `wiederholung`'s anchor requirement is checked
+against the task's final state, so clearing the task's only `start_datum`/`faellig_datum`
+while a recurrence is set or remains is rejected too. See [`docs/tools.md`](docs/tools.md)
+for details and examples.
 
 ### `complete_task(list_name, task_uid)`
 
-Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp.
+Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp. This does
+**not** roll a recurring task's series forward — the task's `wiederholung` (`RRULE`) is
+left untouched, so completing a recurring task ends it as far as this server is
+concerned; advance `faellig_datum` instead to keep a series going. This is this server's
+own verified behaviour (see `docs/tools.md`'s `complete_task` section) — how the
+Nextcloud Tasks app itself displays a completed recurring task is not verified here.
+A task completed by mistake can be reopened with `update_task(status="offen")`.
 
 ### `delete_task(list_name, task_uid)`
 
 Permanently deletes the task.
+
+### `move_task(list_name, task_uid, ziel_liste)`
+
+Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert"}`.
 
 ### Calendar & event tools (VEVENT)
 
@@ -263,10 +303,15 @@ the full reference.
 | `get_event(kalender_name, event_uid)` | Single event by UID |
 | `create_event(kalender_name, titel, start, ...)` | Full event creation: all-day or timed, `ort`, `beschreibung`, `tags`, `status` (`"bestätigt"`/`"vorläufig"`/`"abgesagt"`), `sichtbarkeit`, recurrence (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE), reminders (`erinnerungen` → VALARM), `url`, task link (`verknuepfte_aufgabe`) |
 | `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
+| `update_events(kalender_name, event_uids, ...)` | Batch update up to 200 events with the same field patch; patch validated up front |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
+| `delete_events(kalender_name, event_uids)` | Batch delete up to 200 events from a calendar |
+| `move_event(kalender_name, event_uid, ziel_kalender)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete |
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
-| `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=60)` | Timeboxing: builds an event from a task (title/notes/location/tags, due date as start) and links both |
+| `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |
 | `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |
+| `list_tags(kalender_namen=None, listen_namen=None)` | Aggregated tags (`CATEGORIES`) and usage counts across calendars and task lists (expensive: reads collections completely) |
+
 
 For all-day events `ende` is the **inclusive** last day (RFC 5545's exclusive
 `DTEND` is translated on the way in and out). Mixed calendars (VEVENT+VTODO in
@@ -290,6 +335,7 @@ reference.
 | `update_notiz(notiz_id, ...)` | Partial update; `inhalt` replaces content wholesale |
 | `append_notiz(notiz_id, text)` | Read-then-write append to existing content |
 | `search_notizen(suchtext, kategorie=None)` | Case-insensitive substring search over title/content (client-side - the API has no full-text search) |
+| `delete_notiz(notiz_id)` | Permanently delete a note |
 
 ## Testing
 
