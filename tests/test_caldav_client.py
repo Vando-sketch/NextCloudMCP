@@ -795,6 +795,70 @@ def test_update_task_not_found_raises(service, principal):
         service.update_task("Personal", "missing-uid", mapping.TaskFields(titel="x"))
 
 
+def test_update_task_targets_the_master_component_not_an_override(service, principal):
+    """A recurring task's VCALENDAR can hold a master VTODO plus one or more
+    override subcomponents (RECURRENCE-ID present) for individual instance
+    exceptions. update_task must edit the master - not whichever VTODO
+    `icalendar_component` happens to resolve to - so a caller editing "the
+    task" doesn't silently end up writing an instance exception instead
+    (5.10)."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    master = Todo()
+    master.add("uid", "abc")
+    master.add("summary", "Alt")
+    master.add("dtstart", date(2026, 7, 20))
+    master.add("rrule", {"FREQ": "DAILY"})
+
+    override = Todo()
+    override.add("uid", "abc")
+    override.add("recurrence-id", date(2026, 7, 21))
+    override.add("summary", "Alt (Ausnahme)")
+
+    instance = Calendar()
+    # Override listed first, so a naive "first VTODO" resolution would pick it.
+    instance.add_component(override)
+    instance.add_component(master)
+
+    todo_obj = MagicMock()
+    todo_obj.icalendar_instance = instance
+    todo_obj.icalendar_component = override
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(titel="Neu"))
+
+    todo_obj.save.assert_called_once()
+    assert str(master.get("summary")) == "Neu"
+    assert str(override.get("summary")) == "Alt (Ausnahme)"
+
+
+def test_update_task_falls_back_to_icalendar_component_when_no_master_present(service, principal):
+    """If every VTODO in the instance carries a RECURRENCE-ID (no master
+    found - e.g. a malformed/partial object), update_task must not crash;
+    it degrades to the pre-5.10 behaviour of editing icalendar_component."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    override = Todo()
+    override.add("uid", "abc")
+    override.add("recurrence-id", date(2026, 7, 21))
+    override.add("summary", "Alt (Ausnahme)")
+
+    instance = Calendar()
+    instance.add_component(override)
+
+    todo_obj = MagicMock()
+    todo_obj.icalendar_instance = instance
+    todo_obj.icalendar_component = override
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(titel="Neu"))
+
+    todo_obj.save.assert_called_once()
+    assert str(override.get("summary")) == "Neu"
+
+
 # --- wiederholung (RRULE), now writable ---
 
 
