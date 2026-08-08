@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .mapping import format_datetime_output
+
 
 @dataclass(frozen=True)
 class NoteFields:
@@ -44,11 +46,15 @@ def _format_modified(modified: Any) -> str | None:
 
     Matches the ISO 8601 date/datetime convention used everywhere else in
     this server (mapping.py, event_mapping.py) rather than exposing a raw
-    Unix timestamp.
+    Unix timestamp - including its timezone rule: the instant is the one the
+    Notes API reports (a Unix timestamp is unambiguous), rendered in the
+    server's default timezone (`MCP_DEFAULT_TIMEZONE`), so a note's
+    modification time and a task's due date in the same answer are readable
+    against each other.
     """
     if not isinstance(modified, (int, float)):
         return None
-    return datetime.fromtimestamp(modified, tz=timezone.utc).isoformat()
+    return format_datetime_output(datetime.fromtimestamp(modified, tz=timezone.utc))
 
 
 def parse_note_summary(note: dict[str, Any]) -> dict[str, Any]:

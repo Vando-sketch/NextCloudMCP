@@ -38,3 +38,12 @@ For a task large enough to naturally split into independent subtasks:
 5. After all subagent branches are merged, the main agent runs the full test
    suite and lint on the integration branch, then opens the single pull request
    for the whole task.
+
+## Timezone & Date Conventions
+
+> **BREAKING CHANGE**: Timezone handling changed from hardcoded UTC to configurable server default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
+
+- **Server Default Timezone**: Configured via `MCP_DEFAULT_TIMEZONE` (default `Europe/Berlin`). `MCP_DEFAULT_TIMEZONE=UTC` restores previous UTC behavior.
+- **Naive Inputs**: Any naive datetime input (no UTC offset) is interpreted in the server's default timezone.
+- **Day Windows**: Day bounds (agenda, `faellig_vor`/`faellig_nach`, `von`/`bis`) are constructed in the default timezone.
+- **Output Timestamps**: Timestamps returned to callers are formatted in the server's default timezone with offset (e.g. `+02:00`). All-day dates remain bare `YYYY-MM-DD` strings.

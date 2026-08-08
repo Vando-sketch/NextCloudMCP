@@ -427,3 +427,24 @@ def test_from_env_custom_state_dir_and_host(monkeypatch: pytest.MonkeyPatch):
     settings = Settings.from_env()
     assert settings.oauth_state_dir == "/tmp/custom-state"
     assert settings.host == "0.0.0.0"
+
+
+def test_default_timezone_defaults_to_europe_berlin(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("MCP_DEFAULT_TIMEZONE", raising=False)
+    settings = Settings.from_env()
+    assert settings.default_timezone == "Europe/Berlin"
+
+
+def test_default_timezone_env_var_override(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_DEFAULT_TIMEZONE", "America/New_York")
+    settings = Settings.from_env()
+    assert settings.default_timezone == "America/New_York"
+
+
+def test_invalid_default_timezone_raises_config_error(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_DEFAULT_TIMEZONE", "Invalid/Timezone_Name")
+    with pytest.raises(ConfigError, match="MCP_DEFAULT_TIMEZONE.*Invalid/Timezone_Name"):
+        Settings.from_env()
