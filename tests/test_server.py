@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
@@ -300,7 +301,14 @@ def test_list_tasks_passes_nur_offene_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(tools["list_tasks"].fn("Personal", nur_offene=False))
     fake_service.list_tasks.assert_called_once_with(
-        "Personal", only_open=False, due_before=None, due_after=None, limit=None
+        list_names=["Personal"],
+        only_open=False,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        limit=None,
     )
 
 
@@ -308,16 +316,74 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(
         tools["list_tasks"].fn(
-            "Personal", faellig_vor="2026-08-01", faellig_nach="2026-07-01", limit=5
+            listen_namen=["Personal"],
+            faellig_vor="2026-08-01",
+            faellig_nach="2026-07-01",
+            prioritaet="hoch",
+            tag="arbeit",
+            suchtext="test",
+            limit=5,
         )
     )
     fake_service.list_tasks.assert_called_once_with(
-        "Personal",
+        list_names=["Personal"],
         only_open=True,
         due_before="2026-08-01",
         due_after="2026-07-01",
+        prioritaet="hoch",
+        tag="arbeit",
+        suchtext="test",
         limit=5,
     )
+
+
+def test_list_tasks_deprecated_list_name_alias_works(tools, fake_service):
+    fake_service.list_tasks.return_value = []
+    _run(tools["list_tasks"].fn(list_name="Personal"))
+    fake_service.list_tasks.assert_called_once_with(
+        list_names=["Personal"],
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        limit=None,
+    )
+
+
+def test_list_tasks_both_list_name_and_listen_namen_raises_error(tools, fake_service):
+    with pytest.raises(ToolError, match="list_name is the deprecated alias of listen_namen"):
+        _run(tools["list_tasks"].fn(list_name="Personal", listen_namen=["Arbeit"]))
+    # The conflict is refused, not resolved: neither argument silently wins.
+    fake_service.list_tasks.assert_not_called()
+
+
+def test_list_tasks_tool_filters_added_after_limit_are_keyword_only(tools):
+    """Same positional prefix as `CalDavService.list_tasks`, for the same reason.
+
+    A filter inserted before `limit` rebinds a positional caller's value
+    without a word; keeping everything after `limit` keyword-only makes that
+    impossible.
+    """
+    params = inspect.signature(tools["list_tasks"].fn).parameters
+    positional = [
+        name for name, p in params.items() if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+
+    assert positional == ["listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"]
+    assert all(
+        params[name].kind is inspect.Parameter.KEYWORD_ONLY
+        for name in ("prioritaet", "tag", "suchtext", "list_name")
+    )
+
+
+def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
+    """Keyword-only parameters must still reach the MCP schema clients read."""
+    properties = tools["list_tasks"].parameters["properties"]
+
+    assert {"listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"} <= set(properties)
+    assert {"prioritaet", "tag", "suchtext", "list_name"} <= set(properties)
 
 
 def test_create_task_maps_german_params_to_service_call(tools, fake_service):
@@ -799,7 +865,20 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
     started = threading.Event()
     release = threading.Event()
 
-    def blocking_list_tasks(list_name, only_open=True, due_before=None, due_after=None, limit=None):
+    def blocking_list_tasks(
+        list_names=None,
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        limit=None,
+        *,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+    ):
+        # Spelled out rather than (*args, **kwargs) on purpose: this is the
+        # one place a test would notice the tool and the service drifting
+        # apart on how list_tasks is called.
         started.set()
         release.wait(timeout=5)
         return []

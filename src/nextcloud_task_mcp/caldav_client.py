@@ -6,7 +6,7 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
@@ -1161,36 +1161,156 @@ class CalDavService:
 
     def list_tasks(
         self,
-        list_name: str,
+        list_names: list[str] | str | None = None,
         only_open: bool = True,
         due_before: str | None = None,
         due_after: str | None = None,
         limit: int | None = None,
+        *,
+        prioritaet: str | None = None,
+        tag: str | None = None,
+        suchtext: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return tasks in the given list, parsed into German task dicts.
+        """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
 
-        `due_before`/`due_after`/`limit` filter the already-parsed results via
-        `mapping.filter_tasks` (C4) - see its docstring for the exact
-        semantics (date-vs-datetime bound normalization, no-due-date
-        exclusion, and `limit` validation).
+        `list_names` is a display name, a list of them, or `None` for every
+        task list on the account; an empty list is an empty scope (no request,
+        no results - the filter arguments are still validated). Repeating a
+        name queries that list once, not twice. `""` is a name like any other,
+        i.e. an unknown one.
+
+        `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
+        parsed results via `mapping.filter_tasks`. Each task dict gains a "liste"
+        key set to its task list display name. That name is what every other task
+        tool takes, with one honest exception: Nextcloud permits two task lists to
+        share a display name, and then "liste" cannot tell them apart (nor can any
+        by-name call - `_resolve_collection` reports such a name as ambiguous
+        rather than guessing). Renaming one of them in Nextcloud is the only fix.
+
+        Anything added to this signature goes after `limit`, keyword-only: the
+        parameters up to and including `limit` are a positional prefix callers
+        may rely on.
         """
+        if isinstance(list_names, str):
+            list_names = [list_names]
+        if list_names is not None and not list_names:
+            # Nothing to query, but a caller passing limit=0 or an unknown
+            # prioritaet still deserves to hear about it rather than get a
+            # plausible-looking empty result.
+            return mapping.filter_tasks(
+                [],
+                due_before=due_before,
+                due_after=due_after,
+                prioritaet=prioritaet,
+                tag=tag,
+                suchtext=suchtext,
+                limit=limit,
+            )
+
         with self._lock:
+            if list_names is None:
+                tasks = self._tasks_from_every_list(only_open)
+            else:
+                tasks = self._tasks_from_named_lists(list_names, only_open)
 
-            def op(calendar: DAVCalendar):
-                return calendar.todos(include_completed=not only_open)
+            return mapping.filter_tasks(
+                tasks,
+                due_before=due_before,
+                due_after=due_after,
+                prioritaet=prioritaet,
+                tag=tag,
+                suchtext=suchtext,
+                limit=limit,
+            )
 
+    def _parse_todos(
+        self, todos: Iterable[Any], list_name: str, list_url: str
+    ) -> list[dict[str, Any]]:
+        """Parse one list's VTODO objects, stamping each with the list it came from."""
+        parsed = []
+        for todo in todos:
+            task = mapping.parse_vtodo(todo.icalendar_component)
+            task["liste"] = list_name
+            task["liste_url"] = list_url
+            parsed.append(task)
+        return parsed
+
+    def _tasks_from_named_lists(
+        self, list_names: list[str], only_open: bool
+    ) -> list[dict[str, Any]]:
+        """Tasks from the named lists, each queried through the cache-aware path.
+
+        Names are de-duplicated (keeping the caller's order): the same list
+        named twice used to be fetched twice, so every one of its tasks
+        appeared twice in the result. Each name is resolved once, inside
+        `_with_collection` - which also means a resolution failure is
+        translated like any other CalDAV error, and a stale cache entry is
+        re-resolved once.
+        """
+
+        def op(calendar: DAVCalendar):
+            return calendar.todos(include_completed=not only_open), str(calendar.url)
+
+        tasks: list[dict[str, Any]] = []
+        for name in dict.fromkeys(list_names):
             try:
-                todos = self._with_calendar(list_name, op)
+                todos, url = self._with_collection(name, "VTODO", op)
             except TaskMcpError:
                 raise
             except caldav_error.NotFoundError as exc:
-                raise TaskListNotFoundError(f"Task list '{list_name}' was not found.") from exc
+                raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
-            tasks = [mapping.parse_vtodo(todo.icalendar_component) for todo in todos]
-            return mapping.filter_tasks(
-                tasks, due_before=due_before, due_after=due_after, limit=limit
-            )
+            tasks.extend(self._parse_todos(todos, name, url))
+        return tasks
+
+    def _tasks_from_every_list(
+        self, only_open: bool, *, may_retry: bool = True
+    ) -> list[dict[str, Any]]:
+        """Tasks from every VTODO collection on the account.
+
+        The collections are queried as the objects the (cached) listing
+        returned rather than re-resolved by name, which is what keeps two
+        lists sharing a display name both reachable - that name is ambiguous
+        on purpose. The cost is that `_with_collection`'s stale-cache retry
+        doesn't apply here, so it is done once over the whole pass instead: a
+        404 anywhere in the pass means the cached listing is out of date (the
+        list was deleted or recreated server-side), the caches are dropped and
+        the pass is repeated against a freshly listed set. Without it, one
+        deleted task list would make every all-lists query fail for the
+        remaining life of the process.
+
+        "Anywhere in the pass" includes enumerating the lists: reading a
+        cached collection's display name is itself a request, so `_task_lists`
+        is inside the retry rather than in front of it. A stale object found
+        there would otherwise escape as a generic not-found error with the
+        cache left untouched - the same permanent failure, one call earlier.
+        """
+        tasks: list[dict[str, Any]] = []
+        name: str | None = None
+        try:
+            try:
+                for name, calendar in self._task_lists():
+                    todos = calendar.todos(include_completed=not only_open)
+                    tasks.extend(self._parse_todos(todos, name, str(calendar.url)))
+            except caldav_error.NotFoundError as exc:
+                if may_retry:
+                    self._invalidate_collection_caches()
+                    return self._tasks_from_every_list(only_open, may_retry=False)
+                # A freshly listed collection that still 404s is genuinely
+                # gone mid-request, not a stale cache entry. `name` is None
+                # when the enumeration itself failed, before any list was
+                # named.
+                raise TaskListNotFoundError(
+                    f"Task list '{name}' was not found."
+                    if name is not None
+                    else "A task list was not found while listing the task lists."
+                ) from exc
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
+        return tasks
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
         """Create a new task in the given list and return its UID."""
@@ -1313,6 +1433,24 @@ class CalDavService:
         if isinstance(parsed, datetime):
             return parsed
         return mapping.local_midnight(parsed + timedelta(days=1) if exclusive_end else parsed)
+
+    def _task_lists(self) -> list[tuple[str, DAVCalendar]]:
+        """Return (display name, calendar) pairs for every VTODO task list on the account.
+
+        Read from the cached collection listing (`_list_collections`), not
+        re-listed per call. Named lists deliberately don't come through here:
+        they are resolved one at a time by `_with_collection`, so an unknown
+        name raises `TaskListNotFoundError` instead of being skipped and a
+        typo can't silently produce an empty result.
+        """
+        calendars = self._list_collections()
+        result: list[tuple[str, DAVCalendar]] = []
+        for calendar in calendars:
+            if not self._supports_component(calendar, "VTODO"):
+                continue
+            name = calendar.get_display_name() or str(calendar.url)
+            result.append((name, calendar))
+        return result
 
     def _event_calendars(self, calendar_names: list[str] | None) -> list[tuple[str, DAVCalendar]]:
         """Return (display name, calendar) pairs for the VEVENT calendars to query.
@@ -1968,14 +2106,12 @@ class CalDavService:
                 day_end,
             )
 
-            if list_names is None:
-                list_names = [entry["name"] for entry in self.list_task_lists()]
-            aufgaben: list[dict[str, Any]] = []
-            for name in list_names:
-                tasks = self.list_tasks(name, only_open=True, due_before=datum, due_after=datum)
-                for task in tasks:
-                    task["liste"] = name
-                    aufgaben.append(task)
+            aufgaben = self.list_tasks(
+                list_names=list_names,
+                only_open=True,
+                due_before=datum,
+                due_after=datum,
+            )
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
 

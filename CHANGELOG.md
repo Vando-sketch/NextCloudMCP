@@ -9,6 +9,36 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **`list_tasks` queries across task lists, and filters like `list_events`.**
+  `listen_namen` replaces `list_name`: `null` (the default) queries every task
+  list on the account, a list of names queries those, and `[]` is an empty
+  scope that returns nothing without a request. "What is overdue anywhere?"
+  used to cost one call per list. New `prioritaet`, `tag` and `suchtext`
+  filters mirror the event side; `tag`/`suchtext` compare case-insensitively
+  and independently of Unicode spelling (either encoding of "ü", and "STRASSE"
+  against "Straße"), and an empty string means "no filter" for every filter
+  that takes one - `prioritaet`, `tag`, `suchtext`, `faellig_vor`, and
+  `faellig_nach` alike. `limit` still rejects `0`.
+  `get_agenda` takes its tasks through the same path.
+  **Breaking**, in three ways:
+  - Results are **sorted** by `faellig_datum` ascending (tasks without a
+    readable due date last), then by `titel` - with umlauts filed under their
+    base letter rather than behind "Z" - instead of arriving in server order,
+    and `limit` caps the merged, sorted result rather than one list's.
+  - Every task dict carries a new **`liste`** key with its task list's display
+    name. It is the name every other task tool takes, except in the one case
+    Nextcloud permits two task lists to share a display name: `liste` then
+    cannot tell them apart, but a new `liste_url` key alongside it carries
+    the list's unique collection URL, which you can match against
+    `list_task_lists`. However, because no tool accepts a URL to act on,
+    such a name is reported as ambiguous by any by-name call. Renaming one
+    of them in Nextcloud is the only way to make those tasks addressable again.
+  - The MCP tool keeps `list_name` as a deprecated alias (passing both is an
+    error), but the underlying `CalDavService.list_tasks` **renamed** its first
+    parameter, so an in-process `list_tasks(list_name=...)` call must become
+    `list_tasks(list_names=...)`; positional callers are unaffected.
+    Everything added to either signature after `limit` is keyword-only, so the
+    positional prefix cannot shift under a caller again.
 - **Reminders are readable**: `list_tasks`, `get_task`, `list_events` and
   `get_event` now return an `erinnerungen` list in the same string form
   `create_task`/`create_event` accept, so a reminder can be verified without
@@ -162,6 +192,17 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Fixed
 
+- **One unreadable due date no longer breaks a whole task listing.** A `DUE`
+  this server cannot parse - a bare time, a period, whatever a foreign client
+  wrote - made `list_tasks` fail for every task in that list rather than just
+  that one. Such a task is now listed like a task with no due date at all:
+  sorted last, and excluded when a `faellig_vor`/`faellig_nach` bound is given,
+  because it cannot be judged "before" or "after" anything either.
+- **A task list deleted server-side no longer breaks every all-lists query.**
+  The collection listing is cached for the life of the process, so a vanished
+  list stayed in it and failed on every use; `list_tasks()` and
+  `get_agenda(listen_namen=None)` recover from that the way named lists always
+  have - drop the caches, re-list once, carry on.
 - **Every tool call was slow (3-10 s, even simple reads): a per-call cascade of
   sequential CalDAV round-trips is now cached down to a handful.** Two
   compounding causes, both measured live against a real Nextcloud (6
