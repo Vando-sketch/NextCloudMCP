@@ -68,7 +68,9 @@ def test_all_tools_registered(tools):
         "get_event",
         "create_event",
         "update_event",
+        "update_events",
         "delete_event",
+        "delete_events",
         "move_event",
         "respond_to_event",
         "link_task_to_event",
@@ -693,6 +695,43 @@ def test_update_event_can_clear_teilnehmer(tools, fake_service):
     )
     (_, _, fields), _ = fake_service.update_event.call_args
     assert fields.clear == ("teilnehmer",)
+
+
+def test_update_events_delegates(tools, fake_service):
+    expected_res = {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
+    }
+    fake_service.update_events.return_value = expected_res
+    res = _run(
+        tools["update_events"].fn(
+            kalender_name="Termine",
+            event_uids=["u1", "u2"],
+            ort="Büro",
+            felder_leeren=["beschreibung"],
+        )
+    )
+    assert res == expected_res
+    (cal_name, uids, fields), _ = fake_service.update_events.call_args
+    assert cal_name == "Termine"
+    assert uids == ["u1", "u2"]
+    assert fields.ort == "Büro"
+    assert fields.clear == ("beschreibung",)
+
+
+def test_delete_events_delegates(tools, fake_service):
+    expected_res = {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
+    }
+    fake_service.delete_events.return_value = expected_res
+    res = _run(tools["delete_events"].fn(kalender_name="Termine", event_uids=["u1", "u2"]))
+    assert res == expected_res
+    fake_service.delete_events.assert_called_once_with("Termine", ["u1", "u2"])
 
 
 # --- respond_to_event ---
