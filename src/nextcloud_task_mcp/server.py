@@ -215,6 +215,24 @@ def build_server(
         anything. Results are sorted by faellig_datum ascending (those tasks last),
         then by titel. `limit` is applied last, after merging across lists.
 
+        Recurring tasks (wiederholung) and `faellig_vor`: a recurring task is
+        stored once but is due many times, so when `faellig_vor` is given it is
+        expanded into one row per occurrence due inside the window - that is the
+        only way "what is due next week" can include a weekly task started in
+        March. Without `faellig_vor` there is no window to expand into and the
+        series is returned as the single row it is stored as, wiederholung
+        intact. At most 100 occurrences per task are produced.
+
+        What an expanded row is, and is not: it is a read-only view of one date
+        in a series. `wiederholung_von` names its occurrence, `wiederholung` is
+        None, `serie_uid` is the stored task's uid, and its own `uid` is a
+        synthetic "<serie_uid>#<occurrence>" that update_task, complete_task,
+        delete_task and get_task all reject with an explanation. To act on the
+        series, pass `serie_uid` - but note that update_task changes every
+        occurrence and complete_task ends the whole series (it does not roll it
+        forward). To make the series skip one date, add that date to its
+        ausnahme_daten via update_task.
+
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
             prioritaet, fortschritt_prozent, status, ort, url, tags, erinnerungen
@@ -225,7 +243,11 @@ def build_server(
             and update_task leaves those untouched), notizen,
             uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            create/edit recurrence), liste (the display name of the task list
+            or None if the task doesn't recur or is an expanded occurrence -
+            see create_task/update_task to set it), ausnahme_daten (the
+            occurrences the series skips, [] if none), wiederholung_von and
+            serie_uid (both None unless the row is an expanded occurrence, see
+            above), liste (the display name of the task list
             containing the task), and liste_url (the collection URL of the task
             list, which tells same-named lists apart, though no tool accepts a
             URL to act on them - an ambiguous name still must be renamed).
@@ -285,6 +307,8 @@ def build_server(
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -308,6 +332,16 @@ def build_server(
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
+            wiederholung: Optional recurrence rule as raw RFC 5545 RRULE text,
+                e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE. Requires the task to
+                have a start_datum or faellig_datum (in this same call) to
+                recur from - a task with neither is rejected.
+            ausnahme_daten: Optional ISO 8601 dates/datetimes of skipped
+                occurrences of a recurring task -> EXDATE. Each entry must be
+                the same value kind as the task's start_datum (date-only for an
+                all-day task, a full datetime otherwise) and must name an
+                occurrence the wiederholung actually produces; an entry that
+                would cancel nothing is rejected rather than stored.
 
         Date/time semantics for start_datum and faellig_datum: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
@@ -337,6 +371,8 @@ def build_server(
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -357,6 +393,8 @@ def build_server(
         notizen: str | None = None,
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
+        wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
@@ -369,14 +407,21 @@ def build_server(
                 semantics also match create_task: a "YYYY-MM-DD" value creates an
                 all-day entry, and naive datetimes are interpreted in the
                 server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin).
+                wiederholung's anchor requirement (start_datum or faellig_datum)
+                is checked against the task's final state, so setting only
+                wiederholung succeeds as long as the task already has a
+                start_datum or faellig_datum from before this call.
             felder_leeren: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
                 Accepted values: "start_datum", "faellig_datum", "prioritaet",
                 "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
-                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe". "titel"
-                cannot be cleared. Naming an unknown field, or naming a field
-                here that is *also* given a new value in the same call, is an
-                error.
+                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe",
+                "wiederholung", "ausnahme_daten". Clearing "wiederholung" also
+                drops the task's ausnahme_daten (EXDATE) and any RDATE, which
+                cancel and add nothing once the series is gone. "titel" cannot
+                be cleared. Naming an unknown
+                field, or naming a field here that is *also* given a new
+                value in the same call, is an error.
 
         Returns:
             {"uid": task_uid} on success.
@@ -394,6 +439,8 @@ def build_server(
             notizen=notizen,
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+            wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)
@@ -402,6 +449,12 @@ def build_server(
     @mcp.tool
     async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
+
+        Warning: for a recurring task, completing it (unlike in the Nextcloud
+        UI) does not automatically roll the series forward to the next
+        occurrence; instead, it hard-ends the series by marking the entire
+        recurring task as done. To advance a series instead, use
+        `update_task` on its `faellig_datum`.
 
         Args:
             list_name: Display name of the task list containing the task.
@@ -900,7 +953,10 @@ def build_server(
         Returns:
             {"datum": the day, "termine": event dicts (recurring events
             expanded to that day's occurrences, sorted by start), "aufgaben":
-            open tasks due that day, each with an added "liste" key}. Every
+            open tasks due that day, each with an added "liste" key}. Recurring
+            *tasks* are expanded to that day's occurrences too - see list_tasks
+            for what an expanded row can and cannot be used for (in short: read
+            it, act on its "serie_uid", never on its own "uid"). Every
             entry in both lists also carries "quelle_url" - the CalDAV URL of
             the exact calendar/task list it came from (Nextcloud doesn't
             enforce unique display names, so "kalender"/"liste" alone can't

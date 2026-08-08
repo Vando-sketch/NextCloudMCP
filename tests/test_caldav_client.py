@@ -477,6 +477,9 @@ def test_list_tasks_parses_todos(service, principal):
             "notizen": None,
             "uebergeordnete_uid": None,
             "wiederholung": None,
+            "ausnahme_daten": [],
+            "wiederholung_von": None,
+            "serie_uid": None,
             "liste": "Personal",
             "liste_url": "https://cloud.example.com/dav/personal/",
         }
@@ -764,6 +767,71 @@ def test_create_task_saves_ical_and_returns_uid(service, principal):
     assert "Neue Aufgabe" in kwargs["ical"]
 
 
+def test_create_task_with_zoned_dates_writes_matching_vtimezone(service, principal):
+    """Since 5.7 a task's DTSTART/DUE can reference a TZID, and RFC 5545 3.6.5
+    requires a matching VTIMEZONE in the same VCALENDAR - otherwise no other
+    client can resolve the reference. Same guarantee `create_event` already
+    gives; DUE needs it as much as DTSTART does."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(
+            titel="Muell rausbringen",
+            start_datum="2026-07-20T09:00:00",
+            faellig_datum="2026-07-20T18:00:00",
+        ),
+    )
+
+    _, kwargs = calendar.save_todo.call_args
+    ical = kwargs["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:" in ical
+    assert "DUE;TZID=Europe/Berlin:" in ical
+    parsed = Calendar.from_ical(ical)
+    tzids = [str(c["TZID"]) for c in parsed.subcomponents if c.name == "VTIMEZONE"]
+    assert tzids == ["Europe/Berlin"]
+
+
+def test_create_task_with_a_due_only_zone_still_writes_its_vtimezone(service, principal):
+    """DUE alone can carry the only TZID on a task (no DTSTART at all), which
+    the event-shaped dtstart/dtend scan would miss entirely."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(titel="Abgabe", faellig_datum="2026-07-20T18:00:00"),
+    )
+
+    _, kwargs = calendar.save_todo.call_args
+    parsed = Calendar.from_ical(kwargs["ical"])
+    tzids = [str(c["TZID"]) for c in parsed.subcomponents if c.name == "VTIMEZONE"]
+    assert tzids == ["Europe/Berlin"]
+
+
+def test_update_task_with_named_zone_adds_matching_vtimezone(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    instance = Calendar()
+    instance.add_component(todo)
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_obj.icalendar_instance = instance
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task(
+        "Personal", "abc", mapping.TaskFields(start_datum="2026-07-20T09:00:00 America/New_York")
+    )
+
+    vtimezones = [c for c in instance.subcomponents if c.name == "VTIMEZONE"]
+    assert [str(c["TZID"]) for c in vtimezones] == ["America/New_York"]
+    assert instance.subcomponents.index(vtimezones[0]) < instance.subcomponents.index(todo)
+
+
 def test_create_task_without_titel_raises(service):
     with pytest.raises(InvalidTaskDataError):
         service.create_task("Personal", mapping.TaskFields())
@@ -793,6 +861,316 @@ def test_update_task_not_found_raises(service, principal):
 
     with pytest.raises(TaskNotFoundError):
         service.update_task("Personal", "missing-uid", mapping.TaskFields(titel="x"))
+
+
+def test_update_task_targets_the_master_component_not_an_override(service, principal):
+    """A recurring task's VCALENDAR can hold a master VTODO plus one or more
+    override subcomponents (RECURRENCE-ID present) for individual instance
+    exceptions. update_task must edit the master - not whichever VTODO
+    `icalendar_component` happens to resolve to - so a caller editing "the
+    task" doesn't silently end up writing an instance exception instead
+    (5.10)."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    master = Todo()
+    master.add("uid", "abc")
+    master.add("summary", "Alt")
+    master.add("dtstart", date(2026, 7, 20))
+    master.add("rrule", {"FREQ": "DAILY"})
+
+    override = Todo()
+    override.add("uid", "abc")
+    override.add("recurrence-id", date(2026, 7, 21))
+    override.add("summary", "Alt (Ausnahme)")
+
+    instance = Calendar()
+    # Override listed first, so a naive "first VTODO" resolution would pick it.
+    instance.add_component(override)
+    instance.add_component(master)
+
+    todo_obj = MagicMock()
+    todo_obj.icalendar_instance = instance
+    todo_obj.icalendar_component = override
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(titel="Neu"))
+
+    todo_obj.save.assert_called_once()
+    assert str(master.get("summary")) == "Neu"
+    assert str(override.get("summary")) == "Alt (Ausnahme)"
+
+
+def test_update_task_falls_back_to_icalendar_component_when_no_master_present(service, principal):
+    """If every VTODO in the instance carries a RECURRENCE-ID (no master
+    found - e.g. a malformed/partial object), update_task must not crash;
+    it degrades to the pre-5.10 behaviour of editing icalendar_component."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    override = Todo()
+    override.add("uid", "abc")
+    override.add("recurrence-id", date(2026, 7, 21))
+    override.add("summary", "Alt (Ausnahme)")
+
+    instance = Calendar()
+    instance.add_component(override)
+
+    todo_obj = MagicMock()
+    todo_obj.icalendar_instance = instance
+    todo_obj.icalendar_component = override
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(titel="Neu"))
+
+    todo_obj.save.assert_called_once()
+    assert str(override.get("summary")) == "Neu"
+
+
+# --- expanding recurring tasks in listings (5.1) ---
+
+
+def test_list_tasks_expands_a_recurring_task_across_the_due_window(service, principal):
+    """End to end: the finding was that a weekly task appears once, at its
+    original due date, in every listing - never at any later occurrence."""
+    calendar = _make_calendar("Personal")
+    calendar.todos.return_value = [
+        _todo_obj(
+            "muell",
+            titel="Muell rausbringen",
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+    principal.calendars.return_value = [calendar]
+
+    result = service.list_tasks("Personal", due_before="2026-09-22")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-09-01",
+        "2026-09-08",
+        "2026-09-15",
+        "2026-09-22",
+    ]
+    assert {t["serie_uid"] for t in result} == {"muell"}
+    assert all(t["liste"] == "Personal" for t in result)
+
+
+def test_list_tasks_without_a_due_bound_still_reports_the_series_itself(service, principal):
+    calendar = _make_calendar("Personal")
+    calendar.todos.return_value = [
+        _todo_obj(
+            "muell",
+            titel="Muell rausbringen",
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+    principal.calendars.return_value = [calendar]
+
+    result = service.list_tasks("Personal")
+
+    assert [t["uid"] for t in result] == ["muell"]
+    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
+
+
+def test_get_agenda_shows_a_recurring_task_due_that_day(service, principal):
+    """The agenda's whole point: a weekly task started weeks ago is due today."""
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = [
+        _todo_obj(
+            "muell",
+            titel="Muell rausbringen",
+            start_datum="2026-09-01T18:00:00",
+            faellig_datum="2026-09-01T18:00:00",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-09-29")
+
+    assert [t["faellig_datum"] for t in result["aufgaben"]] == ["2026-09-29T18:00:00+02:00"]
+    assert result["aufgaben"][0]["serie_uid"] == "muell"
+    assert result["aufgaben"][0]["quelle_url"] == result["aufgaben"][0]["liste_url"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda svc: svc.update_task("Personal", "muell#2026-09-08", mapping.TaskFields(titel="X")),
+        lambda svc: svc.complete_task("Personal", "muell#2026-09-08"),
+        lambda svc: svc.delete_task("Personal", "muell#2026-09-08"),
+        lambda svc: svc.get_task("Personal", "muell#2026-09-08"),
+    ],
+    ids=["update", "complete", "delete", "get"],
+)
+def test_task_write_paths_reject_an_expanded_occurrence_uid(service, principal, call):
+    """An expanded instance is a read-only view of one date. Handing its uid back
+    must fail loudly, naming the series - not silently edit or complete the whole
+    series the caller only meant to touch one occurrence of."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(InvalidTaskDataError, match="serie_uid"):
+        call(service)
+
+    calendar.get_todo_by_uid.assert_not_called()
+    principal.calendars.assert_not_called()
+
+
+def test_task_write_paths_still_accept_the_series_uid(service, principal):
+    """The guard must not catch an ordinary uid - including one containing "#"."""
+    calendar = _make_calendar("Personal")
+    todo = Todo()
+    todo.add("uid", "wei#rd")
+    todo.add("summary", "Alt")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_obj.icalendar_instance = Calendar()
+    calendar.get_todo_by_uid.return_value = todo_obj
+    principal.calendars.return_value = [calendar]
+
+    service.update_task("Personal", "wei#rd", mapping.TaskFields(titel="Neu"))
+
+    assert str(todo.get("summary")) == "Neu"
+
+
+# --- wiederholung (RRULE), now writable ---
+
+
+def test_create_task_saves_rrule(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(
+            titel="Muell rausbringen",
+            start_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY;BYDAY=MO",
+        ),
+    )
+
+    calendar.save_todo.assert_called_once()
+    _, kwargs = calendar.save_todo.call_args
+    assert "RRULE:FREQ=WEEKLY;BYDAY=MO" in kwargs["ical"]
+
+
+def test_create_task_invalid_rrule_raises_and_does_not_save(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(InvalidTaskDataError, match="RRULE"):
+        service.create_task(
+            "Personal",
+            mapping.TaskFields(titel="T", start_datum="2026-07-20", wiederholung="kaputt"),
+        )
+    calendar.save_todo.assert_not_called()
+
+
+def test_create_task_rrule_without_anchor_raises_and_does_not_save(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        service.create_task("Personal", mapping.TaskFields(titel="T", wiederholung="FREQ=DAILY"))
+    calendar.save_todo.assert_not_called()
+
+
+def test_update_task_sets_rrule_on_task_with_existing_anchor(service, principal):
+    """The RRULE anchor check runs against the final component state, so a
+    call that only sets wiederholung succeeds when start_datum was already
+    on the stored task, not part of this call's fields."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("dtstart", date(2026, 7, 20))
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(wiederholung="FREQ=WEEKLY"))
+
+    todo_obj.save.assert_called_once()
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY"
+
+
+def test_update_task_invalid_rrule_raises_and_does_not_save(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("due", date(2026, 7, 20))
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    with pytest.raises(InvalidTaskDataError, match="RRULE"):
+        service.update_task("Personal", "abc", mapping.TaskFields(wiederholung="kaputt"))
+    todo_obj.save.assert_not_called()
+
+
+def test_update_task_rrule_without_any_anchor_raises_and_does_not_save(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    with pytest.raises(InvalidTaskDataError, match="start_datum|faellig_datum"):
+        service.update_task("Personal", "abc", mapping.TaskFields(wiederholung="FREQ=DAILY"))
+    todo_obj.save.assert_not_called()
+
+
+def test_update_task_clears_wiederholung(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("due", date(2026, 7, 20))
+    todo.add("rrule", {"FREQ": "DAILY"})
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(clear=("wiederholung",)))
+
+    todo_obj.save.assert_called_once()
+    assert mapping.parse_vtodo(todo)["wiederholung"] is None
+
+
+def test_complete_task_leaves_rrule_intact(service, principal):
+    """Pins the observed behaviour documented in docs/tools.md: complete_task
+    only sets STATUS/PERCENT-COMPLETE/COMPLETED - it does not roll a
+    recurring task's series forward to a next occurrence."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("due", date(2026, 7, 20))
+    todo.add("rrule", {"FREQ": "DAILY"})
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.complete_task("Personal", "abc")
+
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "erledigt"
+    assert parsed["wiederholung"] == "FREQ=DAILY"
 
 
 def test_get_task_returns_parsed_task(service, principal):
@@ -1848,7 +2226,12 @@ def _todo_obj(uid: str = "task-1", **fields) -> MagicMock:
 def test_create_event_from_task_uses_due_datetime(service, principal):
     todo_cal = _make_calendar("Privat", components=["VTODO"])
     todo_cal.get_todo_by_uid.return_value = _todo_obj(
-        titel="Steuer", faellig_datum="2026-07-20T14:00:00", notizen="Belege", ort="Zuhause"
+        titel="Steuer",
+        faellig_datum="2026-07-20T14:00:00",
+        start_datum="2026-07-20T14:00:00",
+        notizen="Belege",
+        ort="Zuhause",
+        wiederholung="FREQ=WEEKLY",
     )
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     principal.calendars.return_value = [todo_cal, event_cal]
@@ -1864,6 +2247,7 @@ def test_create_event_from_task_uses_due_datetime(service, principal):
     assert "DTEND;TZID=Europe/Berlin:20260720T143000" in ical_text
     assert "BEGIN:VTIMEZONE" in ical_text
     assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
+    assert "RRULE:FREQ=WEEKLY" in ical_text
     assert uid
 
 

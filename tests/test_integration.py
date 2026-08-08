@@ -69,6 +69,57 @@ def test_full_task_lifecycle(live_service, test_list_name):
         live_service.delete_task(test_list_name, uid)
 
 
+def test_recurring_task_completion_behaviour_against_a_real_server(live_service, test_list_name):
+    """Pins how a real Nextcloud CalDAV backend stores and round-trips a
+    recurring VTODO's RRULE across complete_task.
+
+    This is a deliberate assertion, not a mere observation: complete_task
+    only ever PUTs STATUS/PERCENT-COMPLETE/COMPLETED (mapping.mark_completed
+    never touches RRULE - see the pure-unit pins in test_caldav_client.py's
+    test_complete_task_leaves_rrule_intact and test_mapping.py's
+    test_mark_completed_leaves_wiederholung_intact), and CalDAV storage is a
+    dumb object store: nothing server-side rewrites the ICS a PUT sends it or
+    conjures a new VTODO object out of a completed one. So what this test
+    below asserts - RRULE unchanged, no new task object - is the behaviour
+    this server's client code is meant to produce, confirmed end-to-end
+    against a live backend instead of only against `Todo()` objects built in
+    memory.
+
+    What this test does NOT verify, and cannot from a raw CalDAV client, is
+    how the Nextcloud Tasks *app UI* displays or reacts to the resulting
+    object (e.g. whether its web frontend synthesizes a "next" occurrence
+    for display) - that is a separate, unverified claim; see docs/tools.md.
+
+    If this assertion starts failing, treat it as a signal that this specific
+    CalDAV backend's storage/round-trip behaviour changed, and re-evaluate
+    deliberately - don't just edit the assertion to make it pass again.
+    """
+    uid = live_service.create_task(
+        test_list_name,
+        mapping.TaskFields(
+            titel="nextcloud-task-mcp integration test recurring task",
+            faellig_datum="2026-07-20",
+            wiederholung="FREQ=DAILY",
+            notizen="Created by the automated integration test suite; safe to delete.",
+        ),
+    )
+    try:
+        created = live_service.get_task(test_list_name, uid)
+        assert created["wiederholung"] == "FREQ=DAILY"
+
+        live_service.complete_task(test_list_name, uid)
+
+        all_tasks = live_service.list_tasks(test_list_name, only_open=False)
+        completed = next(t for t in all_tasks if t["uid"] == uid)
+        assert completed["status"] == "erledigt"
+        assert completed.get("wiederholung") == "FREQ=DAILY"
+
+        open_tasks = live_service.list_tasks(test_list_name, only_open=True)
+        assert not any(t["uid"] != uid and t["titel"] == created["titel"] for t in open_tasks)
+    finally:
+        live_service.delete_task(test_list_name, uid)
+
+
 # ---------------------------------------------------------------------------
 # Calendar / event integration tests (VEVENT)
 # ---------------------------------------------------------------------------
