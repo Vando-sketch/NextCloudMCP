@@ -730,6 +730,19 @@ case — its start is the series' first occurrence, not the one that matched.
 occurrences, sorted by start); `aufgaben` are open tasks due that day, each
 with an added `"liste"` key naming its task list.
 
+Every entry in both lists also carries a `"quelle_url"` key — the CalDAV URL
+of the exact calendar/task list it came from, alongside the display name in
+`"kalender"`/`"liste"`. Nextcloud doesn't enforce unique display names, so two
+collections can share one; `quelle_url` is what lets a surprising agenda
+entry be traced back to one specific collection instead of guessed at.
+`list_events`/`list_tasks` do not include this key — it's added here only.
+
+Calendar/task-list listings and resolved names are cached for up to a minute,
+so a collection renamed or deleted in the Nextcloud web UI can take that long
+to be reflected here — but no longer than that, including when the freed-up
+name is immediately given to a different collection. This applies to every
+tool that addresses a calendar or list by display name, not just `get_agenda`.
+
 **Breaking change:** `aufgaben` now comes back sorted by `faellig_datum` (then
 by `titel`), not in the order the server happened to return each list — the
 tasks are fetched through `list_tasks`, so they inherit its sort. With
