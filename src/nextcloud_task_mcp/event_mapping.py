@@ -3,27 +3,42 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
-from dateutil.rrule import rrulestr
 from icalendar import vRecur
 
 from .errors import InvalidEventDataError, InvalidTaskDataError
 from .mapping import (
     VISIBILITY_LABELS,
+    _anchored,
+    _as_utc,
+    _component_zone,
     _extract_categories,
+    _extract_exdates,
     _set,
     apply_alarms,
     extract_alarms,
     format_datetime_output,
-    get_default_timezone,
     local_midnight,
     names_timezone,
     parse_datetime_input,
+    parse_rrule_text,
     visibility_label_to_ical,
 )
+from .mapping import (
+    _check_exdates_match_occurrences as _shared_check_exdates,
+)
+from .mapping import _exdate_values as _shared_exdate_values
+
+# `_anchored`, `_as_utc`, `_component_zone`, `_extract_exdates` and the two
+# helpers wrapped further down (`_exdate_values`,
+# `_check_exdates_match_occurrences`) are shared with the VTODO side and
+# therefore live in `mapping`, the lower layer - see the "Shared
+# component/recurrence helpers" block there. `event_mapping` imports `mapping`,
+# so defining them here and importing them from the task side would be an
+# import cycle. The non-raising ones are imported under their own names, so
+# every existing reference in this module keeps reading the same.
 
 STATUS_LABELS: dict[str, str] = {
     "bestätigt": "CONFIRMED",
@@ -31,12 +46,6 @@ STATUS_LABELS: dict[str, str] = {
     "abgesagt": "CANCELLED",
 }
 _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
-
-#: How many occurrences of a series `_check_exdates_match_occurrences` expands
-#: before giving up on proving that an exception date names one of them. Ten
-#: thousand covers any plausible real series (192 years of weekly occurrences,
-#: 27 of daily ones) and takes ~20 ms even for a per-second rule.
-_RECURRENCE_SCAN_LIMIT = 10_000
 
 # RFC 5545 RELTYPE -> German relation name used in the `verknuepfte_aufgaben`
 # entries returned by `parse_vevent`. A RELATED-TO property without an
@@ -263,84 +272,6 @@ def _parse_datetime(value: str) -> date | datetime:
         raise InvalidEventDataError(str(exc)) from None
 
 
-def _component_start(event) -> date | datetime | None:
-    """The component's DTSTART value, or None if it has none this module can read.
-
-    A `date` for an all-day event, a `datetime` otherwise - the two kinds every
-    other value of the component has to agree with.
-    """
-    prop = event.get("dtstart")
-    value = getattr(prop, "dt", None) if prop is not None else None
-    return value if isinstance(value, (date, datetime)) else None
-
-
-def _component_zone(event) -> tzinfo | None:
-    """The zone the component's DTSTART is expressed in, or None.
-
-    None for an all-day (date-valued) or absent DTSTART, and for a floating
-    one - none of those anchor anything to a zone.
-    """
-    value = _component_start(event)
-    return value.tzinfo if isinstance(value, datetime) else None
-
-
-def _wire_zone(zone: tzinfo | None) -> tzinfo:
-    """The zone a component's values are written in, given its DTSTART's zone.
-
-    An IANA zone is written as a `TZID` reference (with a matching VTIMEZONE,
-    see `caldav_client._sync_vtimezones`); anything else - a bare UTC instant,
-    or a fixed offset left by another client - is written as UTC, since
-    `icalendar` would otherwise emit a nonstandard `TZID="UTC+02:00"` naming no
-    real zone. Shared by everything that has to put several values of one
-    component into the same form: DTSTART/DTEND (`_anchored`) and EXDATE
-    (`_exdate_values`).
-    """
-    return zone if isinstance(zone, ZoneInfo) else timezone.utc
-
-
-def _anchored(value: date | datetime, zone: tzinfo | None) -> date | datetime:
-    """Express a datetime in the component's own zone, keeping the instant.
-
-    Whichever zone a value arrived in - the default one this server attaches to
-    naive input, or the plain UTC `parse_datetime_input` turns an explicit
-    "+02:00" into - it is written in the zone the component's DTSTART already
-    uses. Two things depend on that:
-
-    - `get_event` -> `update_event` must not re-anchor a recurring event to a
-      fixed UTC instant, the one form that reintroduces DST drift;
-    - DTSTART and DTEND must not end up anchored to *different* zones. Two such
-      ends are the same instant apart on the day they are written and an hour
-      apart after the next transition in either zone, so the event silently
-      changes length and nothing in the write path can see it (finding 2.5).
-
-    Only the spelling changes; the instant stays whatever the input meant,
-    including the rule that a naive value means the server's default timezone.
-    Moving an event to another zone is done by *naming* that zone, which
-    `apply_event_fields` handles before calling this (`mapping.names_timezone`).
-
-    `zone` is None when the component has no datetime DTSTART to anchor to (an
-    all-day or absent one), and dates carry no zone at all: both pass through.
-    Values always come from `_parse_datetime`, so a datetime here is aware.
-    """
-    if zone is None or not isinstance(value, datetime):
-        return value
-    return value.astimezone(_wire_zone(zone))
-
-
-def _as_utc(value: datetime) -> datetime:
-    """Make a datetime comparable: a naive value is read in the default zone.
-
-    Same rule as `mapping.parse_datetime_input`; our own writes always produce
-    aware datetimes, but components written by other clients may carry
-    "floating" local times, and those must mean the same thing here as
-    everywhere else in the server - reading them as UTC instead would make
-    free/busy and sorting disagree with the day windows by the zone's offset.
-    """
-    if value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=get_default_timezone())
-
-
 def _utc_value(value: datetime) -> datetime:
     """Read a value the format itself defines as UTC (a naive one included).
 
@@ -353,166 +284,52 @@ def _utc_value(value: datetime) -> datetime:
     return value
 
 
-def _parse_rrule(text: str) -> vRecur:
-    """Validate and parse raw RFC 5545 RRULE text (e.g. "FREQ=WEEKLY;BYDAY=MO").
+def _parse_rrule(text: str, anchor: date | datetime | None = None) -> vRecur:
+    """`mapping.parse_rrule_text`, re-raised as the event-side error class.
 
-    `vRecur.from_ical` silently *skips* parts without '=' instead of raising,
-    so completely unparseable input yields an empty rule - treated as invalid
-    here as well, since an empty RRULE is never what the caller meant.
+    The shared parser lives in `mapping.py` (tasks and events use the exact
+    same RFC 5545 RRULE grammar); callers of the event tools should only ever
+    see `InvalidEventDataError`, so the task-side error is translated here
+    with the same message - same pattern as `_parse_datetime` above.
     """
-    stripped = text.strip()
     try:
-        recur = vRecur.from_ical(stripped)
-    except Exception:
-        recur = None
-    if not recur:
-        raise InvalidEventDataError(
-            f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
-            "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
-        )
-    return recur
+        return parse_rrule_text(text, anchor=anchor)
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
 
 
 def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
-    """Parse `ausnahme_daten` entries into values anchored to the event's DTSTART.
+    """`mapping._exdate_values` for a VEVENT, re-raised as the event-side error.
 
-    Every value of one EXDATE property shares that property's parameters, so
-    they must all be expressed the same way: in the zone DTSTART names when it
-    has one, in UTC otherwise. Mixing them lets `icalendar` write a single
-    `TZID=` next to a value that still carries its own `Z` suffix - forbidden
-    by RFC 5545 3.2.19, and invisible when read back - and, more importantly,
-    an exception date only cancels an occurrence when it names the same moment
-    the recurrence set produced, which is DTSTART's moment in DTSTART's zone.
-
-    Only the spelling is adjusted: each entry keeps the instant it parsed to,
-    including the rule that a naive entry means the server's default timezone.
-
-    For the same reason - one property, one set of parameters - every entry
-    must be the same *kind* as the event's own start: date-only entries for an
-    all-day event, datetimes otherwise. A mixed set (or the wrong kind) is
-    rejected rather than written: `icalendar` would put a DATE and a DATE-TIME
-    under one property with a single `TZID`, which RFC 5545 3.8.5.1 (one value
-    type per property) and 3.2.19 (no TZID on a value without local time) both
-    forbid, and which reads back looking fine. A date-only exception on a timed
-    series names no occurrence of it in any case.
+    Same pattern as `_parse_datetime`/`_parse_rrule` above; `noun` only selects
+    the word the rejection message uses ("the event's start" here, "the task's
+    start" on the VTODO side).
     """
-    start_value = _component_start(event)
-    all_day_event = start_value is not None and not isinstance(start_value, datetime)
-
-    target = _wire_zone(_component_zone(event))
-    values: list[date | datetime] = []
-    for entry in entries:
-        value = _parse_datetime(entry)
-        if isinstance(value, datetime):
-            value = value.astimezone(target)
-        values.append(value)
-
-    kinds = {isinstance(value, datetime) for value in values}
-    if start_value is not None:
-        kinds.add(not all_day_event)
-    if len(kinds) > 1:
-        if start_value is None:
-            raise InvalidEventDataError(
-                "ausnahme_daten entries must all be of one kind: either date-only "
-                "'YYYY-MM-DD' values or full datetimes, not both."
-            )
-        expected = "date-only 'YYYY-MM-DD' values" if all_day_event else "full datetimes"
-        state = "all-day" if all_day_event else "not all-day"
-        raise InvalidEventDataError(
-            f"ausnahme_daten entries must match the event's start: use {expected}, "
-            f"because the event is {state}."
-        )
-    return values
-
-
-def _occurrence_key(value: date | datetime, *, all_day: bool) -> date | datetime:
-    """Identity of one occurrence, for comparing exception dates against a series.
-
-    An all-day series is compared by date (`dateutil` yields its occurrences as
-    naive midnights); a timed one by instant, so an exception written in the
-    event's zone and an occurrence computed in it match whatever offset each
-    side happens to be spelled with.
-    """
-    if all_day:
-        return value.date() if isinstance(value, datetime) else value
-    return _as_utc(value).astimezone(timezone.utc) if isinstance(value, datetime) else value
-
-
-def _rdate_values(event) -> list[date | datetime]:
-    """Every RDATE value on the component (extra dates of the recurrence set)."""
-    rdate = event.get("rdate")
-    if rdate is None:
-        return []
-    entries = rdate if isinstance(rdate, list) else [rdate]
-    values: list[date | datetime] = []
-    for entry in entries:
-        for item in getattr(entry, "dts", []):
-            value = getattr(item, "dt", None)
-            if isinstance(value, (date, datetime)):
-                values.append(value)
-    return values
+    try:
+        return _shared_exdate_values(event, entries, noun="event")
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
 
 
 def _check_exdates_match_occurrences(
     event, entries: list[str], values: list[date | datetime]
 ) -> None:
-    """Reject an exception date that names no occurrence of the event's series.
+    """`mapping._check_exdates_match_occurrences` for a VEVENT, re-raised.
 
-    An EXDATE only cancels something when it names exactly a moment the
-    recurrence set produces. Miss it - by a day, by an hour, or by writing a
-    naive value that means the server's default timezone while the series runs
-    on another one - and the exception is stored, the occurrence stays, and
-    nothing anywhere says so. That silence was half of finding 2.2; the zone
-    anchoring above removed the most common cause, this reports what is left.
-
-    Deliberately best-effort, and never a false alarm:
-
-    - without an RRULE there is no occurrence set to check against (an EXDATE
-      on a non-recurring event is pointless, but that is not this check's
-      business), and neither is there when the rule or DTSTART is one
-      `dateutil` refuses;
-    - RDATE values count as occurrences too, being part of the same set;
-    - the scan stops after `_RECURRENCE_SCAN_LIMIT` occurrences and passes.
-      A per-second rule would otherwise be expanded a year deep to prove a
-      point, and "we could not check this cheaply" must not read as "this is
-      wrong".
+    See the shared implementation for what it does and why it is deliberately
+    best-effort.
     """
-    rrule_prop = event.get("rrule")
-    dtstart_value = _component_start(event)
-    if rrule_prop is None or dtstart_value is None or not values:
-        return
-    all_day = not isinstance(dtstart_value, datetime)
-
-    wanted: dict[Any, str] = {}
-    for spec, value in zip(entries, values, strict=True):
-        wanted.setdefault(_occurrence_key(value, all_day=all_day), spec)
-    for extra in _rdate_values(event):
-        wanted.pop(_occurrence_key(extra, all_day=all_day), None)
-    if not wanted:
-        return
-    latest = max(wanted)
-
     try:
-        rule = rrulestr(rrule_prop.to_ical().decode(), dtstart=dtstart_value)
-        for index, occurrence in enumerate(rule):
-            if index >= _RECURRENCE_SCAN_LIMIT:
-                return
-            key = _occurrence_key(occurrence, all_day=all_day)
-            wanted.pop(key, None)
-            if not wanted:
-                return
-            if key > latest:
-                break  # occurrences ascend, so nothing further can match
-    except (ValueError, TypeError, OverflowError):
-        return  # a rule (or a DTSTART) dateutil cannot expand proves nothing
-
-    spec = next(iter(wanted.values()))
-    raise InvalidEventDataError(
-        f"ausnahme_daten entry '{spec}' does not name an occurrence of this event's "
-        "wiederholung, so it would cancel nothing. Pass the occurrence exactly as "
-        "list_events/get_event reported its 'start' - a value without a timezone is "
-        "read in the server's default timezone, not in the event's."
-    )
+        _shared_check_exdates(
+            event,
+            entries,
+            values,
+            noun="event",
+            reader="list_events/get_event",
+            field_name="start",
+        )
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
 
 
 def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:
@@ -649,7 +466,11 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
             raise InvalidEventDataError(str(exc)) from None
         _set(event, "class", ical_class)
     if fields.wiederholung is not None:
-        _set(event, "rrule", _parse_rrule(fields.wiederholung))
+        anchor_val = None
+        dtstart_prop = event.get("dtstart")
+        if dtstart_prop is not None:
+            anchor_val = getattr(dtstart_prop, "dt", None)
+        _set(event, "rrule", _parse_rrule(fields.wiederholung, anchor=anchor_val))
     if fields.ausnahme_daten is not None:
         # Replace, not append: drop every existing EXDATE, then write all
         # entries as one EXDATE property with a comma-separated value list.
@@ -802,37 +623,6 @@ def _format_end(component, start_value: date | datetime | None) -> str | None:
             end_value = end_value - timedelta(days=1)
         return format_datetime_output(end_value)
     return None
-
-
-def _extract_exdates(component) -> list[str]:
-    """Read all EXDATE values as ISO strings, whatever wire form they use.
-
-    icalendar exposes a single EXDATE property as one vDDDLists (which may
-    itself hold several comma-separated values) and repeated EXDATE
-    properties as a list of vDDDLists - both forms occur in the wild, and
-    `apply_event_fields` only ever writes the single-property form.
-    """
-    exdate = component.get("exdate")
-    if exdate is None:
-        return []
-    entries = exdate if isinstance(exdate, list) else [exdate]
-    result: list[str] = []
-    for entry in entries:
-        dts = getattr(entry, "dts", None)
-        if dts is not None:
-            for item in dts:
-                formatted = format_datetime_output(item.dt)
-                if formatted:
-                    result.append(formatted)
-        else:
-            value: Any = getattr(entry, "dt", None)
-            if value is not None and hasattr(value, "isoformat"):
-                formatted = format_datetime_output(value)
-                if formatted:
-                    result.append(formatted)
-            else:
-                result.append(str(entry))
-    return result
 
 
 def _extract_related(component) -> list[dict[str, str]]:

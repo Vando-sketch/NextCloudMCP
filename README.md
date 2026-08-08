@@ -178,7 +178,12 @@ Returns tasks across one, several, or all task lists (`listen_namen=None` querie
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), `liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — settable via
+`create_task`/`update_task`), `ausnahme_daten` (the occurrences the series skips, `EXDATE`; `[]` if none),
+`wiederholung_von` and `serie_uid` (both `null` unless the row is an expanded occurrence, see below),
+`liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
+
+**Recurring tasks:** with `faellig_vor` given, a recurring task is expanded into one row per occurrence due inside the window (capped at 100 per task) — otherwise "what is due next week" could never include a weekly task started in March. Without `faellig_vor` the series is returned as the single stored row it is, `wiederholung` intact. An expanded row is a *read-only view of one date*: `wiederholung_von` names its occurrence, `serie_uid` points at the stored task, and its own `uid` is rejected by `update_task`/`complete_task`/`delete_task`/`get_task` rather than silently acting on the whole series. See [`docs/tools.md`](docs/tools.md).
 
 Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
@@ -204,6 +209,8 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | `notizen` | `DESCRIPTION` | |
 | `sichtbarkeit` | `CLASS` | `"öffentlich"`→PUBLIC, `"privat"`→PRIVATE, `"vertraulich"`→CONFIDENTIAL |
 | `uebergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
+| `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO"`; requires the task to have a `start_datum` or `faellig_datum` (existing or set in the same call) to recur from |
+| `ausnahme_daten` | `EXDATE` | ISO 8601 occurrences the series skips; each must match `start_datum`'s value kind and name a real occurrence |
 
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
@@ -237,12 +244,22 @@ To remove a property entirely (e.g. delete a due date), list its field name in t
 optional `felder_leeren` parameter instead of just omitting it — omitting a field
 leaves it unchanged. Accepted names: `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `ort`, `url`, `tags`, `erinnerungen`, `notizen`, `sichtbarkeit`,
-`uebergeordnete_aufgabe` (`titel` cannot be cleared). A field can't be both set and
-cleared in the same call. See [`docs/tools.md`](docs/tools.md) for details and examples.
+`uebergeordnete_aufgabe`, `wiederholung`, `ausnahme_daten` (`titel` cannot be cleared).
+Clearing `wiederholung` also drops the task's `ausnahme_daten` and any `RDATE`, which
+mean nothing without a recurrence rule. A field can't be
+both set and cleared in the same call; `wiederholung`'s anchor requirement is checked
+against the task's final state, so clearing the task's only `start_datum`/`faellig_datum`
+while a recurrence is set or remains is rejected too. See [`docs/tools.md`](docs/tools.md)
+for details and examples.
 
 ### `complete_task(list_name, task_uid)`
 
-Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp.
+Sets `STATUS:COMPLETED`, `PERCENT-COMPLETE:100`, and a `COMPLETED` timestamp. This does
+**not** roll a recurring task's series forward — the task's `wiederholung` (`RRULE`) is
+left untouched, so completing a recurring task ends it as far as this server is
+concerned; advance `faellig_datum` instead to keep a series going. This is this server's
+own verified behaviour (see `docs/tools.md`'s `complete_task` section) — how the
+Nextcloud Tasks app itself displays a completed recurring task is not verified here.
 
 ### `delete_task(list_name, task_uid)`
 
