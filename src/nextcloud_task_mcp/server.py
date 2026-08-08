@@ -193,10 +193,16 @@ def build_server(
 
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
-            prioritaet, fortschritt_prozent, status, ort, url, tags, notizen,
-            uebergeordnete_uid (None unless the task is a subtask), wiederholung
-            (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO", or None if the task
-            doesn't recur; read-only - this server can't create/edit recurrence).
+            prioritaet, fortschritt_prozent, status, ort, url, tags, erinnerungen
+            (list of reminder strings, each either a relative RFC 5545 duration
+            like "-PT30M" or an absolute ISO 8601 datetime like
+            "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
+            accepts; alarms whose trigger this form cannot express are omitted,
+            and update_task leaves those untouched), notizen,
+            uebergeordnete_uid (None unless the task is a
+            subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
+            or None if the task doesn't recur; read-only - this server can't
+            create/edit recurrence).
         """
         return await _call(
             caldav_service.list_tasks,
@@ -218,7 +224,8 @@ def build_server(
         Returns:
             A task dict with the same shape as one entry from list_tasks: uid,
             titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
-            status, ort, url, tags, notizen, uebergeordnete_uid, wiederholung.
+            status, ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
+            wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 
@@ -253,6 +260,9 @@ def build_server(
             erinnerungen: Optional list of reminders, each either a relative RFC 5545
                 duration (e.g. "-P1D", "-PT1H", relative to faellig_datum, falling
                 back to start_datum) or an absolute ISO 8601 datetime -> VALARM.
+                The leading "-" is what makes a relative reminder fire *before*
+                that date; a positive duration ("PT30M") is valid and means 30
+                minutes *after* it.
             notizen: Optional notes -> DESCRIPTION.
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
@@ -473,7 +483,12 @@ def build_server(
         Returns:
             Event dicts sorted by start, each with keys: uid, titel, start,
             ende (all-day: inclusive last day), ganztaegig, ort, beschreibung,
-            tags, status ("bestätigt"/"vorläufig"/"abgesagt" or None),
+            tags, erinnerungen (list of reminder strings, each either a relative
+            RFC 5545 duration like "-PT30M" or an absolute ISO 8601 datetime
+            like "2026-08-07T09:00:00+00:00", exactly what create_event/update_event
+            accepts; alarms whose trigger this form cannot express - an
+            end-anchored one, say - are omitted, and update_event leaves those
+            untouched), status ("bestätigt"/"vorläufig"/"abgesagt" or None),
             sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
             url, verknuepfte_aufgaben (RELATED-TO links; each entry's
             "beziehung" uses the same values as link_task_to_event's
@@ -553,7 +568,9 @@ def build_server(
                 occurrences of a recurring event -> EXDATE.
             erinnerungen: Optional reminders, each either a relative RFC 5545
                 duration before the start (e.g. "-PT30M", "-P1D") or an
-                absolute ISO 8601 datetime -> VALARM.
+                absolute ISO 8601 datetime -> VALARM. The leading "-" is what
+                makes a relative reminder fire *before* the start; a positive
+                duration ("PT30M") is valid and means 30 minutes *after* it.
             url: Optional URL -> URL.
             verknuepfte_aufgabe: Optional UID of an existing task this event
                 reserves time for -> RELATED-TO;RELTYPE=PARENT on the event

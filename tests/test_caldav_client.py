@@ -467,6 +467,7 @@ def test_list_tasks_parses_todos(service, principal):
             "ort": None,
             "url": None,
             "tags": [],
+            "erinnerungen": [],
             "notizen": None,
             "uebergeordnete_uid": None,
             "wiederholung": None,

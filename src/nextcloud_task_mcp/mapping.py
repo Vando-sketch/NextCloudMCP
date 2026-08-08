@@ -26,6 +26,13 @@ VISIBILITY_LABELS: dict[str, str] = {
 # try/except around `date.fromisoformat` (B1).
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# Identity of a VALARM trigger, used to match the reminder specs a caller
+# passes against the alarms a component already carries: ("dur", timedelta)
+# for a relative trigger, ("dt", UTC datetime) for an absolute one. Built by
+# `_trigger_key` so that equivalent spellings ("-P1W"/"-P7D", "...Z"/"+00:00")
+# compare equal.
+_TriggerKey = tuple[str, datetime] | tuple[str, timedelta]
+
 # Maps the German, LLM-facing `felder_leeren` entry name to the
 # (TaskFields attribute name, iCalendar property name) it clears. "titel" is
 # deliberately absent - clearing the title is not a supported operation.
@@ -262,6 +269,12 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
     ISO 8601 datetime. This works the same whether DUE/DTSTART is an all-day
     `date` or a full `datetime` - RFC 5545 permits a relative VALARM trigger
     to be RELATED to a DATE-valued DUE/DTSTART.
+
+    The leading "-" is what makes a relative reminder fire *before* its
+    anchor. A positive duration ("PT30M") is legal RFC 5545 and accepted as
+    written - it schedules the reminder half an hour *after* the due/start
+    date, which is occasionally what a caller wants and never what a missing
+    sign means to guess about.
     """
     trigger_value, trigger_params = _parse_trigger(spec, has_due=has_due, has_start=has_start)
     alarm = Alarm()
@@ -269,6 +282,136 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
     alarm.add("description", description or "Reminder")
     alarm.add("trigger", trigger_value, parameters=trigger_params)
     return alarm
+
+
+def _trigger_key(value: datetime | timedelta) -> _TriggerKey:
+    """Identity of a trigger, independent of how it was spelled.
+
+    "-P1W" and "-P7D" are the same relative trigger, and "...Z" and
+    "...+02:00" name the same instant, so both compare equal here.
+    """
+    if isinstance(value, datetime):
+        return ("dt", value.astimezone(timezone.utc))
+    return ("dur", value)
+
+
+def _expected_related(component) -> str | None:
+    """The RELATED anchor `build_alarm` would give a relative trigger on this component.
+
+    None when the component has neither DUE nor DTSTART - a relative reminder
+    cannot be written onto it at all.
+    """
+    if "due" in component:
+        return "END"
+    if "dtstart" in component:
+        return "START"
+    return None
+
+
+def _has_anchor(component, related: str) -> bool:
+    """Whether the component carries the property a RELATED value names.
+
+    START is DTSTART; END is DUE on a task and DTEND (or DTSTART+DURATION) on
+    an event. An anchor the component does not have cannot place an alarm at a
+    different moment than the anchor it does have - which is what makes a
+    differently-named anchor harmless in `_read_alarm`.
+    """
+    if related == "START":
+        return "dtstart" in component
+    if related == "END":
+        return "due" in component or "dtend" in component or "duration" in component
+    return False
+
+
+def _read_alarm(alarm, component) -> tuple[str, _TriggerKey] | None:
+    """Render one VALARM's TRIGGER as a reminder spec plus its identity, or None.
+
+    None means "this alarm has no `erinnerungen` spelling": returning a string
+    for it would either be a lie about when it fires or a value the write path
+    would reject. That covers a missing TRIGGER, a repeated TRIGGER property
+    (`icalendar` hands those back as a list), a DATE-valued trigger, an
+    absolute trigger whose TZID cannot be resolved, a relative trigger on a
+    component with neither DUE nor DTSTART (nothing to anchor to, so writing
+    the string back would be rejected), and a relative trigger anchored to an
+    anchor the component really has while `build_alarm` would re-derive the
+    other one - `RELATED=END` on an event with a DTEND, `RELATED=START` on a
+    task that has both dates. Such alarms are left strictly alone by
+    `apply_alarms`.
+
+    A named anchor the component does *not* have is not a mismatch: RELATED is
+    omissible and defaults to START, so `TRIGGER:-PT30M` on a task with only a
+    due date is the ordinary wire form for "30 minutes before it is due", not
+    an alarm hanging off a DTSTART that isn't there.
+    """
+    prop = alarm.get("trigger")
+    if prop is None:
+        return None
+    value = getattr(prop, "dt", None)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            zone = _trigger_zone(prop)
+            if zone is None:
+                return None
+            value = value.replace(tzinfo=zone)
+        return value.isoformat(), _trigger_key(value)
+    if isinstance(value, timedelta):
+        expected_related = _expected_related(component)
+        if expected_related is None:
+            return None
+        params = getattr(prop, "params", {}) or {}
+        # RFC 5545: a TRIGGER without RELATED is anchored to the start.
+        related = str(params.get("RELATED", "START")).upper()
+        if related != expected_related and _has_anchor(component, related):
+            return None
+        return vDuration(value).to_ical().decode(), _trigger_key(value)
+    return None
+
+
+def apply_alarms(component, specs: list[str], description: str) -> None:
+    """Replace the component's reminders with `specs`, without collateral damage.
+
+    Only VALARMs that `extract_alarms` can express are up for replacement:
+    - an alarm already triggering at one of the requested moments is left
+      exactly as it is, keeping its ACTION, DESCRIPTION, UID and dismiss state
+      (ACKNOWLEDGED / X-MOZ-LASTACK) - rebuilding it would make an already
+      dismissed reminder fire again;
+    - an alarm whose trigger is not in the list is removed (that is what
+      "replaces all reminders" means);
+    - an alarm this format cannot express (see `_read_alarm`) is never touched,
+      because it was never visible to the caller in the first place. Clearing
+      "erinnerungen" via `felder_leeren` still removes every VALARM.
+
+    Duplicate specs (including different spellings of the same trigger) produce
+    one alarm, not several.
+    """
+    has_due = "due" in component
+    has_start = "dtstart" in component
+
+    wanted: dict[_TriggerKey, str] = {}
+    for spec in specs:
+        value, _params = _parse_trigger(spec, has_due=has_due, has_start=has_start)
+        wanted.setdefault(_trigger_key(value), spec)
+
+    kept: set[_TriggerKey] = set()
+    subcomponents = []
+    for sub in component.subcomponents:
+        if getattr(sub, "name", None) != "VALARM":
+            subcomponents.append(sub)
+            continue
+        read = _read_alarm(sub, component)
+        if read is None:
+            subcomponents.append(sub)
+            continue
+        key = read[1]
+        if key in wanted and key not in kept:
+            kept.add(key)
+            subcomponents.append(sub)
+    for key, spec in wanted.items():
+        if key not in kept:
+            subcomponents.append(
+                build_alarm(spec, description, has_due=has_due, has_start=has_start)
+            )
+    component.subcomponents = subcomponents
 
 
 def _validate_clear(fields: TaskFields, clear: tuple[str, ...]) -> None:
@@ -342,14 +485,7 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         )
 
     if fields.erinnerungen is not None:
-        todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
-        has_due = "due" in todo
-        has_start = "dtstart" in todo
-        title_for_alarm = str(todo.get("summary", "Reminder"))
-        for spec in fields.erinnerungen:
-            todo.add_component(
-                build_alarm(spec, title_for_alarm, has_due=has_due, has_start=has_start)
-            )
+        apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
 
 
 def mark_completed(todo) -> None:
@@ -415,6 +551,119 @@ def _extract_rrule(component) -> str | None:
     return rrule.to_ical().decode()
 
 
+def extract_alarms(component) -> list[str]:
+    """Extract VALARM subcomponents from an iCalendar component as reminder strings.
+
+    Returns each alarm's TRIGGER in the string format accepted by create_task /
+    create_event:
+    - Relative trigger (timedelta): RFC 5545 duration string, e.g. "-PT30M", "-P1D",
+      serialized via `vDuration`. Equivalent spellings are normalized to the
+      canonical one ("-P1W" reads back as "-P7D", "-PT90M" as "-PT1H30M") -
+      the same trigger, a different string.
+    - Absolute trigger (datetime): ISO 8601 string with offset, e.g.
+      "2026-08-07T09:00:00+00:00". RFC 5545 requires absolute triggers to be
+      UTC, and this server only ever writes them that way - but other clients
+      do emit `TRIGGER;VALUE=DATE-TIME;TZID=Europe/Berlin:...`, which
+      `icalendar` hands back as a *naive* datetime with the zone left in the
+      property's parameters. Reading that as UTC would silently shift the
+      reminder by the zone's offset, so the TZID parameter is resolved via
+      `_trigger_zone` and the value rendered in *that* zone - the same rule
+      DTSTART/DUE follow, which keep whatever zone they were stored in.
+
+    Alarms appear in the returned list in the order they are defined in the
+    component, and only alarms whose trigger this format can express are
+    listed at all - see `_read_alarm` for the ones that are skipped and
+    `apply_alarms` for how they survive a write untouched.
+
+    What the string form still cannot carry, for the alarms it does list: a
+    foreign ACTION (EMAIL/AUDIO), an ATTACH, and VALARM DURATION/REPEAT (alarm
+    self-repetition). Those are preserved as long as the alarm stays in the
+    list a write passes back; a reminder whose time is *changed* is replaced by
+    a plain DISPLAY alarm. `export_calendar`/`import_ics` round-trip every
+    alarm verbatim and are the lossless path.
+    """
+    alarms: list[str] = []
+    for sub in getattr(component, "subcomponents", []):
+        if getattr(sub, "name", None) != "VALARM":
+            continue
+        read = _read_alarm(sub, component)
+        if read is not None:
+            alarms.append(read[0])
+    return alarms
+
+
+# Windows/Outlook zone names for the zones this server is most likely to meet.
+# They are not IANA names, so `zoneinfo` cannot resolve them; the mapping is
+# the CLDR windowsZones default ("001") territory for each. Deliberately a
+# short list of the common ones rather than all ~140 - anything not in it is
+# handled by `_trigger_zone` returning None (the alarm is then left alone
+# instead of being reported at a guessed time).
+_WINDOWS_TZIDS: dict[str, str] = {
+    "utc": "Etc/UTC",
+    "gmt standard time": "Europe/London",
+    "greenwich standard time": "Atlantic/Reykjavik",
+    "w. europe standard time": "Europe/Berlin",
+    "central europe standard time": "Europe/Budapest",
+    "central european standard time": "Europe/Warsaw",
+    "romance standard time": "Europe/Paris",
+    "e. europe standard time": "Europe/Chisinau",
+    "fle standard time": "Europe/Kyiv",
+    "gtb standard time": "Europe/Bucharest",
+    "russian standard time": "Europe/Moscow",
+    "eastern standard time": "America/New_York",
+    "central standard time": "America/Chicago",
+    "mountain standard time": "America/Denver",
+    "pacific standard time": "America/Los_Angeles",
+    "india standard time": "Asia/Kolkata",
+    "china standard time": "Asia/Shanghai",
+    "tokyo standard time": "Asia/Tokyo",
+    "aus eastern standard time": "Australia/Sydney",
+}
+
+
+def _resolve_tzid(tzid: str) -> ZoneInfo | None:
+    """Resolve a TZID parameter to a zone, or None if it names no zone we know.
+
+    Three forms are accepted, in order: a plain IANA name ("Europe/Berlin"), a
+    Windows/Outlook zone name ("W. Europe Standard Time", see `_WINDOWS_TZIDS`),
+    and the prefixed forms Evolution and older clients emit
+    ("/freeassociation.sourceforge.net/Europe/Berlin"), whose trailing path
+    segments are an IANA name.
+    """
+    name = tzid.strip()
+    for candidate in (name, _WINDOWS_TZIDS.get(name.lower(), "")):
+        if not candidate:
+            continue
+        try:
+            return ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    parts = [part for part in name.split("/") if part]
+    for count in (3, 2):
+        if len(parts) > count:
+            try:
+                return ZoneInfo("/".join(parts[-count:]))
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+    return None
+
+
+def _trigger_zone(prop: Any) -> timezone | ZoneInfo | None:
+    """The zone a naive absolute TRIGGER value is expressed in.
+
+    UTC when the property carries no TZID at all (RFC 5545 requires absolute
+    triggers to be UTC, so that is the value's own claim). Otherwise the zone
+    the TZID names, or None when it names none this server can resolve -
+    reporting such a reminder at a guessed hour would be worse than not
+    listing it, since the alarm itself is preserved either way.
+    """
+    params = getattr(prop, "params", {}) or {}
+    tzid = params.get("TZID")
+    if not tzid:
+        return timezone.utc
+    return _resolve_tzid(str(tzid))
+
+
 def parse_vtodo(component) -> dict[str, Any]:
     """Parse an icalendar VTODO component into the server's German task dict."""
     priority = component.get("priority")
@@ -431,6 +680,7 @@ def parse_vtodo(component) -> dict[str, Any]:
         "ort": _get_text(component, "location"),
         "url": _get_text(component, "url"),
         "tags": _extract_categories(component),
+        "erinnerungen": extract_alarms(component),
         "notizen": _get_text(component, "description"),
         "uebergeordnete_uid": _extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
