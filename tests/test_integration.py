@@ -70,19 +70,29 @@ def test_full_task_lifecycle(live_service, test_list_name):
 
 
 def test_recurring_task_completion_behaviour_against_a_real_server(live_service, test_list_name):
-    """Records what a real Nextcloud server does with a recurring VTODO's
-    RRULE once complete_task is called on it.
+    """Pins how a real Nextcloud CalDAV backend stores and round-trips a
+    recurring VTODO's RRULE across complete_task.
 
-    This server's own code (caldav_client.complete_task / mapping.mark_completed)
-    only ever sets STATUS/PERCENT-COMPLETE/COMPLETED and never touches RRULE or
-    creates a new occurrence - see the pure-unit pin in test_caldav_client.py's
+    This is a deliberate assertion, not a mere observation: complete_task
+    only ever PUTs STATUS/PERCENT-COMPLETE/COMPLETED (mapping.mark_completed
+    never touches RRULE - see the pure-unit pins in test_caldav_client.py's
     test_complete_task_leaves_rrule_intact and test_mapping.py's
-    test_mark_completed_leaves_wiederholung_intact for that. What is NOT
-    verified anywhere else in this suite is how a real Nextcloud Tasks
-    server/app treats the resulting object afterwards (e.g. whether the web UI
-    materializes/display a "next" occurrence) - this test only records this
-    server's own round trip against a live CalDAV backend, not the Nextcloud
-    Tasks app's UI behaviour, which remains unverified here.
+    test_mark_completed_leaves_wiederholung_intact), and CalDAV storage is a
+    dumb object store: nothing server-side rewrites the ICS a PUT sends it or
+    conjures a new VTODO object out of a completed one. So what this test
+    below asserts - RRULE unchanged, no new task object - is the behaviour
+    this server's client code is meant to produce, confirmed end-to-end
+    against a live backend instead of only against `Todo()` objects built in
+    memory.
+
+    What this test does NOT verify, and cannot from a raw CalDAV client, is
+    how the Nextcloud Tasks *app UI* displays or reacts to the resulting
+    object (e.g. whether its web frontend synthesizes a "next" occurrence
+    for display) - that is a separate, unverified claim; see docs/tools.md.
+
+    If this assertion starts failing, treat it as a signal that this specific
+    CalDAV backend's storage/round-trip behaviour changed, and re-evaluate
+    deliberately - don't just edit the assertion to make it pass again.
     """
     uid = live_service.create_task(
         test_list_name,
@@ -101,16 +111,10 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
 
         all_tasks = live_service.list_tasks(test_list_name, only_open=False)
         completed = next(t for t in all_tasks if t["uid"] == uid)
-        # Recorded, not asserted as "correct" one way or the other: this is
-        # exactly the live-server data point the task description asks to
-        # capture so it can be confirmed later without writing new code.
         assert completed["status"] == "erledigt"
-        assert completed["wiederholung"] == "FREQ=DAILY"
+        assert completed.get("wiederholung") == "FREQ=DAILY"
 
         open_tasks = live_service.list_tasks(test_list_name, only_open=True)
-        # No second/"next" occurrence is created as a separate open task by
-        # this server - completing a recurring task ends it as far as this
-        # server is concerned (see docs/tools.md).
         assert not any(t["uid"] != uid and t["titel"] == created["titel"] for t in open_tasks)
     finally:
         live_service.delete_task(test_list_name, uid)
