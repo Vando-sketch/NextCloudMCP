@@ -67,7 +67,7 @@ class Settings:
         # failing tool call hours later.
         try:
             ZoneInfo(self.default_timezone)
-        except (ZoneInfoNotFoundError, ValueError) as exc:
+        except (ZoneInfoNotFoundError, ValueError, IsADirectoryError) as exc:
             raise ConfigError(
                 f"MCP_DEFAULT_TIMEZONE is not a known IANA timezone name: "
                 f"{self.default_timezone!r} (e.g. 'Europe/Berlin', or 'UTC')."
