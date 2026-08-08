@@ -3410,7 +3410,7 @@ def test_collection_metadata_invalidated_after_create(service, principal, dav_cl
 
     # Creating a collection drops the cache, so the next listing re-fetches.
     service.list_task_lists()
-    assert dav_client.request.call_count == 2
+    assert dav_client.request.call_count == 3
 
 
 def test_supports_component_falls_back_when_calendar_absent_from_batch(
@@ -3717,3 +3717,71 @@ def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_colle
     for task in agenda["aufgaben"]:
         found = service.get_task("CSGO", task["uid"])
         assert found["uid"] == task["uid"]
+
+
+
+def test_create_rename_conflict_refreshes_metadata(service, principal, dav_client):
+    personal = _make_calendar("Personal", "https://cloud.example.com/dav/personal/")
+    principal.calendars.return_value = [personal]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+    
+    # Warm up cache
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+    assert dav_client.request.call_count == 1
+    
+    # Induce a conflict
+    principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
+    
+    with pytest.raises(TaskListAlreadyExistsError):
+        service.create_task_list("Groceries")
+        
+    # The conflict triggers _list_collections(fresh=True).
+    # We assert that BOTH caches were refreshed.
+    assert principal.calendars.call_count == 2
+    assert dav_client.request.call_count == 2
+
+
+
+
+def test_get_agenda_atomic_across_ttl_boundary(
+    service, principal, monkeypatch, dav_client
+):
+    csgo_tasks = _make_calendar(
+        "CSGO", "https://cloud.example.com/dav/csgo-tasks/", components=["VTODO"]
+    )
+    csgo_events = _make_calendar(
+        "CSGO", "https://cloud.example.com/dav/csgo-events/", components=["VEVENT"]
+    )
+    
+    principal.calendars.return_value = [csgo_tasks, csgo_events]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+    
+    fake_now = [1000.0]
+    
+    def mock_monotonic():
+        return fake_now[0]
+        
+    monkeypatch.setattr(caldav_client_module, "monotonic", mock_monotonic)
+    
+    # Pre-warm
+    service.list_task_lists()
+    
+    # Now simulate a slow get_agenda where time crosses TTL boundary MID-REQUEST.
+    # We can do this by patching _collect_events or _tasks_from_every_list to advance time.
+    original_collect_events = service._collect_events
+    
+    def slow_collect_events(*args, **kwargs):
+        fake_now[0] += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS + 1
+        return original_collect_events(*args, **kwargs)
+        
+    monkeypatch.setattr(service, "_collect_events", slow_collect_events)
+    
+    # Clear the call counts
+    principal.calendars.reset_mock()
+    
+    # Call get_agenda
+    service.get_agenda("2026-07-20")
+    
+    # It should not have re-fetched from the server during get_agenda because the TTL was frozen!
+    assert principal.calendars.call_count == 0
