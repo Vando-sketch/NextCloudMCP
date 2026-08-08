@@ -1243,6 +1243,16 @@ def test_wiederholung_without_start_rejected():
         _apply(todo, titel="T", wiederholung="FREQ=DAILY")
 
 
+def test_wiederholung_rejected_with_only_faellig_datum_as_anchor():
+    """5.4: RFC 5545 builds the recurrence-set from DTSTART, not DUE - a task
+    with only a faellig_datum (DUE) is not a resolvable anchor for a
+    recurrence, even though DUE alone is a perfectly valid non-recurring
+    task. This must be rejected the same way as no anchor at all."""
+    todo = _new_todo()
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
+        _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=DAILY")
+
+
 def test_wiederholung_succeeds_when_anchor_already_exists_on_the_task():
     """The anchor check runs against the component's final state (mirrors
     event_mapping._check_start_end_consistency), not just this call's fields -
