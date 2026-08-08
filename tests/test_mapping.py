@@ -1530,6 +1530,292 @@ def test_ausnahme_daten_is_anchored_to_the_tasks_own_zone():
     assert "EXDATE;TZID=America/New_York:20260722T090000" in ical
 
 
+# --- expanding recurring tasks into their occurrences (5.1) ---
+
+
+def _recurring(uid: str = "task-1", **kwargs) -> dict:
+    """A parsed task dict for a recurring task, built through the real mapping.
+
+    Goes VTODO -> apply_task_fields -> parse_vtodo, so the dicts the expansion
+    sees are exactly the ones `list_tasks` builds - including the bare numeric
+    offsets `parse_vtodo` writes, which is what the expansion has to re-anchor.
+    """
+    todo = _new_todo(uid)
+    _apply(todo, titel=uid, **kwargs)
+    return mapping.parse_vtodo(todo)
+
+
+def test_recurring_task_without_an_upper_bound_stays_a_single_master_row():
+    """An unfiltered `list_tasks` has no window to expand into: the series stays
+    the one row it has always been, `wiederholung` intact. Expanding here would
+    put a hundred copies of every recurring task into every plain listing and
+    strip the rule from all of them."""
+    tasks = [
+        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
+    ]
+
+    result = mapping.filter_tasks(tasks)
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
+    assert result[0]["wiederholung_von"] is None
+    assert result[0]["serie_uid"] is None
+
+
+def test_recurring_task_expands_into_the_queried_window():
+    """The finding itself: a weekly task used to appear exactly once, at its
+    original due date, and never again."""
+    tasks = [
+        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-22")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-09-01",
+        "2026-09-08",
+        "2026-09-15",
+        "2026-09-22",
+    ]
+
+
+def test_expanded_instances_are_marked_and_carry_a_uid_no_write_path_accepts():
+    """An instance must not be mistakable for the stored task: nothing about it
+    recurs, it names its occurrence, it points at the series, and its uid is one
+    `split_occurrence_uid` recognises so every write path can refuse it."""
+    tasks = [
+        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
+    ]
+
+    instance = mapping.filter_tasks(tasks, due_before="2026-09-08")[1]
+
+    assert instance["wiederholung"] is None
+    assert instance["wiederholung_von"] == "2026-09-08"
+    assert instance["serie_uid"] == "task-1"
+    assert instance["uid"] != "task-1"
+    assert mapping.split_occurrence_uid(instance["uid"]) == ("task-1", "2026-09-08")
+
+
+def test_expansion_stops_at_the_hard_instance_cap():
+    """An unbounded rule inside a wide window must not fill the listing."""
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01T00:00:00",
+            faellig_datum="2026-09-01T00:00:00",
+            wiederholung="FREQ=MINUTELY",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert len(result) == mapping._TASK_EXPANSION_LIMIT
+
+
+def test_expansion_honours_count():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=DAILY;COUNT=3",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+
+
+def test_expansion_honours_until():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01T09:00:00",
+            faellig_datum="2026-09-01T09:00:00",
+            # 09:00 Europe/Berlin on the 3rd, the form RFC 5545 requires
+            # alongside a DATE-TIME DTSTART.
+            wiederholung="FREQ=DAILY;UNTIL=20260903T070000Z",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-09-01T09:00:00+02:00",
+        "2026-09-02T09:00:00+02:00",
+        "2026-09-03T09:00:00+02:00",
+    ]
+
+
+def test_a_rule_dateutil_refuses_leaves_the_master_row_alone():
+    """A DATE-TIME UNTIL on an all-day series is invalid per RFC 5545 3.3.10 and
+    `dateutil` rejects it outright. "We cannot expand this" must degrade to
+    today's single master row, never to a wrong or empty answer."""
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=DAILY;UNTIL=20260903T000000Z",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2027-12-31")
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung"] == "FREQ=DAILY;UNTIL=20260903T000000Z"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_expanded_occurrences_keep_their_wall_clock_across_dst():
+    """Where a naive re-parse of `parse_vtodo`'s "+02:00" output goes wrong: it
+    pins the series to a fixed offset, so every occurrence after the autumn
+    transition comes back an hour early. The read side must preserve what 5.7
+    preserves on the write side."""
+    tasks = [
+        _recurring(
+            start_datum="2026-10-19T09:00:00",
+            faellig_datum="2026-10-19T17:00:00",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-11-03")
+
+    assert [t["start_datum"] for t in result] == [
+        "2026-10-19T09:00:00+02:00",
+        "2026-10-26T09:00:00+01:00",  # not 08:00+01:00
+        "2026-11-02T09:00:00+01:00",
+    ]
+
+
+def test_expansion_keeps_the_distance_between_start_and_due():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01T09:00:00",
+            faellig_datum="2026-09-03T17:00:00",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-11")
+
+    assert [(t["start_datum"], t["faellig_datum"]) for t in result] == [
+        ("2026-09-01T09:00:00+02:00", "2026-09-03T17:00:00+02:00"),
+        ("2026-09-08T09:00:00+02:00", "2026-09-10T17:00:00+02:00"),
+    ]
+
+
+def test_expansion_skips_ausnahme_daten():
+    tasks = [
+        _recurring(
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=DAILY",
+            ausnahme_daten=["2026-09-02"],
+        )
+    ]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-04")
+
+    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-03", "2026-09-04"]
+
+
+def test_occurrences_before_the_window_do_not_consume_the_instance_cap():
+    """A daily series started long before `faellig_nach` must still fill the
+    queried window, not be truncated by the occurrences it skipped to get there."""
+    tasks = [
+        _recurring(start_datum="2026-01-01", faellig_datum="2026-01-01", wiederholung="FREQ=DAILY")
+    ]
+
+    result = mapping.filter_tasks(tasks, due_after="2026-12-01", due_before="2026-12-05")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-12-01",
+        "2026-12-02",
+        "2026-12-03",
+        "2026-12-04",
+        "2026-12-05",
+    ]
+
+
+def test_non_recurring_tasks_are_left_alone_by_expansion():
+    tasks = [_recurring(faellig_datum="2026-09-01")]
+
+    result = mapping.filter_tasks(tasks, due_before="2026-09-22")
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_a_series_whose_start_and_due_disagree_in_kind_is_not_expanded():
+    """An all-day DTSTART with a timed DUE (only a foreign client writes that)
+    has no well-defined distance between the two - the master row is returned as
+    it is rather than guessing one."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Fremd\n"
+        "DTSTART;VALUE=DATE:20260901\n"
+        "DUE:20260901T150000Z\n"
+        "RRULE:FREQ=WEEKLY\n"
+        "END:VTODO\n"
+    )
+
+    result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-22")
+
+    assert len(result) == 1
+    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_a_series_with_an_unreadable_anchor_is_not_expanded():
+    """A period-valued DTSTART (a foreign client's) reads back as something no
+    date parser accepts. It must leave the master row alone, not raise - one
+    unreadable task must never turn a whole healthy listing into an error."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Fremd\n"
+        "DTSTART;VALUE=PERIOD:20260901T090000Z/PT1H\n"
+        "DUE:20260901T100000Z\n"
+        "RRULE:FREQ=DAILY\n"
+        "END:VTODO\n"
+    )
+
+    result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-05")
+
+    assert len(result) == 1
+    assert result[0]["uid"] == "task-1"
+    assert result[0]["wiederholung_von"] is None
+
+
+def test_an_unreadable_exception_date_cancels_nothing_and_does_not_raise():
+    """Same rule for EXDATE: one this server cannot read skips no occurrence,
+    and must not take the expansion (or the listing) down with it."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Fremd\n"
+        "DTSTART;VALUE=DATE:20260901\n"
+        "DUE;VALUE=DATE:20260901\n"
+        "RRULE:FREQ=DAILY\n"
+        "EXDATE;VALUE=PERIOD:20260902T000000Z/PT1H\n"
+        "END:VTODO\n"
+    )
+
+    result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-03")
+
+    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+
+
+def test_split_occurrence_uid_leaves_an_ordinary_uid_alone():
+    """A stored UID that merely contains a "#" must not read as an occurrence."""
+    assert mapping.split_occurrence_uid("wei#rd-uid") == ("wei#rd-uid", None)
+    assert mapping.split_occurrence_uid("plain-uid") == ("plain-uid", None)
+    assert mapping.split_occurrence_uid("u1#2026-09-08") == ("u1", "2026-09-08")
+
+
 def _task(uid: str, faellig_datum: str | None) -> dict:
     return {
         "uid": uid,

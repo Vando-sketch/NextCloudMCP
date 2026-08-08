@@ -30,6 +30,23 @@ This project does not yet follow Semantic Versioning releases.
   `TZID`, and the matching `VTIMEZONE` is now written alongside it.
   Note that `complete_task` still ends a series rather than rolling it forward
   (see under "Changed").
+- **Recurring tasks are readable as a series, not just writable.** CalDAV
+  servers do not expand `VTODO` series the way they expand `VEVENT`s, so a
+  weekly task appeared exactly once in every listing - at its original due date,
+  never again, which made "what is due next week" silently wrong. `list_tasks`
+  with `faellig_vor`, and `get_agenda`, now expand a recurring task
+  client-side into one row per occurrence due inside the queried window
+  (`ausnahme_daten` skipped, at most 100 rows per task). Without `faellig_vor`
+  there is no window to expand into and the series is returned as the single
+  stored row it is, `wiederholung` intact.
+  An expanded row is a **read-only view of one date**: `wiederholung_von` names
+  its occurrence, `serie_uid` points at the stored task, `wiederholung` is
+  `null`, and its own `uid` is a synthetic `"<serie_uid>#<occurrence>"` that
+  `update_task`, `complete_task`, `delete_task` and `get_task` all **reject**
+  with an error naming the series - rather than silently acting on the whole
+  series the caller meant to touch one occurrence of. Two new keys,
+  `wiederholung_von` and `serie_uid`, are therefore present (as `null`) on
+  every task dict.
 - **`list_tasks` queries across task lists, and filters like `list_events`.**
   `listen_namen` replaces `list_name`: `null` (the default) queries every task
   list on the account, a list of names queries those, and `[]` is an empty
