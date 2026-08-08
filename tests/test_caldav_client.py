@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -13,7 +15,7 @@ import pytest
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
 from caldav.lib.url import URL
-from icalendar import Calendar, Event, FreeBusy, Timezone, Todo
+from icalendar import Calendar, Event, FreeBusy, Timezone, Todo, vRecur
 from lxml import etree
 
 from nextcloud_task_mcp import caldav_client as caldav_client_module
@@ -34,6 +36,10 @@ from nextcloud_task_mcp.errors import (
     TaskMcpError,
     TaskNotFoundError,
 )
+
+#: The shipped default timezone, spelled out where a test builds a component
+#: in it (the autouse `reset_default_timezone` fixture keeps it in effect).
+BERLIN = ZoneInfo("Europe/Berlin")
 
 
 def _make_calendar(
@@ -472,6 +478,7 @@ def test_list_tasks_parses_todos(service, principal):
             "uebergeordnete_uid": None,
             "wiederholung": None,
             "liste": "Personal",
+            "liste_url": "https://cloud.example.com/dav/personal/",
         }
     ]
 
@@ -552,11 +559,13 @@ def test_list_tasks_limit_cuts_after_merge_across_lists(service, principal):
 def test_list_tasks_all_lists_reaches_both_lists_sharing_a_display_name(service, principal):
     """Two lists may legitimately carry the same display name.
 
-    The all-lists branch queries the resolved collection objects directly
+    The all-lists branch queries the listed collection objects directly
     instead of resolving by name, which is the only reason both stay
     reachable - resolving "Dup" by name is ambiguous on purpose. Pinned here
     because "simplifying" that branch back to the name-based path would
-    silently turn a full listing into an error.
+    silently turn a full listing into an error. It does *not* follow that the
+    branch may skip the stale-cache recovery `_with_collection` provides - see
+    `test_list_tasks_all_lists_recovers_from_a_vanished_collection`.
     """
     dup_a = _make_calendar("Dup", "https://cloud.example.com/dav/dup-a/")
     dup_b = _make_calendar("Dup", "https://cloud.example.com/dav/dup-b/")
@@ -568,6 +577,10 @@ def test_list_tasks_all_lists_reaches_both_lists_sharing_a_display_name(service,
 
     assert [t["uid"] for t in result] == ["in-a", "in-b"]
     assert [t["liste"] for t in result] == ["Dup", "Dup"]
+    assert [t["liste_url"] for t in result] == [
+        "https://cloud.example.com/dav/dup-a/",
+        "https://cloud.example.com/dav/dup-b/",
+    ]
 
 
 def test_list_tasks_named_duplicate_list_is_still_ambiguous(service, principal):
@@ -577,6 +590,148 @@ def test_list_tasks_named_duplicate_list_is_still_ambiguous(service, principal):
 
     with pytest.raises(TaskMcpError, match="ambiguous"):
         service.list_tasks(list_names=["Dup"])
+
+
+def test_list_tasks_filters_added_after_limit_are_keyword_only(service):
+    """`limit` must keep its position, or a positional caller silently rebinds it.
+
+    The filter arguments were inserted *before* `limit` as ordinary
+    positional-or-keyword parameters, so `list_tasks(name, True, None, None, 5)`
+    - a legal call before - started passing 5 as `prioritaet`. Anything added
+    after `limit` is keyword-only, so the positional prefix can never shift
+    again.
+    """
+    params = inspect.signature(CalDavService.list_tasks).parameters
+    positional = [
+        name for name, p in params.items() if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+
+    assert positional == ["self", "list_names", "only_open", "due_before", "due_after", "limit"]
+    assert all(
+        params[name].kind is inspect.Parameter.KEYWORD_ONLY
+        for name in ("prioritaet", "tag", "suchtext")
+    )
+
+
+def test_list_tasks_all_lists_recovers_from_a_vanished_collection(service, principal):
+    """A deleted list must not break every all-lists query for the rest of the process.
+
+    The collection listing is cached, so a list deleted server-side stays in
+    it and 404s on every use. Named lists recover through
+    `_with_collection`'s invalidate-and-retry; the all-lists branch has to do
+    the same or "what is due anywhere?" fails forever.
+    """
+    gone = _make_calendar("Weg", "https://cloud.example.com/dav/weg/")
+    kept = _make_calendar("Bleibt", "https://cloud.example.com/dav/bleibt/")
+    kept.todos.return_value = [_todo_obj("still-here", titel="Da", faellig_datum="2026-08-01")]
+    principal.calendars.return_value = [gone, kept]
+
+    # Prime the collection cache with both lists, then delete one server-side.
+    service.list_task_lists()
+    gone.todos.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [kept]
+
+    result = service.list_tasks()
+
+    assert [t["uid"] for t in result] == ["still-here"]
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_all_lists_recovers_when_listing_the_collections_404s(service, principal):
+    """Enumerating the lists is a request too, and it can 404 on a stale object.
+
+    Reading a cached collection's display name goes to the server, so the
+    vanished list can be discovered there just as well as on the `todos()`
+    call - same stale cache, same recovery. It used to escape as the generic
+    "resource was not found" error with the cache left untouched, i.e. exactly
+    the permanent failure this branch is supposed to be immune to now.
+    """
+    stale = _make_calendar("Weg", "https://cloud.example.com/dav/weg/")
+    kept = _make_calendar("Bleibt", "https://cloud.example.com/dav/bleibt/")
+    kept.todos.return_value = [_todo_obj("still-here", titel="Da", faellig_datum="2026-08-01")]
+    # Names itself once for the priming listing, then 404s as the deleted list it is.
+    stale.get_display_name.side_effect = ["Weg", caldav_error.NotFoundError("gone")]
+    principal.calendars.return_value = [stale, kept]
+
+    service.list_task_lists()
+    principal.calendars.return_value = [kept]
+
+    result = service.list_tasks()
+
+    assert [t["uid"] for t in result] == ["still-here"]
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_all_lists_gives_up_after_one_refresh(service, principal):
+    """A freshly listed collection that still 404s is a real error, not a stale cache."""
+    broken = _make_calendar("Kaputt", "https://cloud.example.com/dav/kaputt/")
+    broken.todos.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [broken]
+    service.list_task_lists()
+
+    with pytest.raises(TaskListNotFoundError, match="Kaputt"):
+        service.list_tasks()
+
+    # Listed once to prime the cache, then exactly one refresh - the second
+    # pass reports the failure instead of refreshing again forever.
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_all_lists_reports_a_list_that_vanishes_while_being_listed(service, principal):
+    """Nothing was named yet, so the error can't name one - it still says what happened."""
+    broken = _make_calendar("Kaputt", "https://cloud.example.com/dav/kaputt/")
+    broken.get_display_name.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [broken]
+
+    with pytest.raises(TaskListNotFoundError, match="while listing the task lists"):
+        service.list_tasks()
+
+    assert principal.calendars.call_count == 2
+
+
+def test_list_tasks_repeated_list_name_is_queried_once(service, principal):
+    """Naming a list twice must not count its tasks twice."""
+    calendar = _make_calendar("Personal")
+    calendar.todos.return_value = [_todo_obj("t1", titel="Einmal", faellig_datum="2026-08-01")]
+    principal.calendars.return_value = [calendar]
+
+    result = service.list_tasks(["Personal", "Personal"])
+
+    assert [t["uid"] for t in result] == ["t1"]
+    calendar.todos.assert_called_once()
+
+
+def test_list_tasks_empty_string_list_name_is_reported_as_not_found(service, principal):
+    """ "" is a name like any other - an unknown one - not an empty scope."""
+    principal.calendars.return_value = [_make_calendar("Personal")]
+
+    with pytest.raises(TaskListNotFoundError):
+        service.list_tasks("")
+
+
+def test_list_tasks_empty_scope_still_validates_the_filters(service, principal):
+    """No lists to query is no reason to accept a nonsense filter silently."""
+    with pytest.raises(InvalidTaskDataError):
+        service.list_tasks([], limit=0)
+    with pytest.raises(InvalidTaskDataError):
+        service.list_tasks([], prioritaet="dringend")
+    principal.calendars.assert_not_called()
+
+
+@pytest.mark.parametrize("list_names", [["Personal"], None], ids=["named", "all"])
+def test_list_tasks_resolution_failure_is_translated(service, principal, list_names):
+    """Resolving the target(s) moved out of the try/except that translates errors.
+
+    A dropped connection while resolving a display name then reached the tool
+    layer as a raw library exception - "an unexpected internal error" - instead
+    of the connection error it is.
+    """
+    calendar = _make_calendar("Personal")
+    calendar.get_display_name.side_effect = _http_errors.ConnectionError("network down")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(ConnectionFailedError):
+        service.list_tasks(list_names)
 
 
 def test_get_agenda_sorts_tasks_by_due_time(service, principal):
@@ -1466,6 +1621,32 @@ def test_create_event_with_naive_start_adds_default_zone_vtimezone(service, prin
     assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
 
 
+def test_create_event_with_utc_default_timezone_writes_plain_z_and_no_vtimezone(service, principal):
+    """`MCP_DEFAULT_TIMEZONE=UTC` restores the pre-default-timezone wire format.
+
+    Restores the coverage the original
+    `test_create_event_without_named_zone_has_no_vtimezone` had: keeping UTC as
+    a `ZoneInfo` writes `DTSTART;TZID=UTC:...` plus a VTIMEZONE carrying a
+    single zero-offset observance onto every event - understood by fewer
+    clients than a plain `Z`, and the opposite of "restores the previous UTC
+    behavior".
+    """
+    mapping.set_default_timezone("UTC")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(titel="Meeting", start="2026-07-20T14:00:00"),
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "VTIMEZONE" not in ical_text
+    assert "TZID" not in ical_text
+    assert "DTSTART:20260720T140000Z" in ical_text
+
+
 def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal):
     """Regression test: a named-zone DTSTART needs its own VTIMEZONE on the
     wire (RFC 5545 3.6.5), or the TZID it references is dangling."""
@@ -1487,6 +1668,33 @@ def test_create_event_with_named_zone_adds_matching_vtimezone(service, principal
     assert "TZID:Europe/Berlin" in ical_text
     assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in ical_text
     assert ical_text.index("BEGIN:VTIMEZONE") < ical_text.index("BEGIN:VEVENT")
+
+
+def test_attached_vtimezone_rules_reach_well_past_2038(service, principal):
+    """A VTIMEZONE that stops in 2037 mis-resolves every date after it.
+
+    `icalendar` writes the transitions as an explicit RDATE list, not as a
+    rule, and defaults to ending it at 2038-01-01. A client reading such a
+    component applies the last observance it finds to everything later, so a
+    recurring event's summer occurrences from 2038 on come out an hour off -
+    the exact drift this zone handling exists to avoid.
+    """
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [event_cal]
+
+    service.create_event(
+        "Termine",
+        event_mapping.EventFields(
+            titel="Standup",
+            start="2026-07-20T09:00:00 Europe/Berlin",
+            wiederholung="FREQ=WEEKLY",
+        ),
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    vtimezone = ical_text.split("BEGIN:VTIMEZONE")[1].split("END:VTIMEZONE")[0]
+    years = {int(year) for year in re.findall(r"(\d{4})\d{4}T\d{6}", vtimezone)}
+    assert max(years) >= 2090
 
 
 def test_get_event_parses_and_annotates_calendar(service, principal):
@@ -1783,10 +1991,84 @@ def test_create_event_from_task_uses_due_datetime(service, principal):
     _, kwargs = event_cal.save_event.call_args
     ical_text = kwargs["ical"]
     assert "SUMMARY:Steuer" in ical_text
-    assert "DTSTART:20260720T120000Z" in ical_text
-    assert "DTEND:20260720T123000Z" in ical_text
+    # Timeboxing produces an ordinary event: anchored to the zone the task's
+    # due date was read in, exactly like create_event with the same value.
+    assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
+    assert "DTEND;TZID=Europe/Berlin:20260720T143000" in ical_text
+    assert "BEGIN:VTIMEZONE" in ical_text
     assert "RELATED-TO;RELTYPE=PARENT:task-1" in ical_text
     assert uid
+
+
+def test_create_event_from_task_keeps_an_explicit_zone_name(service, principal):
+    """An explicit start zone survives into the event, offsets stay UTC.
+
+    `create_event_from_task` is the one event-creating path that re-formatted
+    its start before handing it on, which flattened every zone to a numeric
+    offset - so the timebox for a task was the only event that could never be
+    zone-anchored.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat",
+        "task-1",
+        "Termine",
+        start="2026-07-20T09:00:00 Asia/Tokyo",
+        dauer_minuten=45,
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART;TZID=Asia/Tokyo:20260720T090000" in ical_text
+    assert "DTEND;TZID=Asia/Tokyo:20260720T094500" in ical_text
+    assert "TZID:Asia/Tokyo" in ical_text
+
+
+def test_create_event_from_task_explicit_offset_start_stays_utc(service, principal):
+    """An explicit numeric offset keeps `create_event`'s rule, deliberately.
+
+    An offset names an instant, not a zone, and `create_event` stores such a
+    value as plain UTC rather than inventing a TZID for it - the timebox path
+    must not quietly disagree with it.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat", "task-1", "Termine", start="2026-07-20T14:00:00+05:00", dauer_minuten=30
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART:20260720T090000Z" in ical_text
+    assert "DTEND:20260720T093000Z" in ical_text
+    assert "VTIMEZONE" not in ical_text
+
+
+def test_create_event_from_task_spanning_a_dst_change_keeps_its_real_length(service, principal):
+    """`dauer_minuten` is a real duration, not a wall-clock one.
+
+    Adding the timedelta to a zone-aware start does wall-clock arithmetic, so
+    a 120-minute block starting an hour before the spring-forward jump would
+    end up 180 real minutes long.
+    """
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat", "task-1", "Termine", start="2026-03-29T01:30:00", dauer_minuten=120
+    )
+
+    ical_text = event_cal.save_event.call_args[1]["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:20260329T013000" in ical_text
+    # 01:30 CET + 2 real hours = 04:30 CEST, not 03:30.
+    assert "DTEND;TZID=Europe/Berlin:20260329T043000" in ical_text
 
 
 def test_create_event_from_task_all_day_due_date(service, principal):
@@ -1842,11 +2124,74 @@ def test_get_agenda_combines_events_and_due_tasks(service, principal):
     assert [e["uid"] for e in result["termine"]] == ["event-1"]
     assert [t["uid"] for t in result["aufgaben"]] == ["task-1"]
     assert result["aufgaben"][0]["liste"] == "Privat"
-    # Events were queried with expand=True over exactly that day in default timezone.
+    # Events are queried with expand=True over the neighbouring days too (see
+    # test_get_agenda_keeps_only_events_of_the_local_day) and cut back to the
+    # local day afterwards.
     _, kwargs = event_cal.search.call_args
     assert kwargs["expand"] is True
-    assert kwargs["start"] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
-    assert kwargs["end"] == datetime(2026, 7, 21, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["start"] == datetime(2026, 7, 19, tzinfo=ZoneInfo("Europe/Berlin"))
+    assert kwargs["end"] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+
+
+def test_get_agenda_keeps_only_events_of_the_local_day(service, principal):
+    """The day an agenda reports is this server's local day, whatever the server thinks.
+
+    A CalDAV time-range REPORT resolves all-day and floating values in the
+    *collection's* timezone (RFC 4791 9.9), which is the Nextcloud account's
+    setting and need not be `MCP_DEFAULT_TIMEZONE`. Where the two disagree, the
+    REPORT hands back a neighbouring day's all-day event, or drops a floating
+    one an hour before midnight - so the query covers the neighbouring days and
+    the local-day rule is applied here, once, to both halves of the agenda.
+
+    The mocked calendar returns the same four events for any window, which is
+    exactly the "server draws the boundary elsewhere" case.
+    """
+
+    def _event(uid, **props):
+        component = Event()
+        component.add("uid", uid)
+        component.add("summary", uid)
+        for name, value in props.items():
+            component.add(name, value)
+        return _make_event_obj(component)
+
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [
+        _event("all-day-yesterday", dtstart=date(2026, 7, 19), dtend=date(2026, 7, 20)),
+        _event("all-day-today", dtstart=date(2026, 7, 20), dtend=date(2026, 7, 21)),
+        _event("floating-late-today", dtstart=datetime(2026, 7, 20, 23, 30)),
+        _event("timed-tomorrow", dtstart=datetime(2026, 7, 21, 0, 30, tzinfo=BERLIN)),
+    ]
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [e["uid"] for e in result["termine"]] == ["all-day-today", "floating-late-today"]
+
+
+def test_get_agenda_keeps_a_recurring_master_the_server_did_not_expand(service, principal):
+    """A series master says nothing about which occurrence matched the query.
+
+    Servers that ignore the expansion request answer with the master component
+    and its far-away DTSTART; judging that by the local-day rule would drop a
+    recurring event from every agenda but the day it started.
+    """
+    master = Event()
+    master.add("uid", "weekly")
+    master.add("summary", "Standup")
+    master.add("dtstart", datetime(2020, 1, 6, 9, 0, tzinfo=BERLIN))
+    master.add("rrule", vRecur.from_ical("FREQ=WEEKLY"))
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = [_make_event_obj(master)]
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = []
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-07-20")
+
+    assert [e["uid"] for e in result["termine"]] == ["weekly"]
 
 
 def test_get_agenda_excludes_tasks_due_other_days(service, principal):
@@ -1888,11 +2233,12 @@ def test_get_agenda_day_window_local_timezone_bounds(service, principal):
 
 
 def test_get_agenda_day_window_spans_dst_transition(service, principal):
-    """The event query window is a real local day, 25 hours long on 2026-10-25.
+    """The day an agenda covers is a real local day, 25 hours long on 2026-10-25.
 
     Building it by adding a fixed 24 hours would cut the last local hour off
     the fall-back day - the class of off-by-an-hour bug this whole change is
-    about.
+    about. The query around it is a whole number of local days too, so the
+    widening can't shave an hour off either end.
     """
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.search.return_value = []
@@ -1902,13 +2248,16 @@ def test_get_agenda_day_window_spans_dst_transition(service, principal):
 
     service.get_agenda("2026-10-25")
 
-    _, kwargs = event_cal.search.call_args
-    start, end = kwargs["start"], kwargs["end"]
+    start, end = event_mapping.local_day_window(date(2026, 10, 25))
     assert start.isoformat() == "2026-10-25T00:00:00+02:00"
     assert end.isoformat() == "2026-10-26T00:00:00+01:00"
     # Subtracting two datetimes that share a tzinfo gives the *wall-clock*
     # difference (24h here), so the real length has to be measured in UTC.
     assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(hours=25)
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"].isoformat() == "2026-10-24T00:00:00+02:00"
+    assert kwargs["end"].isoformat() == "2026-10-27T00:00:00+01:00"
 
 
 # ======================================================================
@@ -2156,6 +2505,28 @@ def test_get_free_busy_returns_normalized_bounds(service, principal):
     assert result["bis"] == "2026-07-22T00:00:00+02:00"
 
 
+def test_get_free_busy_bounds_are_readings_that_exist(service, principal):
+    """A day window is reported back, so it must be a time that happens.
+
+    America/Santiago moves its clocks at 00:00, so 2026-09-06 has no midnight;
+    the window still starts at that day's first instant, and says so with a
+    reading the day really had.
+    """
+    mapping.set_default_timezone("America/Santiago")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    result = service.get_free_busy("2026-09-06", "2026-09-06")
+
+    assert result["von"] == "2026-09-06T01:00:00-03:00"
+    assert result["bis"] == "2026-09-07T00:00:00-03:00"
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"].astimezone(timezone.utc) == datetime(
+        2026, 9, 6, 4, 0, tzinfo=timezone.utc
+    )
+
+
 def test_get_free_busy_own_availability_translates_generic_exception(service, principal):
     event_cal = _make_calendar("Termine", components=["VEVENT"])
     event_cal.search.side_effect = RuntimeError("boom")
@@ -2182,13 +2553,38 @@ def test_get_free_busy_for_other_user_queries_scheduling_outbox(service, princip
     result = service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
 
     args, _ = principal.freebusy_request.call_args
-    assert args[0] == datetime(2026, 7, 20, tzinfo=ZoneInfo("Europe/Berlin"))
-    assert args[1] == datetime(2026, 7, 22, tzinfo=ZoneInfo("Europe/Berlin"))
+    # UTC bounds, as the VFREEBUSY they end up in requires - the local day
+    # bounds are the same instants (see
+    # test_get_free_busy_for_other_user_sends_utc_bounds).
+    assert args[0] == datetime(2026, 7, 19, 22, 0, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
     assert args[2] == ["mailto:bob@example.com"]
     assert result["benutzer"] == "bob@example.com"
     assert result["belegt"] == [
         {"von": "2026-07-20T11:00:00+02:00", "bis": "2026-07-20T12:00:00+02:00"}
     ]
+
+
+def test_get_free_busy_for_other_user_sends_utc_bounds(service, principal):
+    """A VFREEBUSY's DTSTART/DTEND must be UTC (RFC 5545 3.6.4, RFC 6638).
+
+    caldav puts the datetimes it is handed straight into the VFREEBUSY it
+    POSTs to the schedule outbox, and `icalendar` writes a zone-aware value as
+    `DTSTART;TZID=Europe/Berlin:...` - a TZID reference in a request that
+    carries no VTIMEZONE component at all, which a server is free to reject or
+    to resolve as something else entirely.
+    """
+    vfb = FreeBusy()
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": _make_freebusy_obj(vfb)}
+
+    service.get_free_busy("2026-07-20", "2026-07-21", benutzer="bob@example.com")
+
+    args, _ = principal.freebusy_request.call_args
+    assert args[0].tzinfo is timezone.utc
+    assert args[1].tzinfo is timezone.utc
+    # The same instants as the local day bounds: 2026-07-20 00:00+02:00 on.
+    assert args[0] == datetime(2026, 7, 19, 22, 0, tzinfo=timezone.utc)
+    assert args[1] == datetime(2026, 7, 21, 22, 0, tzinfo=timezone.utc)
 
 
 def test_get_free_busy_for_other_user_accepts_mailto_prefixed_benutzer(service, principal):
@@ -2662,6 +3058,34 @@ def test_list_trash_deleted_at_accepts_iso8601_too(service, dav_client):
     assert result[0]["geloescht_am"] == "2026-07-10T14:00:00+02:00"
 
 
+def test_list_trash_deleted_at_without_an_offset_is_read_as_utc(service, dav_client):
+    """`{nc}deleted-at` is a server-side timestamp, not a caller's input.
+
+    Nextcloud emits it in UTC; a value that arrives without an offset is
+    therefore a UTC one missing its suffix, not a local wall clock. Reading it
+    in the default timezone stamps the deletion two hours early - and this is
+    the one field in `list_trash` an operator uses to decide what to restore.
+    """
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:nc="http://nextcloud.com/ns">
+  <d:response>
+    <d:href>/remote.php/dav/calendars/u/trashbin/objects/9.ics</d:href>
+    <d:propstat>
+      <d:prop>
+        <nc:deleted-at>2026-07-10T12:00:00</nc:deleted-at>
+      </d:prop>
+      <d:status>HTTP/1.1 200 OK</d:status>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
+"""
+    dav_client.request.return_value = _dav_response(207, xml)
+
+    result = service.list_trash()
+
+    assert result[0]["geloescht_am"] == "2026-07-10T14:00:00+02:00"
+
+
 def test_list_trash_not_available_translates_404_to_clean_error(service, dav_client):
     dav_client.request.return_value = _dav_response(404)
 
@@ -3119,7 +3543,7 @@ def test_collection_metadata_invalidated_after_create(service, principal, dav_cl
 
     # Creating a collection drops the cache, so the next listing re-fetches.
     service.list_task_lists()
-    assert dav_client.request.call_count == 2
+    assert dav_client.request.call_count == 3
 
 
 def test_supports_component_falls_back_when_calendar_absent_from_batch(
@@ -3307,6 +3731,106 @@ def test_collection_metadata_reused_within_ttl_then_refetched_after(
     assert dav_client.request.call_count == 2
 
 
+def test_calendar_resolution_cache_expires_from_the_collection_fetch_not_resolution_time(
+    service, principal, monkeypatch
+):
+    """Finding 4.1: a `_calendar_cache` entry must expire
+    `_COLLECTION_CACHE_TTL_SECONDS` after the underlying `_collections`
+    fetch, not after the moment the name happened to be resolved.
+
+    Before the fix, `_cache_collection` stamped every entry with
+    `monotonic()` at resolution time. Resolving a name late in the
+    `_collections` TTL window (here, just under 60s after the fetch) then
+    gave that one entry a *second* nearly-full TTL on top of the first,
+    letting it survive up to ~119s stale instead of the advertised ~60s -
+    this is finding 4.1's whole point. Stamping from `_collections_fetched_at`
+    instead anchors every entry to the same fetch, however late it was
+    resolved.
+    """
+    personal = _make_calendar("Personal", "https://cloud.example.com/dav/personal/")
+    personal.todos.return_value = [_todo_obj("t1")]
+    principal.calendars.return_value = [personal]
+
+    fake_now = 1_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+
+    # Warm `_collections` at T=1000 - this alone doesn't populate
+    # `_calendar_cache`.
+    service.list_calendars()
+    assert principal.calendars.call_count == 1
+
+    # Resolve "Personal" at T+59: still inside the `_collections` TTL, so
+    # this doesn't itself trigger a re-fetch - the resolution is served from
+    # the T=1000 snapshot.
+    fake_now = 1_059.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_tasks(list_names=["Personal"])
+    assert principal.calendars.call_count == 1
+
+    # T+61 (61s after the *fetch* at T=1000, only 2s after the resolution at
+    # T+59): past the TTL measured from the fetch. A cache entry wrongly
+    # stamped at resolution time (T+59) would only expire at T+119 and this
+    # would still be a hit - it must not be.
+    fake_now = 1_061.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_tasks(list_names=["Personal"])
+    assert principal.calendars.call_count == 2
+
+
+def test_collections_and_metadata_never_carry_different_fetch_timestamps(
+    service, principal, dav_client, monkeypatch
+):
+    """Finding 4.2: `_collections` and `_collection_meta` must always be
+    refreshed together, from one `_ensure_collections` call, so they can
+    never disagree about which of them is stale.
+
+    Before the fix, the two caches were tracked by independent timestamps
+    (`_collections_fetched_at` and the now-deleted
+    `_collection_meta_fetched_at`) and refreshed by separate code paths, so
+    one could be fresh while the other was stale (or vice versa). This drives
+    both `_list_collections()` (via `list_calendars`) and
+    `_get_collection_meta()` (via `_supports_component`, exercised by
+    `list_task_lists`) across a TTL boundary and asserts the two caches'
+    underlying network calls always move in lockstep - one fetch refreshes
+    both, never just one.
+    """
+    personal, arbeit = _personal_and_arbeit()
+    principal.calendars.return_value = [personal, arbeit]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    fake_now = 2_000.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+
+    # First touch the metadata-only path, then the collection-list path:
+    # both must land on the same single fetch.
+    service.list_task_lists()
+    service.list_calendars()
+    assert principal.calendars.call_count == 1
+    assert dav_client.request.call_count == 1
+    assert service._collections_fetched_at == fake_now
+
+    # Interleaved accesses just inside the TTL: still exactly one fetch each,
+    # never one refreshed without the other.
+    fake_now = 2_030.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_calendars()
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+    assert dav_client.request.call_count == 1
+
+    # Past the TTL: both refresh together, from the same `_ensure_collections`
+    # call - never the metadata alone or the collection list alone.
+    fake_now = 2_061.0
+    monkeypatch.setattr(caldav_client_module, "monotonic", lambda: fake_now)
+    service.list_task_lists()
+    assert principal.calendars.call_count == 2
+    assert dav_client.request.call_count == 2
+    assert service._collections_fetched_at == fake_now
+    service.list_calendars()
+    assert principal.calendars.call_count == 2
+    assert dav_client.request.call_count == 2
+
+
 # ======================================================================
 # get_agenda / list_events / list_tasks / export_calendar cross-check
 #
@@ -3386,12 +3910,14 @@ def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_colle
         {t["uid"] for t in agenda["aufgaben"]} == {t["uid"] for t in direct_tasks} == {"task-early"}
     )
 
-    # Both queries used the exact same day window - not just coincidentally
-    # matching return values.
+    # get_agenda searches a wider day window to handle timezone edge cases,
+    # then filters the results.
     calls = csgo_events.search.call_args_list
     assert len(calls) == 2
-    assert calls[0].kwargs["start"] == calls[1].kwargs["start"]
-    assert calls[0].kwargs["end"] == calls[1].kwargs["end"]
+    from datetime import timedelta
+
+    assert calls[0].kwargs["start"] == calls[1].kwargs["start"] - timedelta(days=1)
+    assert calls[0].kwargs["end"] == calls[1].kwargs["end"] + timedelta(days=1)
     assert calls[0].kwargs["expand"] is True and calls[1].kwargs["expand"] is True
 
     # get_agenda (unlike list_events/list_tasks) adds quelle_url, naming the
@@ -3425,3 +3951,114 @@ def test_get_agenda_matches_list_events_and_list_tasks_for_duplicate_named_colle
     for task in agenda["aufgaben"]:
         found = service.get_task("CSGO", task["uid"])
         assert found["uid"] == task["uid"]
+
+
+def test_create_rename_conflict_refreshes_metadata(service, principal, dav_client):
+    personal = _make_calendar("Personal", "https://cloud.example.com/dav/personal/")
+    principal.calendars.return_value = [personal]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    # Warm up cache
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+    assert dav_client.request.call_count == 1
+
+    # Induce a conflict
+    principal.make_calendar.side_effect = caldav_error.MkcolError("405 Method Not Allowed")
+
+    with pytest.raises(TaskListAlreadyExistsError):
+        service.create_task_list("Groceries")
+
+    # The conflict triggers _list_collections(fresh=True).
+    # We assert that BOTH caches were refreshed.
+    assert principal.calendars.call_count == 2
+    assert dav_client.request.call_count == 2
+
+
+def test_get_agenda_atomic_across_ttl_boundary(service, principal, monkeypatch, dav_client):
+    csgo_tasks = _make_calendar(
+        "CSGO", "https://cloud.example.com/dav/csgo-tasks/", components=["VTODO"]
+    )
+    csgo_events = _make_calendar(
+        "CSGO", "https://cloud.example.com/dav/csgo-events/", components=["VEVENT"]
+    )
+
+    principal.calendars.return_value = [csgo_tasks, csgo_events]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    fake_now = [1000.0]
+
+    def mock_monotonic():
+        return fake_now[0]
+
+    monkeypatch.setattr(caldav_client_module, "monotonic", mock_monotonic)
+
+    # Pre-warm
+    service.list_task_lists()
+
+    # Now simulate a slow get_agenda where time crosses TTL boundary MID-REQUEST.
+    # We can do this by patching _collect_events or _tasks_from_every_list to advance time.
+    original_collect_events = service._collect_events
+
+    def slow_collect_events(*args, **kwargs):
+        fake_now[0] += caldav_client_module._COLLECTION_CACHE_TTL_SECONDS + 1
+        return original_collect_events(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_collect_events", slow_collect_events)
+
+    # Clear the call counts
+    principal.calendars.reset_mock()
+
+    # Call get_agenda
+    service.get_agenda("2026-07-20")
+
+    # It should not have re-fetched from the server during get_agenda because the TTL was frozen!
+    assert principal.calendars.call_count == 0
+
+    # The freeze must not leak past the call it was set for: `_ttl_frozen` is
+    # reset in `get_agenda`'s `finally`, so even a call that raised partway
+    # through would still release it. Confirmed two ways - the internal flag
+    # itself, and (behaviourally) that the *next* access, now that the fake
+    # clock has moved 61s past the pre-warm fetch, sees the cache as expired
+    # again and re-fetches, rather than staying frozen-fresh forever.
+    assert service._ttl_frozen is False
+    service.list_task_lists()
+    assert principal.calendars.call_count == 1
+
+
+def test_get_agenda_recovers_from_a_404_mid_call_under_the_frozen_ttl(
+    service, principal, dav_client
+):
+    """The frozen TTL must not defeat `_tasks_from_every_list`'s existing
+    stale-cache recovery (a 404 anywhere in an all-lists pass invalidates the
+    collection caches and retries once, see its docstring). While
+    `get_agenda` holds `_ttl_frozen`, `_cache_expired` treats any
+    already-fetched cache as fresh regardless of age - but
+    `_invalidate_collection_caches` sets `_collections`/`_collection_meta`
+    back to `None`, and a cache with `fetched_at is None` is never exempted
+    by the freeze, so `_ensure_collections` still refetches it. Without that,
+    a task list deleted/recreated server-side during a `get_agenda` call
+    would fail the whole call instead of recovering.
+    """
+    stale_list = _make_calendar(
+        "Stale", "https://cloud.example.com/dav/stale/", components=["VTODO"]
+    )
+    stale_list.todos.side_effect = caldav_error.NotFoundError("410 Gone")
+
+    fresh_list = _make_calendar(
+        "Fresh", "https://cloud.example.com/dav/fresh/", components=["VTODO"]
+    )
+    fresh_list.todos.return_value = [_todo_obj("t1", faellig_datum="2026-07-20T09:00:00")]
+
+    principal.calendars.side_effect = [[stale_list], [fresh_list]]
+    dav_client.request.return_value = _dav_response(207, _COLLECTION_META_XML)
+
+    result = service.get_agenda("2026-07-20")
+
+    # One initial listing plus exactly one retry after the 404 - not an
+    # unbounded loop, and not swallowed as "no task lists at all".
+    assert principal.calendars.call_count == 2
+    assert [t["uid"] for t in result["aufgaben"]] == ["t1"]
+    # The freeze released normally even though this call took the recovery
+    # path rather than the happy path.
+    assert service._ttl_frozen is False

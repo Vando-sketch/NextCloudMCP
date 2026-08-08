@@ -9,6 +9,58 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **`list_tasks` queries across task lists, and filters like `list_events`.**
+  `listen_namen` replaces `list_name`: `null` (the default) queries every task
+  list on the account, a list of names queries those, and `[]` is an empty
+  scope that returns nothing without a request. "What is overdue anywhere?"
+  used to cost one call per list. New `prioritaet`, `tag` and `suchtext`
+  filters mirror the event side; `tag`/`suchtext` compare case-insensitively
+  and independently of Unicode spelling (either encoding of "ü", and "STRASSE"
+  against "Straße"), and an empty string means "no filter" for every filter
+  that takes one - `prioritaet`, `tag`, `suchtext`, `faellig_vor`, and
+  `faellig_nach` alike. `limit` still rejects `0`.
+  `get_agenda` takes its tasks through the same path.
+  **Breaking**, in three ways:
+  - Results are **sorted** by `faellig_datum` ascending (tasks without a
+    readable due date last), then by `titel` - with umlauts filed under their
+    base letter rather than behind "Z" - instead of arriving in server order,
+    and `limit` caps the merged, sorted result rather than one list's.
+  - Every task dict carries a new **`liste`** key with its task list's display
+    name. It is the name every other task tool takes, except in the one case
+    Nextcloud permits two task lists to share a display name: `liste` then
+    cannot tell them apart, but a new `liste_url` key alongside it carries
+    the list's unique collection URL, which you can match against
+    `list_task_lists`. However, because no tool accepts a URL to act on,
+    such a name is reported as ambiguous by any by-name call. Renaming one
+    of them in Nextcloud is the only way to make those tasks addressable again.
+  - The MCP tool keeps `list_name` as a deprecated alias (passing both is an
+    error), but the underlying `CalDavService.list_tasks` **renamed** its first
+    parameter, so an in-process `list_tasks(list_name=...)` call must become
+    `list_tasks(list_names=...)`; positional callers are unaffected.
+    Everything added to either signature after `limit` is keyword-only, so the
+    positional prefix cannot shift under a caller again.
+- **Reminders are readable**: `list_tasks`, `get_task`, `list_events` and
+  `get_event` now return an `erinnerungen` list in the same string form
+  `create_task`/`create_event` accept, so a reminder can be verified without
+  exporting the calendar and parsing ICS by hand. Only alarms whose trigger
+  that string form can express are listed - an alarm anchored to the end of an
+  event that has an end, one anchored to the start of a task that has both a
+  start and a due date, one with a date-valued/repeated/missing trigger, one
+  in a timezone that resolves to no known zone, and a relative one on a
+  component with no date at all to be relative to: each would read back as a
+  different moment than it fires, or as a value a write would reject. Writing
+  `erinnerungen` never touches those alarms - which means a hidden alarm and a
+  written reminder can both fire, see `docs/tools.md` - and a reminder that is
+  already present is kept as it is rather than
+  rebuilt, so its action, dismissed state (`ACKNOWLEDGED`/`X-MOZ-LASTACK`) and
+  UID survive an edit. Clearing `"erinnerungen"` via `felder_leeren` still
+  removes every alarm. `export_calendar`/`import_ics` remain the verbatim,
+  lossless path for alarms. Absolute reminders are resolved in the timezone
+  they were stored in (previously always assumed UTC, silently shifting
+  foreign-client alarms) and read back formatted in the server's default
+  timezone (`MCP_DEFAULT_TIMEZONE`), the same convention `start_datum`/
+  `faellig_datum` follow; durations read back in canonical spelling
+  (`-P1W` → `-P7D`), and passing the same trigger twice creates one alarm.
 - **Notes support**: 6 new MCP tools (`list_notizen`, `get_notiz`,
   `create_notiz`, `update_notiz`, `append_notiz`, `search_notizen`) over the
   Nextcloud Notes app's own JSON REST API - a per-project "living document"
@@ -36,6 +88,94 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Changed
 
+- **One configurable server timezone instead of hardcoded UTC**
+  (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Naive datetime input is
+  interpreted in that zone, day windows (`get_agenda`, `von`/`bis`,
+  `faellig_vor`/`faellig_nach`) are local days in it, and returned timestamps
+  carry its offset (e.g. `+02:00`); all-day values stay bare `YYYY-MM-DD`
+  strings. `MCP_DEFAULT_TIMEZONE=UTC` restores the previous behaviour
+  *including the wire format*: a zone that is UTC is written as plain
+  `...Z`, never as `;TZID=UTC:...` with an accompanying VTIMEZONE. A wall
+  clock reading the spring-forward gap skips (`"2026-03-29T02:30:00"` in
+  Europe/Berlin) is stored as the real local time of the same instant
+  (03:30) instead of being written out as a reading that never happens;
+  the autumn overlap keeps the earlier of its two instants.
+- **Event timestamps stay anchored to the event's own timezone.** `get_event`
+  reports every timestamp with a numeric offset (`"...+02:00"`), which says
+  nothing about *which* zone it came from - so writing one straight back used
+  to re-anchor a recurring event to a fixed UTC instant, reintroducing the
+  hour of DST drift after a single read/write round trip, and updating only
+  `start` or only `ende` could leave the two ends anchored differently (the
+  event silently changing length at the next transition). `start`, `ende` and
+  `ausnahme_daten` are now written in the timezone the event itself is
+  anchored to - its `DTSTART`'s - whichever zone the value arrived in, and
+  always at the instant that value meant (a naive one still means the server's
+  default timezone). Naming a zone on `start`
+  (`"2026-07-21T09:00:00 Asia/Tokyo"`) is how an event is *moved* to another
+  zone; everything else then follows the new anchor. `ausnahme_daten`
+  therefore also shares one representation across all its entries - a mix of
+  naive and offset entries used to produce an `EXDATE` with a `TZID` parameter
+  next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids and no
+  reader reports. For the same reason, `ausnahme_daten` entries must now all be
+  the same kind as the event's start - date-only values for an all-day event,
+  datetimes otherwise - and a mixed or mismatched set is **rejected** with a
+  clear error rather than written as one `EXDATE` carrying two value types
+  under a single `TZID`.
+- **An exception date that would cancel nothing now says so.** `ausnahme_daten`
+  only skips an occurrence when it names exactly a moment the series produces;
+  miss it by a day, an hour, or a timezone and the entry used to be stored
+  while the occurrence stayed, with nothing reporting it. Entries are now
+  checked against the event's `wiederholung` (and its `RDATE`s) and a
+  non-matching one is rejected with an error naming it. The check never
+  guesses: an event with no recurrence rule, a rule that cannot be expanded,
+  or a series that would take more than 10 000 occurrences to search are all
+  accepted unchecked.
+- **`get_free_busy(benutzer=...)` sends a valid VFREEBUSY again.** The
+  scheduling request carried its day bounds as `DTSTART;TZID=Europe/Berlin:...`
+  in a request body that has no VTIMEZONE component in it; RFC 5545 3.6.4
+  requires UTC bounds there, so they are converted before the POST (the same
+  instants either way). Busy periods coming *back* without a `Z` are read as
+  UTC too, as that format requires - reading them in the default timezone
+  moved every reported busy block by that zone's offset.
+- **The last two UTC-only timestamps follow the same rule now**: a note's
+  `geaendert` (`list_notizen`, `get_notiz`, …) and the token expiry printed by
+  the `nextcloud-task-mcp-admin list` CLI, which reads `MCP_DEFAULT_TIMEZONE`
+  from the environment for it (falling back to UTC if it names no known zone).
+  `list_trash`'s `geloescht_am` keeps reading a server-side value without an
+  offset as UTC - it is Nextcloud's own record of the deletion, not a
+  caller's input or a floating calendar time - and is then rendered in the
+  default timezone like everything else.
+- **`create_event_from_task` produces an ordinary, zone-anchored event.** It
+  re-formatted its start before handing it on, which flattened any timezone to
+  a numeric offset - so a timebox was the one event this server could never
+  anchor to a zone. A `start` naming an IANA zone now keeps it, a start taken
+  from the task's own due date (a bare instant - tasks store no zone) is
+  anchored in the server's default timezone, and an explicit numeric offset
+  still becomes UTC, exactly as in `create_event`. `dauer_minuten` is also a
+  real duration now: a block spanning a daylight-saving change no longer
+  grows or shrinks by the transition's hour.
+- **Day boundaries come from one helper, and are readings that exist.** Zones
+  that move their clocks at 00:00 (America/Santiago, Asia/Beirut, …) have no
+  midnight on a transition day. The instant such a bound resolved to was
+  always the right one - that day's first moment - but `get_free_busy` reports
+  its window back, and now does so with a wall clock the day really had
+  (`01:00-03:00`, not `00:00-04:00`).
+- **`get_agenda` reports its own day, not the calendar server's.** A CalDAV
+  time-range query resolves all-day and floating values against the calendar
+  collection's timezone (RFC 4791 9.9) - the Nextcloud account's setting,
+  which need not be `MCP_DEFAULT_TIMEZONE`. When the two differ, a
+  neighbouring day's all-day event turned up in the agenda, or a floating one
+  shortly before midnight went missing. The agenda now queries the
+  neighbouring days as well and applies its own local-day rule to the result,
+  so the events half of the agenda draws the same day boundary the tasks half
+  already did. `list_events` keeps passing `von`/`bis` to the server
+  untouched: its range is a filter, not a promise about days.
+- **The VTIMEZONE attached to a zone-anchored event covers dates past 2038.**
+  `icalendar` writes a zone's transitions as an explicit list and ends it at
+  2038-01-01 by default; a client applies the last observance it finds to
+  everything after that, so occurrences of a long-running series would come
+  out an hour off. The list now reaches 2100 (about 2 KB more per written
+  event).
 - **`list_task_lists` now only returns VTODO-supporting calendars.** Nextcloud
   keeps task lists and event calendars in the same DAV namespace; previously
   event-only calendars (e.g. the default "Personal" calendar) appeared as task
@@ -52,6 +192,20 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Fixed
 
+- **Collection caches bounded by a 60-second TTL and unified.** The process-wide collection caches now refresh 60 seconds after their last fetch, protecting against out-of-band deletes or renames (e.g. from the Nextcloud web UI) feeding stale collections to tools forever. The cache lists and metadata are now fetched atomically, avoiding skew windows. `get_agenda` freezes that TTL for the duration of its own query so its events and tasks are read from one consistent server state instead of splitting across two if the TTL lapses mid-call - which means the real worst-case staleness bound is 60 seconds plus the duration of the slowest overlapping `get_agenda` call, not a flat 60 seconds.
+- **`get_agenda` adds a `quelle_url` key to all entries.** Display names are not unique in Nextcloud; this provides the exact collection URL an event or task came from, so ambiguous entries can be uniquely identified.
+
+- **One unreadable due date no longer breaks a whole task listing.** A `DUE`
+  this server cannot parse - a bare time, a period, whatever a foreign client
+  wrote - made `list_tasks` fail for every task in that list rather than just
+  that one. Such a task is now listed like a task with no due date at all:
+  sorted last, and excluded when a `faellig_vor`/`faellig_nach` bound is given,
+  because it cannot be judged "before" or "after" anything either.
+- **A task list deleted server-side no longer breaks every all-lists query.**
+  The collection listing is cached for the life of the process, so a vanished
+  list stayed in it and failed on every use; `list_tasks()` and
+  `get_agenda(listen_namen=None)` recover from that the way named lists always
+  have - drop the caches, re-list once, carry on.
 - **Every tool call was slow (3-10 s, even simple reads): a per-call cascade of
   sequential CalDAV round-trips is now cached down to a handful.** Two
   compounding causes, both measured live against a real Nextcloud (6
