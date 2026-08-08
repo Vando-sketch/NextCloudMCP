@@ -1232,12 +1232,7 @@ def test_wiederholung_strips_rrule_prefix():
 def test_extract_rrule_handles_duplicate_rrule_property():
     """A duplicated RRULE property from import_ics must not crash reads."""
     todo = _todo_from_ics(
-        "BEGIN:VTODO\n"
-        "UID:task-1\n"
-        "SUMMARY:Task\n"
-        "RRULE:FREQ=DAILY\n"
-        "RRULE:FREQ=WEEKLY\n"
-        "END:VTODO\n"
+        "BEGIN:VTODO\nUID:task-1\nSUMMARY:Task\nRRULE:FREQ=DAILY\nRRULE:FREQ=WEEKLY\nEND:VTODO\n"
     )
     assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
 
@@ -1293,7 +1288,9 @@ def test_anchorless_recurring_task_can_be_edited_without_touching_anchor():
     """
     todo = _new_todo()
     # Force it into an anchorless state like a foreign client might
-    mapping.apply_task_fields(todo, TaskFields(titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY"))
+    mapping.apply_task_fields(
+        todo, TaskFields(titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    )
     del todo["dtstart"]
     # Now edit only the title
     mapping.apply_task_fields(todo, TaskFields(titel="Renamed"))
