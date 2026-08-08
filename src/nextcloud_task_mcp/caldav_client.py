@@ -635,11 +635,6 @@ class CalDavService:
         # re-fetched unconditionally once the TTL elapses even without such a
         # change (see `_COLLECTION_CACHE_TTL_SECONDS`). Guarded by `_lock`.
         self._collection_meta: dict[str, dict[str, Any]] | None = None
-        # `monotonic()` timestamp of the last `_collection_meta` fetch, or
-        # None if never fetched. A monotonic clock, not wall-clock time, so a
-        # system clock adjustment (NTP step, DST, manual change) can't make
-        # this cache appear younger or older than it really is.
-        self._collection_meta_fetched_at: float | None = None
         # The resolved `principal.calendars()` list, cached for up to
         # `_COLLECTION_CACHE_TTL_SECONDS`. caldav re-runs home-set discovery
         # *and* the calendar-list PROPFIND (2 round-trips) on every
@@ -657,6 +652,7 @@ class CalDavService:
         # `monotonic()` timestamp of the last `_collections` fetch, or None if
         # never fetched (or invalidated). See `_collection_meta_fetched_at`.
         self._collections_fetched_at: float | None = None
+        self._ttl_frozen: bool = False
 
     def _get_principal(self) -> DAVPrincipal:
         with self._lock:
@@ -736,22 +732,39 @@ class CalDavService:
         """
         return self._client.url.join(f"calendars/{self._username}/")
 
-    @staticmethod
-    def _cache_expired(fetched_at: float | None) -> bool:
+    def _cache_expired(self, fetched_at: float | None) -> bool:
         """True if a `_collections`/`_collection_meta` cache last (re)fetched at
         `fetched_at` (a `monotonic()` reading) is past
         `_COLLECTION_CACHE_TTL_SECONDS`, or was never fetched at all."""
+        if self._ttl_frozen and fetched_at is not None:
+            return False
         return fetched_at is None or monotonic() - fetched_at >= _COLLECTION_CACHE_TTL_SECONDS
 
+    def _ensure_collections(self, *, fresh: bool = False) -> None:
+        if (
+            fresh
+            or self._collections is None
+            or self._collection_meta is None
+            or self._cache_expired(self._collections_fetched_at)
+        ):
+            try:
+                collections = list(self._get_principal().calendars())
+            except TaskMcpError:
+                raise
+            except Exception as exc:
+                raise _translate(exc) from exc
+
+            meta = self._fetch_collection_meta()
+
+            self._collections = collections
+            self._collection_meta = meta
+            self._collections_fetched_at = monotonic()
+
     def _get_collection_meta(self) -> dict[str, dict[str, Any]]:
-        """The cached per-collection metadata map, fetching it on first use
-        and re-fetching once it's past `_COLLECTION_CACHE_TTL_SECONDS` old."""
+        """The cached per-collection metadata map."""
         with self._lock:
-            if self._collection_meta is None or self._cache_expired(
-                self._collection_meta_fetched_at
-            ):
-                self._collection_meta = self._fetch_collection_meta()
-                self._collection_meta_fetched_at = monotonic()
+            self._ensure_collections()
+            assert self._collection_meta is not None
             return self._collection_meta
 
     def _fetch_collection_meta(self) -> dict[str, dict[str, Any]]:
@@ -806,18 +819,8 @@ class CalDavService:
         by `_lock`.
         """
         with self._lock:
-            if (
-                fresh
-                or self._collections is None
-                or self._cache_expired(self._collections_fetched_at)
-            ):
-                try:
-                    self._collections = list(self._get_principal().calendars())
-                    self._collections_fetched_at = monotonic()
-                except TaskMcpError:
-                    raise
-                except Exception as exc:
-                    raise _translate(exc) from exc
+            self._ensure_collections(fresh=fresh)
+            assert self._collections is not None
             return self._collections
 
     def _invalidate_collection_caches(self) -> None:
@@ -827,7 +830,6 @@ class CalDavService:
         self._collections = None
         self._collections_fetched_at = None
         self._collection_meta = None
-        self._collection_meta_fetched_at = None
 
     def _collection_meta_for(self, calendar: DAVCalendar) -> dict[str, Any] | None:
         return self._get_collection_meta().get(_normalize_collection_href(str(calendar.url)))
@@ -904,13 +906,17 @@ class CalDavService:
             )
         return matches[0]
 
-    def _cache_collection(self, component: str, name: str, calendar: DAVCalendar) -> None:
-        """Remember `name`'s resolved collection, stamped for TTL expiry."""
-        self._calendar_cache[(component, name)] = (calendar, monotonic())
+    def _cache_collection(
+        self, component: str, name: str, calendar: DAVCalendar, fetched_at: float | None = None
+    ) -> None:
+        """Remember `name`'s resolved collection."""
+        if fetched_at is None:
+            fetched_at = self._collections_fetched_at or monotonic()
+        self._calendar_cache[(component, name)] = (calendar, fetched_at)
 
     def _resolve_and_cache(self, name: str, component: str) -> DAVCalendar:
         calendar = self._resolve_collection(name, component)
-        self._cache_collection(component, name, calendar)
+        self._cache_collection(component, name, calendar, self._collections_fetched_at)
         return calendar
 
     def _get_collection(self, name: str, component: str) -> DAVCalendar:
@@ -919,10 +925,8 @@ class CalDavService:
             calendar, cached_at = cached
             if not self._cache_expired(cached_at):
                 return calendar
-            # Past the TTL, re-resolve rather than trust the entry: the name
-            # may since have been given to a different collection (see the
-            # cache's declaration).
             del self._calendar_cache[(component, name)]
+        self._ensure_collections()
         return self._resolve_and_cache(name, component)
 
     def _with_collection(self, name: str, component: str, fn: Callable[[DAVCalendar], _T]) -> _T:
@@ -1036,7 +1040,7 @@ class CalDavService:
             # ambiguity that `_resolve_collection` is supposed to surface.
             for calendar, name in zip(calendars, names, strict=True):
                 if name_counts[name] == 1:
-                    self._cache_collection("VTODO", name, calendar)
+                    self._cache_collection("VTODO", name, calendar, self._collections_fetched_at)
 
             return [
                 {"name": name, "url": str(calendar.url)}
@@ -1092,8 +1096,8 @@ class CalDavService:
                 kind="task list",
             )
 
-            self._cache_collection("VTODO", display_name, calendar)
             self._invalidate_collection_caches()
+            self._cache_collection("VTODO", display_name, calendar, monotonic())
             return {"name": display_name, "url": str(calendar.url)}
 
     def _make_collection(
@@ -1230,11 +1234,11 @@ class CalDavService:
                 raise _translate(exc) from exc
 
             self._calendar_cache.pop(("VTODO", list_name), None)
-            self._cache_collection("VTODO", new_display_name, calendar)
             # The cached collection list holds this object with its now-stale
             # display name, so drop it (component/color metadata is keyed by
             # href and unaffected, but is cleared together for simplicity).
             self._invalidate_collection_caches()
+            self._cache_collection("VTODO", new_display_name, calendar, monotonic())
             return {"name": new_display_name, "url": str(calendar.url)}
 
     def list_tasks(
@@ -1592,7 +1596,7 @@ class CalDavService:
                     }
                 )
                 if sum(1 for entry in result if entry["name"] == name) == 1:
-                    self._cache_collection("VEVENT", name, calendar)
+                    self._cache_collection("VEVENT", name, calendar, self._collections_fetched_at)
             # Drop cache entries that turned out to be ambiguous after all.
             counts: dict[str, int] = {}
             for entry in result:
@@ -2220,31 +2224,36 @@ class CalDavService:
         day_start, day_end = event_mapping.local_day_window(parsed)
 
         with self._lock:
-            raw_events = self._collect_events(
-                calendar_names,
-                von=(parsed - timedelta(days=1)).isoformat(),
-                bis=(parsed + timedelta(days=1)).isoformat(),
-                expand=True,
-            )
-            filtered_events = event_mapping.filter_events(
-                raw_events, suchtext=None, tag=None, limit=None
-            )
-            termine = event_mapping.events_in_window(filtered_events, day_start, day_end)
+            self._ensure_collections()
+            self._ttl_frozen = True
+            try:
+                raw_events = self._collect_events(
+                    calendar_names,
+                    von=(parsed - timedelta(days=1)).isoformat(),
+                    bis=(parsed + timedelta(days=1)).isoformat(),
+                    expand=True,
+                )
+                filtered_events = event_mapping.filter_events(
+                    raw_events, suchtext=None, tag=None, limit=None
+                )
+                termine = event_mapping.events_in_window(filtered_events, day_start, day_end)
 
-            if list_names is None:
-                raw_tasks = self._tasks_from_every_list(only_open=True)
-            else:
-                raw_tasks = self._tasks_from_named_lists(list_names, only_open=True)
+                if list_names is None:
+                    raw_tasks = self._tasks_from_every_list(only_open=True)
+                else:
+                    raw_tasks = self._tasks_from_named_lists(list_names, only_open=True)
 
-            aufgaben = mapping.filter_tasks(
-                raw_tasks,
-                due_before=datum,
-                due_after=datum,
-                prioritaet=None,
-                tag=None,
-                suchtext=None,
-                limit=None,
-            )
+                aufgaben = mapping.filter_tasks(
+                    raw_tasks,
+                    due_before=datum,
+                    due_after=datum,
+                    prioritaet=None,
+                    tag=None,
+                    suchtext=None,
+                    limit=None,
+                )
+            finally:
+                self._ttl_frozen = False
 
             for task in aufgaben:
                 task["quelle_url"] = task["liste_url"]
