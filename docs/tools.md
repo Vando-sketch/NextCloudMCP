@@ -61,7 +61,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -69,14 +69,19 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | `nur_offene` | boolean | no (default `true`) | Exclude completed tasks |
 | `faellig_vor` | string (ISO 8601) | no | Only tasks due at or before this point |
 | `faellig_nach` | string (ISO 8601) | no | Only tasks due at or after this point |
+| `limit` | integer | no | Max number of results; must be `> 0` |
 | `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
-| `limit` | integer | no | Max number of results; must be `> 0` |
 | `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
 
 > **BREAKING CHANGE**: Results are now sorted by `faellig_datum` ascending (tasks without a due date last, then by `titel`), rather than returned in server order.
 > **BREAKING CHANGE**: Every task dict now includes a `"liste"` key containing the task list's display name.
+
+A bare `list_tasks()` queries **every** task list on the account — one request
+per list — and returns every open task in all of them. Narrow it with
+`listen_namen`, a due-date bound or `limit` unless the whole account really is
+what you want.
 
 Result — one dict per task:
 
@@ -102,40 +107,94 @@ Result — one dict per task:
 ]
 ```
 
-`erinnerungen` lists all alarms set on the task as relative duration strings (e.g. `"-P1D"`,
+`erinnerungen` lists the task's alarms as relative duration strings (e.g. `"-P1D"`,
 `"-PT30M"`) or absolute ISO 8601 datetimes with offset (e.g. `"2026-08-07T09:00:00+02:00"`),
 matching the format `create_task`/`update_task` accepts. Absolute values are stored in UTC on
-the wire (RFC 5545 requires that) but read back in the server's default timezone, so `"...Z"`
-and `"...+00:00"` input come back with the local offset — the same instant, not the same
-string.
+the wire (RFC 5545 requires that) but read back formatted in the server's default timezone
+(`MCP_DEFAULT_TIMEZONE`), so `"...Z"` and `"...+00:00"` input come back with the local offset —
+the same instant, not the same string. Reading a reminder and writing it back is safe: the
+alarm is recognized as already present and left exactly as it is.
 
-Two details of an alarm have no slot in this format and are therefore lost when a read-back
-value is written again: whether a relative reminder was anchored to the due date or the start
-date (writing it back re-derives that from the task's own dates — `faellig_datum` wins), and a
-non-display alarm action (`EMAIL`/`AUDIO`) written by another client, which becomes a display
-reminder. For reminders this server created itself, the round trip is exact.
+Two things about the strings themselves:
+
+- Durations come back in their canonical spelling, so `"-P1W"` reads back as `"-P7D"` and
+  `"-PT90M"` as `"-PT1H30M"` — the same trigger, a different string.
+- Absolute values are rendered in the server's default timezone regardless of the zone (or
+  offset) they were written or stored in — the same convention `start_datum`/`faellig_datum`
+  follow — and `"...Z"` input reads back with the local offset — again the same instant, not
+  the same characters.
+
+**What is *not* listed.** Only alarms whose trigger this format can express appear here.
+An alarm is left out when
+
+- it is anchored to a date the task really has, but not the one a write would anchor it to —
+  a start-anchored alarm on a task that has *both* `start_datum` and `faellig_datum`, since
+  writing `"-PT30M"` back anchors it to the due date. (An alarm naming an anchor the task
+  does *not* have — the common `TRIGGER:-PT30M` with no anchor named at all — is listed
+  normally: there is only one date it can mean.)
+- it is relative but the task has neither `faellig_datum` nor `start_datum`, so there is no
+  date to be relative to and the string could not be written back at all;
+- its trigger is a bare date, a repeated property, or missing entirely;
+- its timezone name resolves to no zone this server knows (common Windows and Evolution zone
+  names do resolve).
+
+Such alarms still exist on the task and are **never touched by a write** — passing
+`erinnerungen` replaces only the reminders you can see.
+
+**Important — a hidden alarm keeps firing.** If a task carries one, writing `erinnerungen`
+can leave the user with *two* notifications: the hidden alarm plus the one you just wrote.
+This is easy to hit by accident — adding a `faellig_datum` and `erinnerungen: ["-PT30M"]` in one
+`update_task` call turns the task's existing start-anchored reminder into a hidden one and
+adds a due-anchored one beside it, and `erinnerungen` then reads back as a single
+`["-PT30M"]`. The extra alarm cannot be removed through `erinnerungen`; clear
+`"erinnerungen"` via `felder_leeren` (which removes *every* alarm) and write the list you
+want afterwards, or use `export_calendar`/`import_ics` to see and edit the alarms in full.
+
+**What a write does not carry over.** For the alarms that *are* listed, the string form has
+no slot for a non-display action (`EMAIL`/`AUDIO`), an `ATTACH`, or `DURATION`/`REPEAT`
+(alarm self-repetition). Those survive as long as that reminder stays in the list you write
+back; changing a reminder's *time* replaces the alarm with a plain display one. For a
+guaranteed verbatim round trip of everything — including a foreign client's alarms and their
+dismissed state — use `export_calendar`/`import_ics`.
+
 `uebergeordnete_uid` is the parent task's UID if this task is a subtask, otherwise `null`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — set via `create_task`/`update_task`, see their `wiederholung` parameter.
-`liste` is the display name of the task list containing the task.
+`liste` is the display name of the task list containing the task — the name every
+other task tool takes. Nextcloud does allow two task lists to carry the *same*
+display name. `liste` cannot tell them apart, but `liste_url` alongside it
+carries the list's unique collection URL, which you can match against
+`list_task_lists`. However, because no tool accepts a URL to act on, you still
+cannot address such a list by name: it is reported as ambiguous. Renaming one
+of them in Nextcloud is the only way to make those tasks addressable again.
 Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is `0`).
 
 ### Filtering and Sorting
 
-- `listen_namen`: pass a list of list names to query specific task lists, or `null` to query all task lists on the account. `list_name` is a deprecated alias that takes a single list name.
+- `listen_namen`: pass a list of list names to query specific task lists, or `null` to query all task lists on the account. `list_name` is a deprecated alias that takes a single list name. Naming the same list twice queries it once. An empty list (`[]`) is an empty scope: no request, no results — the other filter arguments are still validated.
 - `prioritaet`: filters by task priority (`"hoch"`, `"mittel"`, `"niedrig"`). An unknown priority raises an error (`InvalidTaskDataError`).
-- `tag`: exact, case-insensitive match against any entry in `tags`.
-- `suchtext`: case-insensitive substring match over `titel` and `notizen` (skipping `null` values).
-- If either `faellig_vor` or `faellig_nach` is given, tasks with **no** `faellig_datum` at all
+- `tag`: exact match against any entry in `tags`.
+- `suchtext`: substring match over `titel` and `notizen` (skipping `null` values).
+- `tag` and `suchtext` compare case-insensitively *and* independently of Unicode
+  spelling: either encoding of `"ü"` matches the other, and `"STRASSE"` matches
+  `"Straße"`.
+- An empty string means "no filter" for every filter that takes one — `prioritaet`,
+  `tag`, `suchtext`, `faellig_vor` and `faellig_nach` alike. `limit` is the one
+  exception and still rejects `0`: `null` is how an integer parameter says "no
+  limit", so `0` reads as a caller asking for zero results, which is an error.
+- If either `faellig_vor` or `faellig_nach` is given, tasks with **no** readable `faellig_datum`
   are excluded from the result — a task without a due date can't be judged "before" or
-  "after" anything.
+  "after" anything, and neither can one whose stored due value this server cannot
+  parse (a foreign client's `DUE` holding a bare time or a period). Such a task is
+  listed normally when no due bound is given, sorting with the ones that have no
+  due date.
 - Both accept the same ISO 8601 date/datetime formats as `create_task`'s `faellig_datum`. A
   date-only bound (e.g. `"2026-07-20"`) is inclusive of the whole day: `faellig_vor` expands
   to the end of that day (`23:59:59`), `faellig_nach` to the start of it (`00:00:00`) — both
   in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), so an all-day task due exactly
   on the boundary date is included by either bound. A datetime bound (with a specific time) is used exactly as given.
 - `faellig_vor` and `faellig_nach` can be combined to select a range.
-- Tasks are sorted by `faellig_datum` ascending (tasks without a due date sort last), then by `titel`.
+- Tasks are sorted by `faellig_datum` ascending (tasks without a readable due date sort last), then by `titel` — case-insensitively and with umlauts filed under their base letter (`"Ärztin"` between `"Apotheke"` and `"Zahnarzt"`, not behind both), not in raw codepoint order.
 - `limit` caps the number of results, applied *last* after merging and sorting across lists. `limit <= 0`
   is an error (`InvalidTaskDataError`).
 
@@ -150,8 +209,9 @@ Fetch a single task by UID, without listing the whole task list.
 | `list_name` | string | yes | Display name of the task list |
 | `task_uid` | string | yes | UID of the task to fetch |
 
-Returns the same dict shape as one entry from `list_tasks` (see above), including
-`wiederholung`.
+Returns what one entry from `list_tasks` holds (see above), including
+`wiederholung` — minus its `"liste"` key, since the list is `list_name`, which
+you passed in.
 
 ---
 
@@ -206,10 +266,16 @@ Each entry is either:
   before), `"-PT15M"` (15 minutes before). Anchored to `faellig_datum`
   (`TRIGGER;RELATED=END`) when the task has one, otherwise to `start_datum`
   (`RELATED=START`). A relative reminder on a task with neither date is an error.
+  The leading `-` is what makes it fire *before* the date: a positive duration
+  (`"PT30M"`) is valid and means half an hour *after* it.
 - an **absolute** ISO 8601 datetime, e.g. `"2026-07-19T09:00:00+02:00"`. Stored as a UTC
   `TRIGGER;VALUE=DATE-TIME` on the wire, as RFC 5545 requires; a value without an offset is
-  read in the server's default timezone first. Reading it back yields the same instant
-  rendered in the default timezone, so the string may differ from the one sent.
+  read in the server's default timezone (`MCP_DEFAULT_TIMEZONE`) first, then converted to
+  UTC. Reading it back yields the same instant rendered in the default timezone, so the
+  string may differ from the one sent.
+
+Passing the same reminder twice — including two spellings of the same trigger, e.g.
+`"-P1W"` and `"-P7D"` — creates one alarm, not two.
 
 Example call:
 
@@ -246,9 +312,12 @@ plus):
 Only fields explicitly present in the call are modified; everything else on the task
 (including fields this server doesn't model) is preserved. Two things to know:
 
-- Passing `erinnerungen` **replaces all existing reminders** with the new list. Pass
-  `[]` to remove all reminders (equivalent to clearing `"erinnerungen"` via
-  `felder_leeren`).
+- Passing `erinnerungen` **replaces the reminders `list_tasks` shows** with the new list.
+  A reminder that is already there is left untouched (keeping the dismissed state and any
+  detail this format has no slot for), one that is missing from the list is removed, and an
+  alarm the task carries but `erinnerungen` cannot express (see `list_tasks`) is never
+  touched. Pass `[]` to remove the visible reminders; clearing `"erinnerungen"` via
+  `felder_leeren` removes *every* alarm, including the ones that were never listed.
 - A scalar field left as `None`/omitted is left unchanged. To actually remove a
   property (e.g. delete a due date), list its name in `felder_leeren` instead.
 - `wiederholung`'s anchor requirement (see `create_task`'s "Recurrence"
@@ -483,7 +552,7 @@ mapping:
 | `sichtbarkeit` | `CLASS` | same values as tasks |
 | `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO;COUNT=10"` |
 | `ausnahme_daten` | `EXDATE` | list of ISO dates/datetimes: occurrences of the series to skip |
-| `erinnerungen` | `VALARM` | relative durations (e.g. `"-PT30M"`) trigger before `start`; absolute ISO datetimes as-is |
+| `erinnerungen` | `VALARM` | relative durations (e.g. `"-PT30M"`) trigger before `start`; absolute ISO datetimes as-is. Same read/write rules as tasks — see `list_tasks` |
 | `url` | `URL` | |
 | `verknuepfte_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of a task this event reserves time for |
 | `teilnehmer` | `ATTENDEE` (one per entry) | list of attendee dicts, see below |
@@ -492,7 +561,28 @@ Returns `{"uid": ...}`.
 
 To move or cancel a **single occurrence** of a recurring event: add its
 original date to `ausnahme_daten` (via `update_event`) and, for a move, create
-a separate replacement event.
+a separate replacement event. Pass the occurrence exactly as `list_events` /
+`get_event` reported its `start` — exception dates are stored in the timezone
+the event's own start is anchored to, so the value names the same moment the
+series produced. A **naive** exception date still means the server's default
+timezone, like every other naive input: for an event anchored in a *foreign*
+zone, name that zone (`"2026-07-27T09:00:00 Asia/Tokyo"`) or pass the reported
+value back.
+
+Every entry must be the same kind as the event's own start — date-only
+`"YYYY-MM-DD"` values for an all-day event, full datetimes otherwise. A mixed
+(or mismatched) set is rejected instead of written: iCalendar puts every value
+under one property with one set of parameters, which RFC 5545 §3.8.5.1 allows
+for a single value type only, and a date-only exception names no occurrence of
+a timed series in any case.
+
+An entry that names no occurrence of the event's `wiederholung` at all — wrong
+day, wrong time, or a naive value read in the server's timezone while the
+series runs in another — is **rejected** rather than stored, since it would
+cancel nothing and report nothing. The check is best-effort and never guesses:
+an event without an `RRULE`, a rule that cannot be expanded, and a series long
+enough that finding the occurrence would mean walking more than 10 000 of them
+are all accepted unchecked. `RDATE` dates count as occurrences too.
 
 ### Attendees (`teilnehmer`)
 
@@ -535,9 +625,14 @@ Example:
 ## `update_event(kalender_name, event_uid, ...)`
 
 Same fields as `create_event`, all optional. Only fields you pass are changed;
-`erinnerungen` and `ausnahme_daten` replace all existing entries, and so does
-`teilnehmer` — passing it **replaces the entire attendee list**, it does not
-add to it. `felder_leeren` removes properties entirely — accepted names:
+`ausnahme_daten` replaces all existing entries, and so does `teilnehmer` —
+passing it **replaces the entire attendee list**, it does not add to it.
+`erinnerungen` replaces the reminders `list_events` shows, on the same terms
+as `update_task` (reminders already present stay untouched, alarms the format
+cannot express are never touched). A reminder anchored to the *end* of an
+event is one of those: it has no `erinnerungen` spelling, since writing
+`"-PT30M"` back would anchor it to the start and move it by the event's whole
+duration. `felder_leeren` removes properties entirely — accepted names:
 `ende`, `ort`, `beschreibung`, `tags`, `status`, `sichtbarkeit`,
 `wiederholung`, `ausnahme_daten`, `erinnerungen`, `url`,
 `verknuepfte_aufgabe`, `teilnehmer` (`titel` and `start` cannot be cleared; a
@@ -654,6 +749,12 @@ Timeboxing: creates an event from an existing task and links the two (the
   call fails and you must pass `start` explicitly.
 - A datetime start produces an event of `dauer_minuten` length; a date-only
   start produces a one-day all-day event (`dauer_minuten` is ignored).
+- `dauer_minuten` is a real duration: a block that spans a daylight-saving
+  change stays that many minutes long, rather than following the wall clock.
+- The event is anchored to a timezone the same way `create_event` anchors one:
+  a `start` naming an IANA zone keeps it, a numeric offset is stored as UTC,
+  and a start taken from the task's `faellig_datum` (which is a bare instant —
+  tasks store no zone) is anchored in the server's default timezone.
 
 Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
 
@@ -664,7 +765,15 @@ Returns `{"uid": <event uid>, "task_uid": <task uid>}`.
 One day's calendar events and due tasks together — CalDAV has no combined
 VEVENT+VTODO query, so this is composed server-side. `datum` must be a
 date-only `"YYYY-MM-DD"` string; day boundaries are in the server's default timezone
-(consistent with the naive-input rule).
+(consistent with the naive-input rule), for the events and the tasks alike —
+including days that a daylight-saving change makes 23 or 25 hours long.
+
+Nextcloud resolves all-day and floating (zone-less) values against the
+*calendar's own* timezone when it answers a time-range query, which need not be
+`MCP_DEFAULT_TIMEZONE`. To keep the agenda's day the one this server promises,
+the neighbouring days are queried too and the result is cut back to the local
+day here. A recurring event that the server returns unexpanded is kept in any
+case — its start is the series' first occurrence, not the one that matched.
 
 ```json
 {
@@ -904,6 +1013,11 @@ containing every task/event in it.
 Built with a single `PRODID`/`VERSION` header; a recurring event/task and its
 override instances are kept together, and `VTIMEZONE` components are
 de-duplicated by `TZID`.
+
+This pair is the lossless path for anything the German field names don't
+model. `VALARM`s in particular go out and come back verbatim — action,
+`ATTACH`, `DURATION`/`REPEAT`, the `RELATED` anchor and the dismissed state
+(`ACKNOWLEDGED`) included — where `erinnerungen` only carries a trigger time.
 
 ### `import_ics(kalender_name, ics)`
 

@@ -188,9 +188,7 @@ class Settings:
                 f"NEXTCLOUD_HTTP_TIMEOUT_SECONDS must be an integer, got: {timeout_raw!r}"
             ) from exc
 
-        default_timezone = (
-            os.environ.get("MCP_DEFAULT_TIMEZONE", "Europe/Berlin").strip() or "Europe/Berlin"
-        )
+        default_timezone = default_timezone_from_env()
 
         return cls(
             caldav_url=require("NEXTCLOUD_CALDAV_URL"),
@@ -209,3 +207,14 @@ class Settings:
             caldav_timeout_seconds=caldav_timeout_seconds,
             default_timezone=default_timezone,
         )
+
+
+def default_timezone_from_env() -> str:
+    """`MCP_DEFAULT_TIMEZONE`, or the shipped default when it is unset/empty.
+
+    Split out of `Settings.from_env` so the admin CLI - which has no reason to
+    require a full server configuration just to print a token expiry - can
+    format its timestamps in the same zone the server uses.
+    """
+    configured = os.environ.get("MCP_DEFAULT_TIMEZONE", "").strip()
+    return configured or Settings.default_timezone
