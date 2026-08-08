@@ -287,6 +287,7 @@ def build_server(
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
         wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -314,6 +315,12 @@ def build_server(
                 e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE. Requires the task to
                 have a start_datum or faellig_datum (in this same call) to
                 recur from - a task with neither is rejected.
+            ausnahme_daten: Optional ISO 8601 dates/datetimes of skipped
+                occurrences of a recurring task -> EXDATE. Each entry must be
+                the same value kind as the task's start_datum (date-only for an
+                all-day task, a full datetime otherwise) and must name an
+                occurrence the wiederholung actually produces; an entry that
+                would cancel nothing is rejected rather than stored.
 
         Date/time semantics for start_datum and faellig_datum: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
@@ -344,6 +351,7 @@ def build_server(
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
             wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -365,6 +373,7 @@ def build_server(
         sichtbarkeit: str | None = None,
         uebergeordnete_aufgabe: str | None = None,
         wiederholung: str | None = None,
+        ausnahme_daten: list[str] | None = None,
         felder_leeren: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
@@ -386,7 +395,10 @@ def build_server(
                 Accepted values: "start_datum", "faellig_datum", "prioritaet",
                 "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
                 "notizen", "sichtbarkeit", "uebergeordnete_aufgabe",
-                "wiederholung". "titel" cannot be cleared. Naming an unknown
+                "wiederholung", "ausnahme_daten". Clearing "wiederholung" also
+                drops the task's ausnahme_daten (EXDATE) and any RDATE, which
+                cancel and add nothing once the series is gone. "titel" cannot
+                be cleared. Naming an unknown
                 field, or naming a field here that is *also* given a new
                 value in the same call, is an error.
 
@@ -407,6 +419,7 @@ def build_server(
             sichtbarkeit=sichtbarkeit,
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
             wiederholung=wiederholung,
+            ausnahme_daten=ausnahme_daten,
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)
