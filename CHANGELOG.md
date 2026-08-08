@@ -88,6 +88,11 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Changed
 
+- **`complete_task` ends recurring task series.** Completing a recurring task
+  does not automatically roll the series forward to the next occurrence
+  (unlike what the Nextcloud UI might do). Instead, it hard-ends the series by
+  marking the entire recurring task as done. To advance a series, use
+  `update_task` on its `faellig_datum` instead.
 - **One configurable server timezone instead of hardcoded UTC**
   (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Naive datetime input is
   interpreted in that zone, day windows (`get_agenda`, `von`/`bis`,

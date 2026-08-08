@@ -416,6 +416,12 @@ def build_server(
     async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
 
+        Warning: for a recurring task, completing it (unlike in the Nextcloud
+        UI) does not automatically roll the series forward to the next
+        occurrence; instead, it hard-ends the series by marking the entire
+        recurring task as done. To advance a series instead, use
+        `update_task` on its `faellig_datum`.
+
         Args:
             list_name: Display name of the task list containing the task.
             task_uid: UID of the task to complete.
