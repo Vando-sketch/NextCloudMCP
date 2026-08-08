@@ -638,6 +638,146 @@ def test_mark_completed_sets_status_and_percent():
     assert "completed" in todo
 
 
+# --- Task status (update_task's status parameter) ---
+
+
+@pytest.mark.parametrize(
+    ("label", "ical_value"),
+    [
+        ("offen", "NEEDS-ACTION"),
+        ("in-arbeit", "IN-PROCESS"),
+        ("erledigt", "COMPLETED"),
+        ("abgesagt", "CANCELLED"),
+    ],
+)
+def test_task_status_label_to_ical(label, ical_value):
+    assert mapping.task_status_label_to_ical(label) == ical_value
+
+
+def test_task_status_label_to_ical_unknown_raises():
+    with pytest.raises(InvalidTaskDataError, match="Unknown status"):
+        mapping.task_status_label_to_ical("fertig")
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["offen", "in-arbeit", "erledigt", "abgesagt"],
+)
+def test_apply_task_fields_status_round_trips(label):
+    """Every status label round-trips through apply_task_fields/parse_vtodo."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", status=label)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+
+
+def test_apply_task_fields_status_erledigt_sets_percent_and_completed():
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "erledigt"
+    assert parsed["fortschritt_prozent"] == 100
+    assert "completed" in todo
+
+
+def test_apply_task_fields_status_offen_reopens_completed_task():
+    """status="offen" is the reopen path: removes COMPLETED, resets percent to 0."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt")
+    assert "completed" in todo
+
+    _apply(todo, status="offen")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+    assert parsed["fortschritt_prozent"] == 0
+    assert "completed" not in todo
+
+
+@pytest.mark.parametrize("label", ["in-arbeit", "abgesagt"])
+def test_apply_task_fields_status_in_arbeit_and_abgesagt_keep_progress(label):
+    """in-arbeit/abgesagt keep whatever progress was recorded."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", fortschritt_prozent=42)
+    _apply(todo, status=label)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+    assert parsed["fortschritt_prozent"] == 42
+    assert "completed" not in todo
+
+
+@pytest.mark.parametrize("label", ["in-arbeit", "abgesagt", "offen"])
+def test_apply_task_fields_leaving_erledigt_drops_completed_timestamp(label):
+    """No non-completed status may keep a COMPLETED timestamp around.
+
+    caldav's pending filter (`todos(include_completed=False)`, what nur_offene
+    and get_agenda run on) drops any VTODO that merely *has* a COMPLETED
+    property, whatever its STATUS says - so a task moved off "erledigt" while
+    keeping the timestamp would report its new status and still be invisible
+    in every open-task listing.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt")
+    assert "completed" in todo
+
+    _apply(todo, status=label)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+    assert "completed" not in todo
+
+
+def test_apply_task_fields_explicit_fortschritt_prozent_wins_over_status():
+    """status="erledigt" would derive 100%, but an explicit fortschritt_prozent
+    in the same call must win (write-ordering requirement)."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", status="erledigt", fortschritt_prozent=55)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "erledigt"
+    assert parsed["fortschritt_prozent"] == 55
+
+    # And the reverse: status="offen" would derive 0%, explicit wins here too.
+    _apply(todo, status="offen", fortschritt_prozent=10)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+    assert parsed["fortschritt_prozent"] == 10
+
+
+def test_apply_task_fields_unknown_status_raises_and_does_not_write():
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+    with pytest.raises(InvalidTaskDataError, match="Unknown status"):
+        _apply(todo, status="fertig")
+    # Nothing about the task changed - not even STATUS was written.
+    assert "status" not in todo
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+    assert parsed["faellig_datum"] == "2026-07-20"
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "label"),
+    [
+        ("NEEDS-ACTION", "offen"),
+        ("IN-PROCESS", "in-arbeit"),
+        ("COMPLETED", "erledigt"),
+        ("CANCELLED", "abgesagt"),
+        ("SOME-OTHER-STATUS", "offen"),
+    ],
+)
+def test_parse_vtodo_status_values(raw_status, label):
+    todo = _new_todo()
+    todo.add("summary", "Task")
+    todo.add("status", raw_status)
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == label
+
+
+def test_parse_vtodo_missing_status_reads_as_offen():
+    todo = _new_todo()
+    todo.add("summary", "Task")
+    parsed = mapping.parse_vtodo(todo)
+    assert parsed["status"] == "offen"
+
+
 # --- All-day dates (B1) ---
 
 
