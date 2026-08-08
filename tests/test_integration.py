@@ -202,8 +202,8 @@ def test_event_lifecycle(live_service, test_calendar):
 
     fetched = live_service.get_event(test_calendar, uid)
     assert fetched["titel"] == "Integrationstest-Termin"
-    assert fetched["start"] == "2026-09-01T14:00:00+00:00"
-    assert fetched["ende"] == "2026-09-01T15:00:00+00:00"
+    assert fetched["start"] == "2026-09-01T14:00:00+02:00"
+    assert fetched["ende"] == "2026-09-01T15:00:00+02:00"
     assert fetched["status"] == "bestätigt"
     assert fetched["tags"] == ["MCP-Test"]
 
@@ -273,7 +273,7 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
     starts = sorted(e["start"] for e in occurrences)
     try:
         assert len(occurrences) == 3  # 4 occurrences minus 1 exception
-        assert "2026-09-14T10:00:00+00:00" not in starts
+        assert "2026-09-14T10:00:00+02:00" not in starts
     finally:
         live_service.delete_event(test_calendar, series_uid)
 
@@ -298,8 +298,8 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
         )
         event = live_service.get_event(test_calendar, event_uid)
         assert event["titel"] == "Verknüpfungstest-Aufgabe"
-        assert event["start"] == "2026-09-03T16:00:00+00:00"
-        assert event["ende"] == "2026-09-03T16:45:00+00:00"
+        assert event["start"] == "2026-09-03T16:00:00+02:00"
+        assert event["ende"] == "2026-09-03T16:45:00+02:00"
         assert {"uid": task_uid, "beziehung": "zeitblock"} in event["verknuepfte_aufgaben"]
 
         # Explicit linking with the other relation.
