@@ -559,6 +559,32 @@ def test_list_tasks_limit_cuts_after_merge_across_lists(service, principal):
     assert result[0]["liste"] == "List2"
 
 
+def test_list_tasks_with_several_named_lists_merges_and_sorts_them(service, principal):
+    """Several names at once is the shape an LLM caller actually uses.
+
+    Every other test passes one name, None, or [] - none of them exercise the
+    multi-name path, where each name is resolved separately and the results
+    have to merge into one chronological list rather than stay grouped per
+    list.
+    """
+    arbeit = _make_calendar("Arbeit", "https://cloud.example.com/dav/arbeit/")
+    einkauf = _make_calendar("Einkauf", "https://cloud.example.com/dav/einkauf/")
+    privat = _make_calendar("Privat", "https://cloud.example.com/dav/privat/")
+    arbeit.todos.return_value = [_todo_obj("spaet", titel="Spät", faellig_datum="2026-08-10")]
+    einkauf.todos.return_value = [_todo_obj("frueh", titel="Früh", faellig_datum="2026-08-01")]
+    privat.todos.return_value = [
+        _todo_obj("ignoriert", titel="Ignoriert", faellig_datum="2026-08-05")
+    ]
+    principal.calendars.return_value = [arbeit, einkauf, privat]
+
+    result = service.list_tasks(list_names=["Arbeit", "Einkauf"])
+
+    # Chronological across both lists, and the unnamed third list stays out.
+    assert [t["uid"] for t in result] == ["frueh", "spaet"]
+    assert [t["liste"] for t in result] == ["Einkauf", "Arbeit"]
+    privat.todos.assert_not_called()
+
+
 def test_list_tasks_all_lists_reaches_both_lists_sharing_a_display_name(service, principal):
     """Two lists may legitimately carry the same display name.
 
@@ -1038,6 +1064,110 @@ def test_task_write_paths_still_accept_the_series_uid(service, principal):
     service.update_task("Personal", "wei#rd", mapping.TaskFields(titel="Neu"))
 
     assert str(todo.get("summary")) == "Neu"
+
+
+# --- update_task's status parameter (reopen path, B) ---
+
+
+@pytest.mark.parametrize("label", ["offen", "in-arbeit", "erledigt", "abgesagt"])
+def test_update_task_status_round_trips_through_get_task(service, principal, label):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("summary", "Task")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(status=label))
+    result = service.get_task("Personal", "abc")
+
+    assert result["status"] == label
+
+
+def test_update_task_status_erledigt_then_offen_reopens(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("summary", "Task")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(status="erledigt"))
+    completed = service.get_task("Personal", "abc")
+    assert completed["status"] == "erledigt"
+    assert completed["fortschritt_prozent"] == 100
+
+    service.update_task("Personal", "abc", mapping.TaskFields(status="offen"))
+    reopened = service.get_task("Personal", "abc")
+    assert reopened["status"] == "offen"
+    assert reopened["fortschritt_prozent"] == 0
+
+
+def test_update_task_status_erledigt_then_in_arbeit_keeps_task_pending(service, principal):
+    """Leaving "erledigt" must make the task visible to nur_offene again.
+
+    caldav asks the server for pending tasks with filters that exclude any
+    VTODO carrying a COMPLETED property, so a stale timestamp would keep this
+    task out of every open listing while it reports "in-arbeit".
+    """
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("summary", "Task")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task("Personal", "abc", mapping.TaskFields(status="erledigt"))
+    service.update_task("Personal", "abc", mapping.TaskFields(status="in-arbeit"))
+
+    assert service.get_task("Personal", "abc")["status"] == "in-arbeit"
+    assert "completed" not in todo
+    assert "completed" not in todo
+
+
+def test_update_task_status_with_explicit_fortschritt_prozent_wins(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("summary", "Task")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task(
+        "Personal", "abc", mapping.TaskFields(status="erledigt", fortschritt_prozent=42)
+    )
+    result = service.get_task("Personal", "abc")
+
+    assert result["status"] == "erledigt"
+    assert result["fortschritt_prozent"] == 42
+
+
+def test_update_task_unknown_status_raises_and_does_not_save(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    todo.add("summary", "Task")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    with pytest.raises(InvalidTaskDataError, match="Unknown status"):
+        service.update_task("Personal", "abc", mapping.TaskFields(status="fertig"))
+    todo_obj.save.assert_not_called()
 
 
 # --- wiederholung (RRULE), now writable ---
@@ -2346,6 +2476,117 @@ def test_create_event_from_task_without_due_or_start_raises(service, principal):
 def test_create_event_from_task_rejects_nonpositive_duration(service):
     with pytest.raises(InvalidEventDataError, match="dauer_minuten"):
         service.create_event_from_task("Privat", "task-1", "Termine", dauer_minuten=0)
+
+
+def test_create_event_from_task_neither_duration_nor_ende_defaults_to_60_minutes(
+    service, principal
+):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(
+        titel="Steuer", faellig_datum="2026-07-20T14:00:00"
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task("Privat", "task-1", "Termine")
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
+    assert "DTEND;TZID=Europe/Berlin:20260720T150000" in ical_text
+
+
+def test_create_event_from_task_explicit_ende(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(
+        titel="Steuer", faellig_datum="2026-07-20T14:00:00"
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task("Privat", "task-1", "Termine", ende="2026-07-20T18:00:00+02:00")
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:20260720T140000" in ical_text
+    assert "DTEND;TZID=Europe/Berlin:20260720T180000" in ical_text
+
+
+def test_create_event_from_task_ende_and_dauer_minuten_together_raises(service):
+    with pytest.raises(InvalidEventDataError, match="ende.*dauer_minuten|dauer_minuten.*ende"):
+        service.create_event_from_task(
+            "Privat", "task-1", "Termine", ende="2026-07-20T18:00:00", dauer_minuten=30
+        )
+
+
+def test_create_event_from_task_beschreibung_empty_string_overrides_notizen(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(
+        titel="Steuer", faellig_datum="2026-07-20T14:00:00", notizen="Belege"
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task("Privat", "task-1", "Termine", beschreibung="")
+
+    _, kwargs = event_cal.save_event.call_args
+    # An explicit "" *sets* an empty description (distinct from not writing
+    # DESCRIPTION at all) - it must not fall back to the task's notizen.
+    assert "DESCRIPTION:\r\n" in kwargs["ical"]
+    assert "Belege" not in kwargs["ical"]
+
+
+def test_create_event_from_task_beschreibung_none_inherits_notizen(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(
+        titel="Steuer", faellig_datum="2026-07-20T14:00:00", notizen="Belege sammeln"
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task("Privat", "task-1", "Termine")
+
+    _, kwargs = event_cal.save_event.call_args
+    assert "DESCRIPTION:Belege sammeln" in kwargs["ical"]
+
+
+def test_create_event_from_task_erinnerungen_and_sichtbarkeit_pass_through(service, principal):
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(
+        titel="Steuer", faellig_datum="2026-07-20T14:00:00"
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task(
+        "Privat",
+        "task-1",
+        "Termine",
+        erinnerungen=["-PT30M"],
+        sichtbarkeit="privat",
+    )
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "BEGIN:VALARM" in ical_text
+    assert "CLASS:PRIVATE" in ical_text
+
+
+def test_create_event_from_task_all_day_explicit_ende(service, principal):
+    """An all-day start still allows an explicit (date-only) ende to extend
+    the event beyond a single day; dauer_minuten stays ignored either way."""
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.get_todo_by_uid.return_value = _todo_obj(titel="Steuer", faellig_datum="2026-07-20")
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    principal.calendars.return_value = [todo_cal, event_cal]
+
+    service.create_event_from_task("Privat", "task-1", "Termine", ende="2026-07-22")
+
+    _, kwargs = event_cal.save_event.call_args
+    ical_text = kwargs["ical"]
+    assert "DTSTART;VALUE=DATE:20260720" in ical_text
+    # ende is the inclusive last day; RFC 5545 DTEND is exclusive (+1 day).
+    assert "DTEND;VALUE=DATE:20260723" in ical_text
 
 
 # --- get_agenda ---
