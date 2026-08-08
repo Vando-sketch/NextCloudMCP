@@ -165,7 +165,7 @@ def _initial_default_timezone() -> tzinfo:
     """
     try:
         return ZoneInfo(_SHIPPED_DEFAULT_TIMEZONE)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, IsADirectoryError):
         _logger.warning(
             "Timezone database unavailable: %r could not be resolved, falling back to "
             "UTC. Install the 'tzdata' package to use MCP_DEFAULT_TIMEZONE.",
@@ -324,7 +324,7 @@ def _split_timezone_name(text: str) -> tuple[str, ZoneInfo | None]:
     candidate_text, _, candidate_zone = text.rpartition(" ")
     try:
         return candidate_text, ZoneInfo(candidate_zone)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, IsADirectoryError):
         return text, None
 
 
@@ -1372,14 +1372,14 @@ def _resolve_tzid(tzid: str) -> ZoneInfo | None:
             continue
         try:
             return ZoneInfo(candidate)
-        except (ZoneInfoNotFoundError, ValueError):
+        except (ZoneInfoNotFoundError, ValueError, IsADirectoryError):
             pass
     parts = [part for part in name.split("/") if part]
     for count in (3, 2):
         if len(parts) > count:
             try:
                 return ZoneInfo("/".join(parts[-count:]))
-            except (ZoneInfoNotFoundError, ValueError):
+            except (ZoneInfoNotFoundError, ValueError, IsADirectoryError):
                 pass
     return None
 

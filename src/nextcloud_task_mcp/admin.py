@@ -102,7 +102,7 @@ def _default_timezone() -> datetime.tzinfo:
     """
     try:
         return ZoneInfo(default_timezone_from_env())
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, IsADirectoryError):
         return datetime.timezone.utc
 
 
