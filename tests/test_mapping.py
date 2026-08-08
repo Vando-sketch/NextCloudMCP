@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
-from icalendar import Todo
+from icalendar import Calendar, Todo
 
 from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.errors import InvalidTaskDataError
@@ -16,6 +17,21 @@ from nextcloud_task_mcp.mapping import TaskFields
 def _new_todo(uid: str = "task-1") -> Todo:
     todo = Todo()
     todo.add("uid", uid)
+    return todo
+
+
+def _todo_from_ics(body: str) -> Todo:
+    """Parse a VTODO out of real ICS text.
+
+    Foreign-client alarms are only ever seen through the parser, so the tests
+    for them build the component the same way instead of hand-assembling
+    `icalendar` objects into states parsing can never produce.
+    """
+    calendar = Calendar.from_ical(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n" + body + "END:VCALENDAR\n"
+    )
+    todo = calendar.walk("VTODO")[0]
+    assert isinstance(todo, Todo)
     return todo
 
 
@@ -204,11 +220,11 @@ def test_extract_alarms_round_trip_absolute():
         erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
     )
     parsed = mapping.parse_vtodo(todo)
-    # Note: absolute reminders are formatted in default timezone (Europe/Berlin, +02:00 in August)
-    assert parsed["erinnerungen"] == [
-        "2026-08-07T11:00:00+02:00",
-        "2026-08-07T11:00:00+02:00",
-    ]
+    # Both spellings name the same instant, so `apply_alarms` collapses them
+    # into one alarm; reading it back formats it in the server's default
+    # timezone (Europe/Berlin, +02:00 in August), the same convention
+    # DTSTART/DUE follow.
+    assert parsed["erinnerungen"] == ["2026-08-07T11:00:00+02:00"]
 
 
 def test_extract_alarms_preserves_order():
@@ -257,24 +273,56 @@ def test_extract_alarms_absolute_with_offset_formats_in_default_timezone():
     assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
+def _todo_with_tzid_trigger(tzid: str) -> Todo:
+    """A task carrying one absolute alarm at 11:00 in the zone `tzid` names.
+
+    `icalendar` resolves a TZID on DUE/DTSTART but leaves a VALARM's TRIGGER
+    naive, with the zone name in the property's parameters - so this is what
+    an absolute foreign reminder really looks like after parsing.
+    """
+    zone_param = f";TZID={tzid}" if tzid else ""
+    return _todo_from_ics(
+        f"""BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:foreign
+TRIGGER;VALUE=DATE-TIME{zone_param}:20260719T110000
+END:VALARM
+END:VTODO
+"""
+    )
+
+
 def test_extract_alarms_resolves_foreign_tzid_trigger():
-    """A TRIGGER;TZID=... written by another client is resolved and formatted in default zone."""
-    from icalendar import Alarm
+    """A TRIGGER;TZID=... written by another client is resolved, not read as UTC.
 
-    todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20")
-
-    alarm = Alarm()
-    alarm.add("action", "DISPLAY")
-    alarm.add("description", "Reminder")
-    alarm.add("trigger", datetime(2026, 7, 19, 11, 0, 0), parameters={"TZID": "Europe/Berlin"})
-    todo.add_component(alarm)
-
-    parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+    Reading it as UTC would shift the reminder by the zone's offset (two hours
+    for Berlin in July). The resolved instant is then formatted in the
+    server's default timezone on the way out, the same convention DTSTART/DUE
+    follow.
+    """
+    todo = _todo_with_tzid_trigger("Europe/Berlin")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
-def test_extract_alarms_unknown_tzid_falls_back_to_utc():
+def test_extract_alarms_resolves_windows_tzid_trigger():
+    """Outlook writes Windows zone names, which `zoneinfo` does not know."""
+    todo = _todo_with_tzid_trigger("W. Europe Standard Time")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+
+
+def test_extract_alarms_unknown_tzid_via_manual_alarm_is_skipped():
+    """A TZID this server cannot resolve is not silently read as UTC.
+
+    Guessing a zone would shift the reminder by hours, so it is left out of
+    `erinnerungen`, and the VALARM itself is left untouched - same behaviour
+    as `test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm`
+    below, exercised here through an alarm built directly with `icalendar`
+    rather than parsed from ICS text.
+    """
     from icalendar import Alarm
 
     todo = _new_todo()
@@ -287,55 +335,290 @@ def test_extract_alarms_unknown_tzid_falls_back_to_utc():
     todo.add_component(alarm)
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T13:00:00+02:00"]
+    assert parsed["erinnerungen"] == []
+    assert any(c.name == "VALARM" for c in todo.subcomponents)
 
 
-def test_extract_alarms_skips_date_valued_and_repeated_triggers():
-    """Neither wire form is one this server writes, but foreign clients do."""
-    from icalendar import Alarm
-
-    todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
-
-    date_trigger = Alarm()
-    date_trigger.add("action", "DISPLAY")
-    date_trigger.add("trigger", date(2026, 7, 19))
-    todo.add_component(date_trigger)
-
-    repeated_trigger = Alarm()
-    repeated_trigger.add("action", "DISPLAY")
-    repeated_trigger.add("trigger", timedelta(minutes=-30))
-    repeated_trigger.add("trigger", timedelta(minutes=-60))
-    todo.add_component(repeated_trigger)
-
-    parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+def test_extract_alarms_resolves_prefixed_tzid_trigger():
+    """Evolution and older clients prefix the IANA name with a namespace path."""
+    todo = _todo_with_tzid_trigger("/freeassociation.sourceforge.net/Europe/Berlin")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
 
 
-def test_extract_alarms_does_not_preserve_related_anchor():
-    """Documented, deliberate fidelity loss: `erinnerungen` has no RELATED slot.
+def test_extract_alarms_resolves_prefixed_three_segment_tzid_trigger():
+    """Some IANA names have three segments, so two trailing segments is not enough.
 
-    A foreign alarm anchored to DTSTART on a task that also has a DUE reads
-    back as a bare duration, and writing it back re-anchors it to DUE (see
-    `build_alarm`). Pinned here so the limitation can't drift unnoticed.
+    11:00 America/Indiana/Knox (-05:00 in July) is 18:00 in the server's
+    default timezone (Europe/Berlin, +02:00 in July) - the value is resolved
+    in its stored zone, then rendered in the default one on the way out.
     """
-    todo = _new_todo()
-    _apply(
-        todo, titel="Task", start_datum="2026-07-15T09:00:00", faellig_datum="2026-07-20T10:00:00"
-    )
-    todo.add_component(mapping.build_alarm("-PT30M", "Task", has_due=False, has_start=True))
+    todo = _todo_with_tzid_trigger("/softwarestudio.org/Olson_20011030_5/America/Indiana/Knox")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T18:00:00+02:00"]
+
+
+def test_extract_alarms_naive_trigger_without_tzid_is_utc():
+    """RFC 5545 requires absolute triggers in UTC, so an unqualified one is taken at its word.
+
+    11:00 UTC reads back as 13:00 in the server's default timezone
+    (Europe/Berlin, +02:00 in July).
+    """
+    todo = _todo_with_tzid_trigger("")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T13:00:00+02:00"]
+
+
+def test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm():
+    """An unknown zone name is not silently read as UTC.
+
+    Guessing a zone would move the reminder by hours, so the alarm is left out
+    of `erinnerungen` - and, being invisible, is left untouched by a write.
+    """
+    todo = _todo_with_tzid_trigger("Mars/Olympus")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+    _apply(todo, erinnerungen=["-PT30M"])
+
+    assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 2
+
+
+def test_extract_alarms_tzid_naming_a_tzdata_directory_does_not_crash():
+    """A TZID like "Europe" names a tzdata *directory*, not a zone."""
+    todo = _todo_with_tzid_trigger("Europe")
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+
+_FOREIGN_ALARMS_ICS = """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DTSTART:20260715T090000Z
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:ours
+TRIGGER;RELATED=END:-PT30M
+END:VALARM
+BEGIN:VALARM
+ACTION:AUDIO
+DESCRIPTION:anchored to the start
+TRIGGER;RELATED=START:-PT15M
+UID:foreign-alarm-1
+ACKNOWLEDGED:20260714T100000Z
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:date-valued trigger
+TRIGGER;VALUE=DATE:20260719
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:repeated trigger
+TRIGGER;RELATED=END:-PT30M
+TRIGGER:-PT60M
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no trigger at all
+END:VALARM
+END:VTODO
+"""
+
+
+def test_extract_alarms_skips_alarms_the_string_form_cannot_express():
+    """Only alarms that would survive being written back unchanged are listed.
+
+    A START-anchored alarm on a task that has a DUE would be re-anchored to
+    DUE on write-back (`build_alarm` derives RELATED from the task's own
+    dates), so reporting it as a bare "-PT15M" would be a lie about when it
+    fires. Same for the trigger forms this server cannot write at all.
+    """
+    todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
     assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
 
-    rewritten = _new_todo()
-    _apply(
-        rewritten,
-        titel="Task",
-        start_datum="2026-07-15T09:00:00",
-        faellig_datum="2026-07-20T10:00:00",
-        erinnerungen=["-PT30M"],
+
+_UNANCHORED_ALARM_ICS = """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no RELATED parameter
+TRIGGER:-PT30M
+END:VALARM
+END:VTODO
+"""
+
+
+def test_extract_alarms_lists_a_trigger_that_names_no_anchor():
+    """RELATED is omissible, so the bare form is what foreign clients mostly write.
+
+    Its RFC default is START, but this task has no DTSTART for that to mean
+    anything - the due date is the only anchor there is, which is exactly what
+    "-PT30M" says here. Hiding it would be a regression: the reminder would
+    disappear from the API while still firing.
+    """
+    todo = _todo_from_ics(_UNANCHORED_ALARM_ICS)
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+
+
+def test_apply_task_fields_does_not_duplicate_a_trigger_that_names_no_anchor():
+    """Writing the same reminder back must not add a second alarm beside it."""
+    todo = _todo_from_ics(_UNANCHORED_ALARM_ICS)
+    before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(todo, erinnerungen=["-PT30M"])
+
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert alarms[0].to_ical() == before
+
+
+def test_extract_alarms_still_hides_an_anchor_the_task_really_has():
+    """The both-dates case stays hidden: there DTSTART exists and means something else."""
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DTSTART:20260715T090000Z
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no RELATED parameter
+TRIGGER:-PT30M
+END:VALARM
+END:VTODO
+"""
     )
-    alarm = next(c for c in rewritten.subcomponents if c.name == "VALARM")
-    assert alarm.get("trigger").params["RELATED"] == "END"
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+
+def test_apply_task_fields_preserves_alarms_it_cannot_express():
+    """Writing `erinnerungen` must not delete what the reader could not show."""
+    todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
+    # The first VALARM in the fixture is the one `erinnerungen` can express;
+    # every other one is a form this server has no string for.
+    unexpressible = [c.to_ical() for c in todo.subcomponents if c.name == "VALARM"][1:]
+
+    _apply(todo, erinnerungen=["-PT30M", "-P1D"])
+
+    kept = [c.to_ical() for c in todo.subcomponents if c.name == "VALARM"]
+    for alarm in unexpressible:
+        assert alarm in kept
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M", "-P1D"]
+
+
+def test_apply_task_fields_leaves_an_already_present_reminder_untouched():
+    """A reminder that is already there keeps its UID/ACKNOWLEDGED/ACTION.
+
+    Rebuilding it as a fresh DISPLAY alarm would drop the dismiss state, so a
+    reminder the user already clicked away could fire again.
+    """
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:EMAIL
+DESCRIPTION:dismissed already
+TRIGGER;RELATED=END:-PT30M
+UID:foreign-alarm-1
+ACKNOWLEDGED:20260718T100000Z
+X-MOZ-LASTACK:20260718T100000Z
+END:VALARM
+END:VTODO
+"""
+    )
+    before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(todo, titel="Renamed", erinnerungen=["-PT30M"])
+
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert alarms[0].to_ical() == before
+
+
+def test_apply_task_fields_matches_an_equivalent_duration_spelling():
+    """A week and seven days are the same trigger, so the alarm is not rebuilt."""
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+DUE:20260720T100000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:week before
+TRIGGER;RELATED=END:-P1W
+UID:foreign-alarm-1
+ACKNOWLEDGED:20260713T100000Z
+END:VALARM
+END:VTODO
+"""
+    )
+    before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(todo, erinnerungen=["-P7D"])
+
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert alarms[0].to_ical() == before
+
+
+def test_reminder_round_trip_leaves_the_component_unchanged():
+    """Read `erinnerungen`, write the same list back: nothing moves."""
+    todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
+    before = todo.to_ical()
+
+    _apply(todo, erinnerungen=mapping.parse_vtodo(todo)["erinnerungen"])
+
+    assert todo.to_ical() == before
+
+
+def test_relative_alarm_without_any_anchor_is_not_listed():
+    """A bare duration on a task with neither DUE nor DTSTART cannot be written back.
+
+    Listing it would produce a value that `update_task` rejects, so it is
+    treated like any other alarm this server cannot express: hidden, but kept.
+    """
+    todo = _todo_from_ics(
+        """BEGIN:VTODO
+UID:task-1
+SUMMARY:Task
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:floating
+TRIGGER:-PT30M
+END:VALARM
+END:VTODO
+"""
+    )
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+
+    _apply(todo, titel="Renamed")
+
+    assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 1
+
+
+def test_duplicate_reminder_specs_produce_one_alarm():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Task",
+        faellig_datum="2026-07-20T10:00:00",
+        erinnerungen=["-PT30M", "-PT30M", "-PT0H30M"],
+    )
+    alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert len(alarms) == 1
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+
+
+def test_updating_other_fields_leaves_alarms_alone():
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    before = todo.to_ical()
+
+    _apply(todo, ort="Zuhause")
+
+    assert [c for c in todo.subcomponents if c.name == "VALARM"]
+    assert todo.to_ical().replace(b"LOCATION:Zuhause\r\n", b"") == before
 
 
 def test_parent_uid_set_and_extracted():
@@ -432,6 +715,57 @@ def test_set_default_timezone_utc_reproduces_old_expectations():
     assert res["faellig_datum"] == "2026-07-20T14:00:00+00:00"
 
 
+@pytest.mark.parametrize("zone_name", ["UTC", "Etc/UTC", "Etc/GMT", "Universal"])
+def test_utc_default_timezone_is_kept_as_plain_utc(zone_name):
+    """A zone that *is* UTC never becomes a TZID reference.
+
+    `keep_zone=True` normally attaches the default zone as a `ZoneInfo`, which
+    `icalendar` writes as `DTSTART;TZID=<key>:...`. For UTC that would be a
+    TZID reference to a VTIMEZONE with a single zero-offset observance instead
+    of the plain `...Z` form every client understands - and
+    `MCP_DEFAULT_TIMEZONE=UTC` is documented to restore exactly the old,
+    pre-default-timezone wire format.
+    """
+    mapping.set_default_timezone(zone_name)
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result.tzinfo is timezone.utc
+    assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+
+
+def test_default_timezone_set_to_a_plain_tzinfo_is_used_as_is():
+    """`set_default_timezone` also takes a `tzinfo` - the tzdata-less fallback path."""
+    mapping.set_default_timezone(timezone.utc)
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result == datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+    assert mapping.local_midnight(date(2026, 7, 20)).isoformat() == "2026-07-20T00:00:00+00:00"
+
+
+def test_explicit_utc_zone_name_input_is_kept_as_plain_utc():
+    result = mapping.parse_datetime_input("2026-07-20T14:00:00 UTC", keep_zone=True)
+    assert isinstance(result, datetime)
+    assert result.tzinfo is timezone.utc
+
+
+def test_missing_tzdata_falls_back_to_utc_instead_of_crashing_on_import(monkeypatch, caplog):
+    """The shipped default zone is resolved defensively at import time.
+
+    A Python install without the IANA database (a slim container, Windows
+    without `tzdata`) makes `ZoneInfo("Europe/Berlin")` raise at *import*, so
+    every tool would fail with an unhandled `ZoneInfoNotFoundError` traceback
+    from the module header - before the config layer gets to report anything.
+    """
+
+    def _no_tzdata(name):
+        raise ZoneInfoNotFoundError(f"No time zone found with key {name}")
+
+    monkeypatch.setattr(mapping, "ZoneInfo", _no_tzdata)
+    with caplog.at_level(logging.WARNING, logger="nextcloud_task_mcp.mapping"):
+        assert mapping._initial_default_timezone() is timezone.utc
+    assert "MCP_DEFAULT_TIMEZONE" in caplog.text
+
+
 def test_naive_datetime_round_trip():
     """Write a naive datetime, read it back: same wall-clock time with local offset."""
     todo = _new_todo()
@@ -501,6 +835,73 @@ def test_local_times_inside_a_dst_gap_or_overlap_resolve_by_fold():
     ambiguous = mapping.parse_datetime_input("2026-10-25T02:30:00")
     assert isinstance(ambiguous, datetime)
     assert ambiguous == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+
+def test_gap_wall_time_is_settled_before_it_is_stored_with_its_zone():
+    """A wall time inside the spring-forward gap is moved to a real one.
+
+    With the zone kept (`keep_zone=True`, what events do), "02:30" on
+    2026-03-29 would otherwise be written verbatim as
+    `DTSTART;TZID=Europe/Berlin:20260329T023000` - a wall clock reading that
+    never happens, which every client is free to resolve its own way. The
+    instant is unchanged (01:30 UTC, `fold=0`), only its spelling in the zone
+    is made a real one.
+    """
+    settled = mapping.parse_datetime_input("2026-03-29T02:30:00", keep_zone=True)
+    assert isinstance(settled, datetime)
+    assert settled.astimezone(timezone.utc) == datetime(2026, 3, 29, 1, 30, tzinfo=timezone.utc)
+    assert (settled.hour, settled.minute) == (3, 30)
+    assert settled.utcoffset() == timedelta(hours=2)
+
+    named = mapping.parse_datetime_input("2026-03-29T02:30:00 Europe/Berlin", keep_zone=True)
+    assert isinstance(named, datetime)
+    assert (named.hour, named.minute) == (3, 30)
+
+
+def test_ambiguous_wall_time_keeps_its_spelling_when_the_zone_is_kept():
+    """The autumn overlap needs no rescue: "02:30" happens, just twice.
+
+    `fold=0` (the earlier of the two instants) is the documented choice; the
+    gap handling above must not rewrite this one to 03:30.
+    """
+    kept = mapping.parse_datetime_input("2026-10-25T02:30:00", keep_zone=True)
+    assert isinstance(kept, datetime)
+    assert (kept.hour, kept.minute) == (2, 30)
+    # A wall time inside a fold compares unequal to any other zone's datetime
+    # (PEP 495), so the instant is checked after an explicit conversion.
+    assert kept.astimezone(timezone.utc) == datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc)
+
+
+def test_local_midnight_in_a_zone_whose_day_starts_an_hour_late():
+    """Some zones jump at 00:00, so that day has no midnight at all.
+
+    America/Santiago goes 00:00 -> 01:00 on 2026-09-06. `zoneinfo` resolves
+    the missing reading to the right instant either way (the transition itself
+    *is* the day's first moment), but a bound that is printed - `get_free_busy`
+    reports the window it used - must not read as a time that never struck.
+    """
+    mapping.set_default_timezone("America/Santiago")
+    start = mapping.local_midnight(date(2026, 9, 6))
+
+    assert start.astimezone(timezone.utc) == datetime(2026, 9, 6, 4, 0, tzinfo=timezone.utc)
+    assert start.isoformat() == "2026-09-06T01:00:00-03:00"
+
+
+def test_local_midnight_on_an_ordinary_day_is_midnight():
+    assert mapping.local_midnight(date(2026, 7, 20)).isoformat() == "2026-07-20T00:00:00+02:00"
+
+
+def test_due_filter_bounds_are_real_readings_in_a_midnight_transition_zone():
+    """The same rule for the end-of-day bound `faellig_vor` builds."""
+    mapping.set_default_timezone("America/Santiago")
+    start = mapping._to_comparable_datetime("2026-09-06", end_of_day=False)
+    end = mapping._to_comparable_datetime("2026-09-06", end_of_day=True)
+
+    assert start.isoformat() == "2026-09-06T01:00:00-03:00"
+    assert end.isoformat() == "2026-09-06T23:59:59-03:00"
+    assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(
+        hours=22, minutes=59, seconds=59
+    )
 
 
 def test_absolute_reminder_is_written_to_the_wire_in_utc():
@@ -952,3 +1353,103 @@ def test_filter_tasks_combination():
         limit=1,
     )
     assert [t["uid"] for t in res] == ["2"]
+
+
+def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
+    """A VTODO whose DUE this server can't parse must not poison its whole list.
+
+    Sorting reads *every* task's `faellig_datum`, so a single odd value (a
+    bare time, a period, whatever a foreign client wrote) would otherwise
+    turn an entire healthy listing into an error. It sorts with the tasks
+    that have no due date instead.
+    """
+    tasks = [
+        dict(_task("bad", "12:00:00"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+        dict(_task("none", None), titel="Ohne"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["good", "bad", "none"]
+
+
+def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
+    """It can't be judged "before"/"after" anything, exactly like a missing one."""
+    tasks = [
+        dict(_task("bad", "(2026-07-01, 2026-07-02)"), titel="Kaputt"),
+        dict(_task("good", "2026-07-01"), titel="Heil"),
+    ]
+
+    res = mapping.filter_tasks(tasks, due_before="2026-07-31")
+
+    assert [t["uid"] for t in res] == ["good"]
+
+
+def test_filter_tasks_tag_matches_across_unicode_spellings():
+    """ "ü" has two spellings and "ß" uppercases to "SS" - a German API must match both."""
+    tasks = [
+        dict(_task("1", "2026-07-01"), tags=["Büro"]),  # u + combining diaeresis
+        dict(_task("2", "2026-07-01"), tags=["Straße"]),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="Büro")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="STRASSE")] == ["2"]
+
+
+def test_filter_tasks_suchtext_matches_across_unicode_spellings():
+    tasks = [
+        dict(_task("1", "2026-07-01"), titel="Große Wäsche", notizen=None),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="wäsche")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="GROSSE")] == ["1"]
+
+
+def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
+    """Raw codepoint order files every umlaut after "Z", which reads as random."""
+    tasks = [
+        dict(_task("z", "2026-07-01"), titel="Zahnarzt"),
+        dict(_task("ae", "2026-07-01"), titel="Ärztin"),
+        dict(_task("a", "2026-07-01"), titel="Apotheke"),
+    ]
+
+    res = mapping.filter_tasks(tasks)
+
+    assert [t["uid"] for t in res] == ["a", "ae", "z"]
+
+
+def test_filter_tasks_empty_filter_value_means_no_filter():
+    """ "" is how a client spells "unset"; every string filter reads it that way.
+
+    They used to disagree: `prioritaet=""` raised, `tag=""` matched nothing,
+    `suchtext=""` matched everything, and an empty due bound raised too.
+    """
+    tasks = [
+        dict(_task("1", "2026-07-01"), prioritaet="hoch", tags=["work"], titel="Bericht"),
+        dict(_task("2", "2026-07-02"), prioritaet=None, tags=[], titel="Anruf"),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, prioritaet="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="", due_after="")] == [
+        "1",
+        "2",
+    ]
+
+
+def test_filter_tasks_empty_due_bound_does_not_exclude_tasks_without_a_due_date():
+    """An empty bound is no bound, so it must not drag in the "has to have a due date" rule."""
+    tasks = [
+        dict(_task("mit", "2026-07-01")),
+        dict(_task("ohne", None)),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["mit", "ohne"]
+
+
+def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
+    """0 is not how an integer parameter spells "unset" - None is - so it stays an error."""
+    with pytest.raises(InvalidTaskDataError):
+        mapping.filter_tasks([], limit=0)
