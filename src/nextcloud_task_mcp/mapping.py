@@ -1363,6 +1363,10 @@ def parse_vtodo(component) -> dict[str, Any]:
         "uebergeordnete_uid": _extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
         "ausnahme_daten": _extract_exdates(component),
+        # Both only ever set by `_expand_recurring_tasks`: a stored VTODO is a
+        # series or a plain task, never one occurrence of one.
+        "wiederholung_von": None,
+        "serie_uid": None,
     }
 
 
@@ -1444,6 +1448,200 @@ def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, tuple[str, str]
     return (0, due, titel)
 
 
+#: Separates a series UID from the occurrence it identifies in the synthetic
+#: UID an expanded instance carries ("<series uid>#2026-09-08T10:00:00+02:00").
+#: A real Nextcloud task UID is a UUID, and `split_occurrence_uid` additionally
+#: requires the suffix to parse as a date/datetime, so a foreign UID that
+#: happens to contain a "#" is not mistaken for an occurrence.
+_OCCURRENCE_UID_SEPARATOR = "#"
+
+#: How many occurrences of one recurring task a listing will expand. The
+#: queried window is the real bound (`_expand_recurring_tasks` only runs with an
+#: upper one); this is the backstop for a window wide enough that a per-minute
+#: rule would otherwise fill the whole listing with one task.
+_TASK_EXPANSION_LIMIT = 100
+
+
+def split_occurrence_uid(task_uid: str) -> tuple[str, str | None]:
+    """Split an expanded instance's UID into (series UID, occurrence), or (uid, None).
+
+    The write tools address a task by UID, and an expanded instance is not a
+    stored task - there is nothing at that UID to edit, complete or delete. So
+    instances carry a UID that is deliberately *not* the series' own, and the
+    write paths use this to say so in as many words instead of silently acting
+    on the whole series (finding 5.1).
+
+    The occurrence part must itself parse as a date/datetime; anything else is
+    treated as an ordinary UID that merely contains a "#".
+    """
+    series_uid, separator, occurrence = task_uid.rpartition(_OCCURRENCE_UID_SEPARATOR)
+    if not separator or not series_uid:
+        return task_uid, None
+    try:
+        parse_datetime_input(occurrence)
+    except InvalidTaskDataError:
+        return task_uid, None
+    return series_uid, occurrence
+
+
+def _rule_from_task(anchor: date | datetime, rrule_text: str) -> tuple[Any, date | datetime] | None:
+    """A `dateutil` rule for a parsed task's series, or None if it can't be built.
+
+    The anchor arrives as the ISO string `parse_vtodo` produced, i.e. carrying a
+    bare numeric offset rather than the zone name the component actually uses.
+    Handing that straight to `dateutil` would generate every occurrence at that
+    one *fixed* offset, so an occurrence after the next DST transition would
+    come back an hour off the wall clock the series means - reintroducing on the
+    read side exactly the drift finding 5.7 removed on the write side. Attaching
+    the server's default zone (a real `ZoneInfo`, which recomputes its offset
+    per instant) instead keeps a "every Monday 09:00" series at 09:00 local
+    year-round.
+
+    This is exact for every task this server writes, since 5.7 anchors those to
+    the default zone. A series a foreign client anchored to some *other* zone is
+    expanded in the default zone instead, which differs only between the two
+    zones' transition dates - and `list_tasks` reports every timestamp in the
+    default zone anyway.
+    """
+    if isinstance(anchor, datetime):
+        anchor = anchor.astimezone(get_default_timezone())
+    try:
+        return rrulestr(rrule_text, dtstart=anchor), anchor
+    except (ValueError, TypeError, OverflowError):
+        return None  # a rule dateutil refuses expands to nothing we can trust
+
+
+def _due_instant(value: date | datetime) -> datetime:
+    """Where an occurrence's due value sits on the timeline, for window checks."""
+    return _as_utc(value) if isinstance(value, datetime) else local_midnight(value)
+
+
+def _expand_recurring_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    window_start: datetime | None,
+    window_end: datetime | None,
+) -> list[dict[str, Any]]:
+    """Replace each recurring task with the occurrences due inside the window.
+
+    CalDAV servers do not expand VTODO series the way they expand VEVENTs, so a
+    recurring task used to appear exactly once in every listing - at its
+    original due date, never again (finding 5.1). This computes the missing
+    occurrences client-side from the RRULE, using the same `dateutil` machinery
+    `_check_exdates_match_occurrences` already uses.
+
+    Bounded three ways, because an RRULE need not terminate:
+
+    - it only runs at all when `window_end` is set, i.e. when the caller asked
+      for tasks due before some date. Without an upper bound there is no window
+      to expand into, and the series is left as the single master row it is
+      today - `wiederholung` intact - rather than flooding an unfiltered
+      `list_tasks` with a hundred copies of every recurring task;
+    - occurrences ascend, so the scan stops at the first one past `window_end`;
+    - and `_TASK_EXPANSION_LIMIT`/`_RECURRENCE_SCAN_LIMIT` cap what one task can
+      emit and scan even so.
+
+    A task is left untouched (one master row) whenever the expansion cannot be
+    trusted: no rule, no due date to place occurrences on, an unreadable anchor,
+    a start and due of different value kinds, or a rule `dateutil` refuses.
+    Degrading to today's behaviour is always safe; inventing occurrences is not.
+
+    Each emitted instance is marked so no caller can mistake it for the stored
+    task: `wiederholung_von` names the occurrence, `wiederholung` is `None`
+    (nothing about an instance recurs), `serie_uid` points at the stored task,
+    and `uid` is a synthetic "<series uid>#<occurrence>" that every write path
+    rejects by name (`split_occurrence_uid`). An instance is a read-only view of
+    one date in a series; `update_task`/`complete_task` act on series, and take
+    `serie_uid`.
+    """
+    if window_end is None:
+        return tasks
+
+    expanded: list[dict[str, Any]] = []
+    for task in tasks:
+        occurrences = _occurrences_of(task, window_start=window_start, window_end=window_end)
+        if occurrences is None:
+            expanded.append(task)
+        else:
+            expanded.extend(occurrences)
+    return expanded
+
+
+def _occurrences_of(
+    task: dict[str, Any],
+    *,
+    window_start: datetime | None,
+    window_end: datetime,
+) -> list[dict[str, Any]] | None:
+    """The in-window instances of one recurring task, or None to leave it as is."""
+    rrule_text = task.get("wiederholung")
+    due_text = task.get("faellig_datum")
+    if not rrule_text or not due_text:
+        # No rule, or nothing due to place the occurrences on: a task with no
+        # DUE is excluded from a due-filtered listing either way.
+        return None
+
+    start_text = task.get("start_datum")
+    try:
+        due_anchor = parse_datetime_input(due_text, keep_zone=True)
+        # RFC 5545 generates the recurrence set from DTSTART; DUE only rides
+        # along at a fixed distance from it. A DUE-only series is a foreign
+        # client's, and anchoring on DUE is the best reading available.
+        anchor = parse_datetime_input(start_text, keep_zone=True) if start_text else due_anchor
+    except InvalidTaskDataError:
+        return None
+    if type(anchor) is not type(due_anchor):
+        # An all-day start with a timed due (or vice versa) has no well-defined
+        # offset between them - refuse rather than guess.
+        return None
+
+    built = _rule_from_task(anchor, str(rrule_text))
+    if built is None:
+        return None
+    rule, anchor = built
+    all_day = not isinstance(anchor, datetime)
+    # How far DUE sits from DTSTART. Aware datetimes subtract as instants, so
+    # the two anchors' spellings do not matter; adding it back to an occurrence
+    # is wall-clock arithmetic in the occurrence's own zone, which is what keeps
+    # a "09:00 -> 17:00" task 09:00 -> 17:00 on both sides of a transition.
+    shift = due_anchor - anchor if start_text else timedelta(0)
+
+    skipped = set()
+    for entry in task.get("ausnahme_daten") or []:
+        try:
+            value = parse_datetime_input(entry, keep_zone=True)
+        except InvalidTaskDataError:
+            continue  # an EXDATE this server cannot read cancels nothing
+        skipped.add(_occurrence_key(value, all_day=all_day))
+
+    instances: list[dict[str, Any]] = []
+    for index, occurrence in enumerate(rule):
+        if index >= _RECURRENCE_SCAN_LIMIT or len(instances) >= _TASK_EXPANSION_LIMIT:
+            break
+        occ_start: date | datetime = occurrence.date() if all_day else occurrence
+        occ_due = occ_start + shift
+        placed = _due_instant(occ_due)
+        if placed > window_end:
+            break  # occurrences ascend: nothing further can fall inside
+        if window_start is not None and placed < window_start:
+            continue  # before the window, and not one of this task's results
+        if _occurrence_key(occ_start, all_day=all_day) in skipped:
+            continue
+
+        occurrence_id = format_datetime_output(occ_start)
+        instance = dict(task)
+        instance["wiederholung"] = None
+        instance["wiederholung_von"] = occurrence_id
+        instance["ausnahme_daten"] = []
+        instance["serie_uid"] = task.get("uid")
+        instance["uid"] = f"{task.get('uid')}{_OCCURRENCE_UID_SEPARATOR}{occurrence_id}"
+        if start_text:
+            instance["start_datum"] = occurrence_id
+        instance["faellig_datum"] = format_datetime_output(occ_due)
+        instances.append(instance)
+    return instances
+
+
 def filter_tasks(
     tasks: list[dict[str, Any]],
     *,
@@ -1484,9 +1682,14 @@ def filter_tasks(
             )
         tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
 
+    before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
+    after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
+
+    # Before the due filter: expansion turns one recurring task into the rows
+    # the filter then trims to the window exactly.
+    tasks = _expand_recurring_tasks(tasks, window_start=after_bound, window_end=before_bound)
+
     if due_before or due_after:
-        before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
-        after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
         filtered: list[dict[str, Any]] = []
         for task in tasks:
             due_dt = _task_due_instant(task.get("faellig_datum"))

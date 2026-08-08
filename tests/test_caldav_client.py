@@ -478,6 +478,8 @@ def test_list_tasks_parses_todos(service, principal):
             "uebergeordnete_uid": None,
             "wiederholung": None,
             "ausnahme_daten": [],
+            "wiederholung_von": None,
+            "serie_uid": None,
             "liste": "Personal",
             "liste_url": "https://cloud.example.com/dav/personal/",
         }
@@ -923,6 +925,119 @@ def test_update_task_falls_back_to_icalendar_component_when_no_master_present(se
 
     todo_obj.save.assert_called_once()
     assert str(override.get("summary")) == "Neu"
+
+
+# --- expanding recurring tasks in listings (5.1) ---
+
+
+def test_list_tasks_expands_a_recurring_task_across_the_due_window(service, principal):
+    """End to end: the finding was that a weekly task appears once, at its
+    original due date, in every listing - never at any later occurrence."""
+    calendar = _make_calendar("Personal")
+    calendar.todos.return_value = [
+        _todo_obj(
+            "muell",
+            titel="Muell rausbringen",
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+    principal.calendars.return_value = [calendar]
+
+    result = service.list_tasks("Personal", due_before="2026-09-22")
+
+    assert [t["faellig_datum"] for t in result] == [
+        "2026-09-01",
+        "2026-09-08",
+        "2026-09-15",
+        "2026-09-22",
+    ]
+    assert {t["serie_uid"] for t in result} == {"muell"}
+    assert all(t["liste"] == "Personal" for t in result)
+
+
+def test_list_tasks_without_a_due_bound_still_reports_the_series_itself(service, principal):
+    calendar = _make_calendar("Personal")
+    calendar.todos.return_value = [
+        _todo_obj(
+            "muell",
+            titel="Muell rausbringen",
+            start_datum="2026-09-01",
+            faellig_datum="2026-09-01",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+    principal.calendars.return_value = [calendar]
+
+    result = service.list_tasks("Personal")
+
+    assert [t["uid"] for t in result] == ["muell"]
+    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
+
+
+def test_get_agenda_shows_a_recurring_task_due_that_day(service, principal):
+    """The agenda's whole point: a weekly task started weeks ago is due today."""
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.search.return_value = []
+    todo_cal = _make_calendar("Privat", components=["VTODO"])
+    todo_cal.todos.return_value = [
+        _todo_obj(
+            "muell",
+            titel="Muell rausbringen",
+            start_datum="2026-09-01T18:00:00",
+            faellig_datum="2026-09-01T18:00:00",
+            wiederholung="FREQ=WEEKLY",
+        )
+    ]
+    principal.calendars.return_value = [event_cal, todo_cal]
+
+    result = service.get_agenda("2026-09-29")
+
+    assert [t["faellig_datum"] for t in result["aufgaben"]] == ["2026-09-29T18:00:00+02:00"]
+    assert result["aufgaben"][0]["serie_uid"] == "muell"
+    assert result["aufgaben"][0]["quelle_url"] == result["aufgaben"][0]["liste_url"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda svc: svc.update_task("Personal", "muell#2026-09-08", mapping.TaskFields(titel="X")),
+        lambda svc: svc.complete_task("Personal", "muell#2026-09-08"),
+        lambda svc: svc.delete_task("Personal", "muell#2026-09-08"),
+        lambda svc: svc.get_task("Personal", "muell#2026-09-08"),
+    ],
+    ids=["update", "complete", "delete", "get"],
+)
+def test_task_write_paths_reject_an_expanded_occurrence_uid(service, principal, call):
+    """An expanded instance is a read-only view of one date. Handing its uid back
+    must fail loudly, naming the series - not silently edit or complete the whole
+    series the caller only meant to touch one occurrence of."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(InvalidTaskDataError, match="serie_uid"):
+        call(service)
+
+    calendar.get_todo_by_uid.assert_not_called()
+    principal.calendars.assert_not_called()
+
+
+def test_task_write_paths_still_accept_the_series_uid(service, principal):
+    """The guard must not catch an ordinary uid - including one containing "#"."""
+    calendar = _make_calendar("Personal")
+    todo = Todo()
+    todo.add("uid", "wei#rd")
+    todo.add("summary", "Alt")
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_obj.icalendar_instance = Calendar()
+    calendar.get_todo_by_uid.return_value = todo_obj
+    principal.calendars.return_value = [calendar]
+
+    service.update_task("Personal", "wei#rd", mapping.TaskFields(titel="Neu"))
+
+    assert str(todo.get("summary")) == "Neu"
 
 
 # --- wiederholung (RRULE), now writable ---

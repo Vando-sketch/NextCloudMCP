@@ -103,6 +103,8 @@ Result — one dict per task:
     "uebergeordnete_uid": null,
     "wiederholung": null,
     "ausnahme_daten": [],
+    "wiederholung_von": null,
+    "serie_uid": null,
     "liste": "Privat"
   }
 ]
@@ -162,6 +164,50 @@ dismissed state — use `export_calendar`/`import_ics`.
 `wiederholung` is the task's raw RRULE text (e.g. `"FREQ=WEEKLY;BYDAY=MO"`) if it recurs,
 otherwise `null` — set via `create_task`/`update_task`, see their `wiederholung` parameter.
 `ausnahme_daten` lists the occurrences the series skips (`EXDATE`), `[]` if it has none.
+`wiederholung_von` and `serie_uid` are `null` on a stored task and set only on an
+expanded occurrence — see "Recurring tasks in listings" below.
+
+### Recurring tasks in listings
+
+A recurring task is stored once but is due many times. CalDAV servers do not
+expand `VTODO` series the way they expand `VEVENT`s, so a weekly task used to
+appear exactly once — at its original due date — in every listing, and never
+again: "what is due next week" could not include a series started in March.
+
+When `faellig_vor` is given, `list_tasks` therefore expands each recurring task
+into one row per occurrence due inside the window, computed client-side from
+its `RRULE` (its `ausnahme_daten` are skipped). `get_agenda` does the same for
+its day. **Without `faellig_vor` there is no window to expand into**, and the
+series is returned as the single stored row it is, `wiederholung` intact.
+At most 100 occurrences per task are produced, whatever the window.
+
+An expanded row is a **read-only view of one date in a series**:
+
+| Key | On a stored task | On an expanded occurrence |
+|---|---|---|
+| `uid` | the task's UID | `"<serie_uid>#<occurrence>"` — **not** a task any tool accepts |
+| `serie_uid` | `null` | the stored task's UID |
+| `wiederholung_von` | `null` | the occurrence this row stands for |
+| `wiederholung` | the `RRULE` | `null` — nothing about one occurrence recurs |
+| `start_datum` / `faellig_datum` | as stored | this occurrence's, keeping the stored distance between the two |
+
+Passing an expanded row's `uid` to `update_task`, `complete_task`,
+`delete_task` or `get_task` is an error naming the series, not a silent edit of
+the whole series. To act on the series, pass `serie_uid` — but note that
+`update_task` changes *every* occurrence and `complete_task` **ends** the
+series (see "Completing a recurring task" below). To make a series skip a
+single date, add that date to its `ausnahme_daten`.
+
+Occurrences keep their wall-clock time across daylight-saving transitions: a
+task due "every Monday 09:00" is reported at `09:00+02:00` in summer and
+`09:00+01:00` in winter, not at a fixed UTC instant. A series a foreign client
+anchored to some *other* timezone is expanded in the server's default timezone,
+which differs only between the two zones' transition dates.
+
+Where the expansion cannot be trusted it degrades to the single stored row
+rather than guessing: a series with no due date, an unreadable anchor, a
+`start_datum` and `faellig_datum` of different value kinds, or a rule
+`dateutil` refuses.
 `liste` is the display name of the task list containing the task — the name every
 other task tool takes. Nextcloud does allow two task lists to carry the *same*
 display name. `liste` cannot tell them apart, but `liste_url` alongside it

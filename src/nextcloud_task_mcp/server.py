@@ -215,6 +215,24 @@ def build_server(
         anything. Results are sorted by faellig_datum ascending (those tasks last),
         then by titel. `limit` is applied last, after merging across lists.
 
+        Recurring tasks (wiederholung) and `faellig_vor`: a recurring task is
+        stored once but is due many times, so when `faellig_vor` is given it is
+        expanded into one row per occurrence due inside the window - that is the
+        only way "what is due next week" can include a weekly task started in
+        March. Without `faellig_vor` there is no window to expand into and the
+        series is returned as the single row it is stored as, wiederholung
+        intact. At most 100 occurrences per task are produced.
+
+        What an expanded row is, and is not: it is a read-only view of one date
+        in a series. `wiederholung_von` names its occurrence, `wiederholung` is
+        None, `serie_uid` is the stored task's uid, and its own `uid` is a
+        synthetic "<serie_uid>#<occurrence>" that update_task, complete_task,
+        delete_task and get_task all reject with an explanation. To act on the
+        series, pass `serie_uid` - but note that update_task changes every
+        occurrence and complete_task ends the whole series (it does not roll it
+        forward). To make the series skip one date, add that date to its
+        ausnahme_daten via update_task.
+
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
             prioritaet, fortschritt_prozent, status, ort, url, tags, erinnerungen
@@ -225,8 +243,11 @@ def build_server(
             and update_task leaves those untouched), notizen,
             uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            or None if the task doesn't recur - see create_task/update_task
-            to set it), liste (the display name of the task list
+            or None if the task doesn't recur or is an expanded occurrence -
+            see create_task/update_task to set it), ausnahme_daten (the
+            occurrences the series skips, [] if none), wiederholung_von and
+            serie_uid (both None unless the row is an expanded occurrence, see
+            above), liste (the display name of the task list
             containing the task), and liste_url (the collection URL of the task
             list, which tells same-named lists apart, though no tool accepts a
             URL to act on them - an ambiguous name still must be renamed).
@@ -932,7 +953,10 @@ def build_server(
         Returns:
             {"datum": the day, "termine": event dicts (recurring events
             expanded to that day's occurrences, sorted by start), "aufgaben":
-            open tasks due that day, each with an added "liste" key}. Every
+            open tasks due that day, each with an added "liste" key}. Recurring
+            *tasks* are expanded to that day's occurrences too - see list_tasks
+            for what an expanded row can and cannot be used for (in short: read
+            it, act on its "serie_uid", never on its own "uid"). Every
             entry in both lists also carries "quelle_url" - the CalDAV URL of
             the exact calendar/task list it came from (Nextcloud doesn't
             enforce unique display names, so "kalender"/"liste" alone can't

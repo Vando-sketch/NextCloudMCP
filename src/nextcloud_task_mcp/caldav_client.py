@@ -557,6 +557,32 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
         seen_tzids.add(tzid)
 
 
+def _reject_occurrence_uid(task_uid: str) -> None:
+    """Refuse a UID that names one expanded occurrence rather than a stored task.
+
+    `list_tasks`/`get_agenda` expand a recurring task into the occurrences due
+    inside the queried window (`mapping._expand_recurring_tasks`). Those rows
+    are a read-only view of dates in a series - there is no stored task at their
+    UID to edit, complete or delete, and this server has no way to materialize
+    one occurrence as its own component.
+
+    Every task tool that takes a UID checks this, so passing an instance's UID
+    back fails with an explanation naming the series' own UID, instead of
+    silently doing something to the *whole series* that the caller meant to do
+    to one date (finding 5.1).
+    """
+    series_uid, occurrence = mapping.split_occurrence_uid(task_uid)
+    if occurrence is None:
+        return
+    raise InvalidTaskDataError(
+        f"'{task_uid}' identifies the occurrence on {occurrence} of a recurring task, "
+        "not a task on its own - single occurrences cannot be edited, completed or "
+        f"deleted. Use the series' own uid '{series_uid}' (reported as 'serie_uid' on "
+        "every expanded instance) to act on the whole series, or add the occurrence to "
+        "the series' ausnahme_daten to skip just that one."
+    )
+
+
 class CalDavService:
     """Holds one reused CalDAV connection and exposes task CRUD operations on it."""
 
@@ -1325,7 +1351,9 @@ class CalDavService:
         i.e. an unknown one.
 
         `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
-        parsed results via `mapping.filter_tasks`. Each task dict gains a "liste"
+        parsed results via `mapping.filter_tasks`, which also expands recurring
+        tasks into their occurrences when `due_before` bounds the window (see
+        `mapping._expand_recurring_tasks`). Each task dict gains a "liste"
         key set to its task list display name. That name is what every other task
         tool takes, with one honest exception: Nextcloud permits two task lists to
         share a display name, and then "liste" cannot tell them apart (nor can any
@@ -1490,6 +1518,7 @@ class CalDavService:
 
     def update_task(self, list_name: str, task_uid: str, fields: mapping.TaskFields) -> None:
         """Update only the given (non-None) fields of an existing task."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -1516,6 +1545,7 @@ class CalDavService:
 
     def get_task(self, list_name: str, task_uid: str) -> dict[str, Any]:
         """Return a single task, parsed into the server's German task dict."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -1533,6 +1563,7 @@ class CalDavService:
 
     def complete_task(self, list_name: str, task_uid: str) -> None:
         """Mark a task as completed (STATUS, PERCENT-COMPLETE, COMPLETED timestamp)."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
@@ -1551,6 +1582,7 @@ class CalDavService:
 
     def delete_task(self, list_name: str, task_uid: str) -> None:
         """Permanently delete a task."""
+        _reject_occurrence_uid(task_uid)
         with self._lock:
 
             def op(calendar: DAVCalendar):
