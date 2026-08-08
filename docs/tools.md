@@ -1028,6 +1028,34 @@ instead of arriving grouped per list.
 
 ---
 
+## `list_tags(kalender_namen=None, listen_namen=None)`
+
+Aggregated list of tags (`CATEGORIES`) and their counts across calendars and task lists.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kalender_namen` | list of strings | no | Event calendar display names to include; `null` = all event calendars, `[]` = no calendars |
+| `listen_namen` | list of strings | no | Task list display names to include; `null` = all task lists, `[]` = no task lists |
+
+> **Cost warning**: This call reads each target collection completely without a time window, which makes it an expensive operation. It holds the CalDAV service lock while it runs, so other tool calls wait for it to finish.
+
+Return shape:
+
+```json
+[
+  {"tag": "CLI-Tool", "anzahl": 6},
+  {"tag": "Arbeit", "anzahl": 3}
+]
+```
+
+- **Aggregation**: VEVENT events and VTODO tasks are aggregated together. Completed tasks count too (`include_completed=True`), so a tag does not vanish when all associated tasks are finished.
+- **Case folding**: Aggregation is case-insensitive (e.g. `"Arbeit"` and `"arbeit"` collapse into one entry). The spelling reported is the most common one, alphabetically first on a tie - not the first one encountered, so two identical calls cannot disagree because the server returned collections in a different order.
+- **Sorting**: Sorted by `anzahl` descending. Ties are broken alphabetically (ascending, case-insensitive) by `tag`.
+- **Deduplication**: A mixed VEVENT+VTODO collection contributes its events and its tasks, each counted once - the two queries select disjoint component kinds. A name listed twice in the same argument is deduplicated before querying, so it cannot inflate the counts.
+- **Filtering**: `kalender_namen=None` / `listen_namen=None` queries all collections of that component kind, while `[]` excludes that component kind entirely. An unknown collection name raises `CalendarNotFoundError` or `TaskListNotFoundError`.
+
+---
+
 ## `get_free_busy(von, bis, benutzer=None)`
 
 Busy time intervals in `[von, bis]`, for yourself or another Nextcloud user.

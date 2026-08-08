@@ -503,6 +503,23 @@ def _zone_preserving_isoformat(value: datetime) -> str:
     return value.isoformat()
 
 
+def _dedup_names(names: list[str] | None) -> list[str] | None:
+    """Drop repeated collection names, keeping the given order.
+
+    A name listed twice would otherwise have its collection read twice, and
+    `list_tags` would count every tag in it twice.
+    """
+    if names is None:
+        return None
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in names:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return unique
+
+
 def _instance_markers(obj: Any, component: str) -> Counter[str] | None:
     """Count the `component` instances inside `obj`'s calendar object, per instance key.
 
@@ -2755,6 +2772,76 @@ class CalDavService:
                 task["quelle_url"] = task["liste_url"]
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
+
+    def list_tags(
+        self,
+        calendar_names: list[str] | None = None,
+        list_names: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return unique tags (CATEGORIES) and counts across calendars and task lists.
+
+        Aggregates VEVENT and VTODO components together. Completed tasks are included
+        (`include_completed=True`), so tags do not disappear when all tasks with that
+        tag are completed.
+
+        Tag matching is case-insensitive. Of the spellings found, the most common
+        one is reported, alphabetically first on a tie - deliberately *not* "the
+        first one seen", which would depend on the order the server happens to
+        return collections in and could differ between two identical calls.
+
+        The returned list is sorted by `anzahl` descending, with ties broken
+        alphabetically by `tag` (case-insensitively, so a capitalized tag does
+        not jump ahead of every lowercase one).
+
+        `calendar_names` and `list_names` control which collections are queried:
+        - `None` (default): query all VEVENT calendars / all VTODO task lists.
+        - `[]`: query no VEVENT calendars / no VTODO task lists.
+        - `["name1", ...]`: query specific named calendars / task lists.
+
+        A mixed VEVENT+VTODO collection contributes its events and its tasks, each
+        counted once: the two queries select disjoint component kinds, and a name
+        repeated in the same argument is deduplicated before querying, so no
+        component can be counted twice.
+
+        WARNING: This call reads each target collection completely without a time
+        window, which makes it an expensive operation - and it holds the service
+        lock throughout, so every other tool call waits on it.
+        """
+        if isinstance(calendar_names, str):
+            calendar_names = [calendar_names]
+        if isinstance(list_names, str):
+            list_names = [list_names]
+
+        with self._lock:
+            # An empty list means "none of that kind" to both collectors, so it
+            # needs no special case here - unlike `None`, which means "all".
+            events = self._collect_events(
+                _dedup_names(calendar_names), von=None, bis=None, expand=False
+            )
+            if list_names is None:
+                tasks = self._tasks_from_every_list(only_open=False)
+            else:
+                tasks = self._tasks_from_named_lists(_dedup_names(list_names), only_open=False)
+
+            # Folded for counting - "Arbeit" and "arbeit" are one tag to
+            # Nextcloud's UI too - but every spelling is kept so the reported
+            # one can be picked deterministically below.
+            spellings: dict[str, Counter[str]] = {}
+            for entry in (*events, *tasks):
+                for tag in entry.get("tags") or []:
+                    spellings.setdefault(tag.lower(), Counter())[tag] += 1
+
+            tag_entries: list[tuple[str, int]] = [
+                (
+                    min(variants.items(), key=lambda item: (-item[1], item[0]))[0],
+                    sum(variants.values()),
+                )
+                for variants in spellings.values()
+            ]
+            # Folded for the tie-break too: sorting on the display spelling
+            # would put every capitalized tag before every lowercase one.
+            tag_entries.sort(key=lambda item: (-item[1], item[0].lower()))
+            return [{"tag": tag, "anzahl": count} for tag, count in tag_entries]
 
     # ------------------------------------------------------------------
     # Free-busy

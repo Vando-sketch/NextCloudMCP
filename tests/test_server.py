@@ -75,6 +75,7 @@ def test_all_tools_registered(tools):
         "list_events_for_task",
         "create_event_from_task",
         "get_agenda",
+        "list_tags",
         "get_free_busy",
         "share_calendar",
         "unshare_calendar",
@@ -955,6 +956,13 @@ def test_get_agenda_delegates(tools, fake_service):
         "2026-07-20", calendar_names=None, list_names=None
     )
     assert result["datum"] == "2026-07-20"
+
+
+def test_list_tags_delegates(tools, fake_service):
+    fake_service.list_tags.return_value = [{"tag": "Arbeit", "anzahl": 3}]
+    result = _run(tools["list_tags"].fn(kalender_namen=["Cal1"], listen_namen=["List1"]))
+    fake_service.list_tags.assert_called_once_with(calendar_names=["Cal1"], list_names=["List1"])
+    assert result == [{"tag": "Arbeit", "anzahl": 3}]
 
 
 def test_calendar_not_found_becomes_clean_tool_error(tools, fake_service):
