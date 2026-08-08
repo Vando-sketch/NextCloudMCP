@@ -806,7 +806,7 @@ def test_create_task_saves_rrule(service, principal):
         "Personal",
         mapping.TaskFields(
             titel="Muell rausbringen",
-            faellig_datum="2026-07-20",
+            start_datum="2026-07-20",
             wiederholung="FREQ=WEEKLY;BYDAY=MO",
         ),
     )
@@ -823,7 +823,7 @@ def test_create_task_invalid_rrule_raises_and_does_not_save(service, principal):
     with pytest.raises(InvalidTaskDataError, match="RRULE"):
         service.create_task(
             "Personal",
-            mapping.TaskFields(titel="T", faellig_datum="2026-07-20", wiederholung="kaputt"),
+            mapping.TaskFields(titel="T", start_datum="2026-07-20", wiederholung="kaputt"),
         )
     calendar.save_todo.assert_not_called()
 
@@ -832,21 +832,21 @@ def test_create_task_rrule_without_anchor_raises_and_does_not_save(service, prin
     calendar = _make_calendar("Personal")
     principal.calendars.return_value = [calendar]
 
-    with pytest.raises(InvalidTaskDataError, match="start_datum|faellig_datum"):
+    with pytest.raises(InvalidTaskDataError, match="start_datum"):
         service.create_task("Personal", mapping.TaskFields(titel="T", wiederholung="FREQ=DAILY"))
     calendar.save_todo.assert_not_called()
 
 
 def test_update_task_sets_rrule_on_task_with_existing_anchor(service, principal):
     """The RRULE anchor check runs against the final component state, so a
-    call that only sets wiederholung succeeds when faellig_datum was already
+    call that only sets wiederholung succeeds when start_datum was already
     on the stored task, not part of this call's fields."""
     calendar = _make_calendar("Personal")
     principal.calendars.return_value = [calendar]
 
     todo = Todo()
     todo.add("uid", "abc")
-    todo.add("due", date(2026, 7, 20))
+    todo.add("dtstart", date(2026, 7, 20))
     todo_obj = MagicMock()
     todo_obj.icalendar_component = todo
     calendar.get_todo_by_uid.return_value = todo_obj
