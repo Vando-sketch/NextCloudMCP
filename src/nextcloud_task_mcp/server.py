@@ -20,6 +20,8 @@ from .personal_auth import PersonalAuthProvider
 
 logger = logging.getLogger(__name__)
 
+_EXDATE_COMPACT_THRESHOLD = 10
+
 
 async def _call(fn, *args: Any, **kwargs: Any) -> Any:
     """Run a (blocking) CalDavService call in a worker thread and translate errors.
@@ -629,7 +631,9 @@ def build_server(
             accepts; alarms whose trigger this form cannot express - an
             end-anchored one, say - are omitted, and update_event leaves those
             untouched), status ("bestätigt"/"vorläufig"/"abgesagt" or None),
-            sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
+            sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten
+            (list of EXDATE strings, or if >10 entries, a summary dict
+            {"anzahl", "erste", "hinweis"}; call get_event for full list),
             url, verknuepfte_aufgaben (RELATED-TO links; each entry's
             "beziehung" uses the same values as link_task_to_event's
             beziehung parameter - "zeitblock"/"voraussetzung" - plus
@@ -639,7 +643,7 @@ def build_server(
             (list of {"email", "name", "status", "rolle", "rsvp"}; "status" is
             "ausstehend"/"zugesagt"/"abgesagt"/"vorläufig"/"delegiert").
         """
-        return await _call(
+        events: list[dict[str, Any]] = await _call(
             caldav_service.list_events,
             calendar_names=kalender_namen,
             von=von,
@@ -649,6 +653,18 @@ def build_server(
             limit=limit,
             expand=wiederholungen_aufloesen,
         )
+        processed_events: list[dict[str, Any]] = []
+        for event in events:
+            exdates = event.get("ausnahme_daten")
+            if isinstance(exdates, list) and len(exdates) > _EXDATE_COMPACT_THRESHOLD:
+                event = dict(event)
+                event["ausnahme_daten"] = {
+                    "anzahl": len(exdates),
+                    "erste": exdates[:5],
+                    "hinweis": "gekürzt - vollständige Liste über get_event abrufen",
+                }
+            processed_events.append(event)
+        return processed_events
 
     @mcp.tool
     async def get_event(kalender_name: str, event_uid: str) -> dict[str, Any]:
@@ -680,7 +696,7 @@ def build_server(
         url: str | None = None,
         verknuepfte_aufgabe: str | None = None,
         teilnehmer: list[dict[str, Any]] | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Create a new calendar event.
 
         Args:
@@ -730,7 +746,8 @@ def build_server(
                 any mail itself.
 
         Returns:
-            {"uid": the new event's UID}.
+            The created event dict, same shape as get_event's return
+            value (see get_event's docstring for the full key list).
         """
         fields = event_mapping.EventFields(
             titel=titel,
@@ -749,7 +766,8 @@ def build_server(
             teilnehmer=teilnehmer,
         )
         new_uid = await _call(caldav_service.create_event, kalender_name, fields)
-        return {"uid": new_uid}
+        event: dict[str, Any] = await _call(caldav_service.get_event, kalender_name, new_uid)
+        return event
 
     @mcp.tool
     async def update_event(
@@ -770,7 +788,7 @@ def build_server(
         verknuepfte_aufgabe: str | None = None,
         teilnehmer: list[dict[str, Any]] | None = None,
         felder_leeren: list[str] | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Update an existing event. Only fields that are explicitly given are changed.
 
         Args:
@@ -799,7 +817,8 @@ def build_server(
                 the same call, is an error.
 
         Returns:
-            {"uid": event_uid} on success.
+            The updated event dict, same shape as get_event's return
+            value (see get_event's docstring for the full key list).
         """
         fields = event_mapping.EventFields(
             titel=titel,
@@ -819,7 +838,8 @@ def build_server(
             clear=tuple(felder_leeren) if felder_leeren else (),
         )
         await _call(caldav_service.update_event, kalender_name, event_uid, fields)
-        return {"uid": event_uid}
+        event: dict[str, Any] = await _call(caldav_service.get_event, kalender_name, event_uid)
+        return event
 
     @mcp.tool
     async def delete_event(kalender_name: str, event_uid: str) -> dict[str, str]:
