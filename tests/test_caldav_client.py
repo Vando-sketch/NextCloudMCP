@@ -478,6 +478,7 @@ def test_list_tasks_parses_todos(service, principal):
             "uebergeordnete_uid": None,
             "wiederholung": None,
             "liste": "Personal",
+            "liste_url": "https://cloud.example.com/dav/personal/",
         }
     ]
 
@@ -576,6 +577,10 @@ def test_list_tasks_all_lists_reaches_both_lists_sharing_a_display_name(service,
 
     assert [t["uid"] for t in result] == ["in-a", "in-b"]
     assert [t["liste"] for t in result] == ["Dup", "Dup"]
+    assert [t["liste_url"] for t in result] == [
+        "https://cloud.example.com/dav/dup-a/",
+        "https://cloud.example.com/dav/dup-b/",
+    ]
 
 
 def test_list_tasks_named_duplicate_list_is_still_ambiguous(service, principal):
