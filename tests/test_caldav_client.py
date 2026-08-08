@@ -764,6 +764,71 @@ def test_create_task_saves_ical_and_returns_uid(service, principal):
     assert "Neue Aufgabe" in kwargs["ical"]
 
 
+def test_create_task_with_zoned_dates_writes_matching_vtimezone(service, principal):
+    """Since 5.7 a task's DTSTART/DUE can reference a TZID, and RFC 5545 3.6.5
+    requires a matching VTIMEZONE in the same VCALENDAR - otherwise no other
+    client can resolve the reference. Same guarantee `create_event` already
+    gives; DUE needs it as much as DTSTART does."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(
+            titel="Muell rausbringen",
+            start_datum="2026-07-20T09:00:00",
+            faellig_datum="2026-07-20T18:00:00",
+        ),
+    )
+
+    _, kwargs = calendar.save_todo.call_args
+    ical = kwargs["ical"]
+    assert "DTSTART;TZID=Europe/Berlin:" in ical
+    assert "DUE;TZID=Europe/Berlin:" in ical
+    parsed = Calendar.from_ical(ical)
+    tzids = [str(c["TZID"]) for c in parsed.subcomponents if c.name == "VTIMEZONE"]
+    assert tzids == ["Europe/Berlin"]
+
+
+def test_create_task_with_a_due_only_zone_still_writes_its_vtimezone(service, principal):
+    """DUE alone can carry the only TZID on a task (no DTSTART at all), which
+    the event-shaped dtstart/dtend scan would miss entirely."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(titel="Abgabe", faellig_datum="2026-07-20T18:00:00"),
+    )
+
+    _, kwargs = calendar.save_todo.call_args
+    parsed = Calendar.from_ical(kwargs["ical"])
+    tzids = [str(c["TZID"]) for c in parsed.subcomponents if c.name == "VTIMEZONE"]
+    assert tzids == ["Europe/Berlin"]
+
+
+def test_update_task_with_named_zone_adds_matching_vtimezone(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    todo = Todo()
+    todo.add("uid", "abc")
+    instance = Calendar()
+    instance.add_component(todo)
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_obj.icalendar_instance = instance
+    calendar.get_todo_by_uid.return_value = todo_obj
+
+    service.update_task(
+        "Personal", "abc", mapping.TaskFields(start_datum="2026-07-20T09:00:00 America/New_York")
+    )
+
+    vtimezones = [c for c in instance.subcomponents if c.name == "VTIMEZONE"]
+    assert [str(c["TZID"]) for c in vtimezones] == ["America/New_York"]
+    assert instance.subcomponents.index(vtimezones[0]) < instance.subcomponents.index(todo)
+
+
 def test_create_task_without_titel_raises(service):
     with pytest.raises(InvalidTaskDataError):
         service.create_task("Personal", mapping.TaskFields())

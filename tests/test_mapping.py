@@ -1332,6 +1332,70 @@ def test_mark_completed_leaves_wiederholung_intact():
     assert parsed["status"] == "erledigt"
 
 
+# --- zone anchoring for tasks (5.7) ---
+
+
+def test_naive_task_datetime_is_written_in_the_default_zone_not_collapsed_to_utc():
+    """A naive start/due means "this wall clock in the server's zone", and is
+    stored that way (DTSTART;TZID=Europe/Berlin) rather than as the equivalent
+    UTC instant. The instant is identical either way - what differs is whether
+    a recurrence anchored on it survives a DST transition (5.7)."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00")
+
+    assert todo.get("dtstart").dt.tzinfo == ZoneInfo("Europe/Berlin")
+    assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in todo.to_ical().decode()
+
+
+def test_task_due_is_anchored_to_the_zone_dtstart_already_uses():
+    """DTSTART and DUE must not end up in two different zones: they would be
+    the same instant apart today and an hour apart after the next transition in
+    either zone, silently changing the task's window (the VTODO half of 2.5)."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00 America/New_York")
+    # A bare offset is what parse_vtodo hands back, i.e. what a read/write
+    # round trip through get_task -> update_task feeds in.
+    _apply(todo, faellig_datum="2026-07-20T17:00:00+02:00")
+
+    assert todo.get("due").dt.tzinfo == ZoneInfo("America/New_York")
+    assert todo.get("due").dt.tzinfo == todo.get("dtstart").dt.tzinfo
+    # Same instant, only respelled.
+    assert todo.get("due").dt == datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc)
+
+
+def test_naming_a_zone_explicitly_re_anchors_the_task():
+    """Naming an IANA zone is how a caller *moves* a task to one - it wins over
+    the zone the component already has, unlike a bare offset."""
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00 America/New_York")
+    _apply(todo, start_datum="2026-07-20T09:00:00 Europe/Berlin")
+
+    assert todo.get("dtstart").dt.tzinfo == ZoneInfo("Europe/Berlin")
+
+
+def test_recurring_task_round_trip_keeps_its_wall_clock_across_dst():
+    """The reason 5.7 matters. get_task reports DTSTART as a bare offset;
+    feeding that straight back into update_task (which is what an edit of any
+    other field alongside it looks like) must leave the series anchored to
+    Europe/Berlin, so it still means "09:00 local" after the autumn transition.
+    Collapsed to a UTC instant it would mean 08:00 local from November on.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-09-01T09:00:00", wiederholung="FREQ=WEEKLY")
+
+    # get_task -> update_task: the stored task already has its DTSTART, and the
+    # value handed back in carries only a numeric offset.
+    round_tripped = mapping.parse_vtodo(todo)["start_datum"]
+    assert round_tripped == "2026-09-01T09:00:00+02:00"
+    _apply(todo, titel="T (bearbeitet)", start_datum=round_tripped)
+
+    anchor = todo.get("dtstart").dt
+    assert anchor.tzinfo == ZoneInfo("Europe/Berlin")
+    later = anchor + timedelta(weeks=9)  # 2026-11-03, past the 2026-10-25 switch
+    assert later.astimezone(ZoneInfo("Europe/Berlin")).hour == 9
+    assert later.utcoffset() == timedelta(hours=1)
+
+
 # --- list_tasks filtering (C4) ---
 
 
