@@ -79,7 +79,12 @@ _RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
 # this process would keep resolving names against a collection list that no
 # longer matches the server, indefinitely. One minute bounds how long such an
 # out-of-band change can go unnoticed while still keeping the common case
-# (several tool calls in one burst) cheap.
+# (several tool calls in one burst) cheap - except during a `get_agenda` call
+# in flight, which freezes expiry for its own duration so its events and
+# tasks are read from one consistent snapshot instead of two (see
+# `_ttl_frozen`). The real worst-case bound is therefore this TTL *plus* the
+# duration of the slowest `get_agenda` call overlapping it, not a flat one
+# minute.
 _COLLECTION_CACHE_TTL_SECONDS = 60.0
 
 # How far the daylight-saving transitions written into an attached VTIMEZONE
@@ -649,9 +654,28 @@ class CalDavService:
         # from being served under a stale name/identity forever. Guarded by
         # `_lock`.
         self._collections: list[DAVCalendar] | None = None
-        # `monotonic()` timestamp of the last `_collections` fetch, or None if
-        # never fetched (or invalidated). See `_collection_meta_fetched_at`.
+        # `monotonic()` timestamp of the last `_collections`/`_collection_meta`
+        # fetch (both above), or None if never fetched (or invalidated). A
+        # monotonic clock, not wall-clock time, so a system clock adjustment
+        # (NTP step, DST, manual change) can't make either cache appear
+        # younger or older than it really is. The two caches share this one
+        # timestamp rather than each tracking their own, because they are
+        # always fetched together in `_ensure_collections` - giving them
+        # independent timestamps would let one be treated as fresh while the
+        # other is stale, which used to be possible before that method
+        # existed.
         self._collections_fetched_at: float | None = None
+        # True for the duration of one `get_agenda` call (see its body),
+        # which needs every collection lookup inside that call to agree on
+        # one server snapshot rather than possibly re-fetching partway
+        # through and mixing pre- and post-refresh state. While set,
+        # `_cache_expired` treats any cache that has been fetched at least
+        # once as fresh regardless of its age, so nothing inside the call
+        # re-fetches on its own; a cache invalidated during the call (e.g. by
+        # `_with_collection`'s stale-entry retry) still has `fetched_at is
+        # None` and is exempt from the freeze, so that retry still works.
+        # Reset to False in `get_agenda`'s `finally`, so a raised exception
+        # can't leave the freeze on for later calls.
         self._ttl_frozen: bool = False
 
     def _get_principal(self) -> DAVPrincipal:
@@ -735,12 +759,35 @@ class CalDavService:
     def _cache_expired(self, fetched_at: float | None) -> bool:
         """True if a `_collections`/`_collection_meta` cache last (re)fetched at
         `fetched_at` (a `monotonic()` reading) is past
-        `_COLLECTION_CACHE_TTL_SECONDS`, or was never fetched at all."""
+        `_COLLECTION_CACHE_TTL_SECONDS`, or was never fetched at all.
+
+        While `_ttl_frozen` is set (during a `get_agenda` call, see its body),
+        this returns `False` for any cache that has been fetched at least
+        once (`fetched_at is not None`), no matter how old - deliberately: it
+        is what keeps `get_agenda` from re-fetching partway through and
+        mixing pre- and post-refresh collection state into one answer. A
+        cache that has *never* been fetched (`fetched_at is None`, e.g. one
+        just invalidated by a stale-entry retry) is never treated as fresh,
+        freeze or not, so recovery from a genuinely stale entry still works
+        during a frozen call.
+        """
         if self._ttl_frozen and fetched_at is not None:
             return False
         return fetched_at is None or monotonic() - fetched_at >= _COLLECTION_CACHE_TTL_SECONDS
 
     def _ensure_collections(self, *, fresh: bool = False) -> None:
+        """Refresh `_collections` and `_collection_meta` together if needed.
+
+        Both are fetched and assigned in one pass - collections first, then
+        the batched metadata PROPFIND, then both caches and
+        `_collections_fetched_at` are all set together - so no caller can
+        ever observe one refreshed and the other still on the previous
+        fetch, and a failure partway through (either network call raising)
+        leaves both previous caches untouched rather than swapping in a
+        half-updated pair. `fresh=True` forces a refetch regardless of the
+        TTL (used by the create/rename/update conflict checks). Call under
+        `_lock`.
+        """
         if (
             fresh
             or self._collections is None
@@ -907,7 +954,12 @@ class CalDavService:
         return matches[0]
 
     def _cache_collection(
-        self, component: str, name: str, calendar: DAVCalendar, fetched_at: float | None = None
+        self,
+        component: str,
+        name: str,
+        calendar: DAVCalendar,
+        *,
+        fetched_at: float | None = None,
     ) -> None:
         """Remember `name`'s resolved collection."""
         if fetched_at is None:
@@ -916,7 +968,9 @@ class CalDavService:
 
     def _resolve_and_cache(self, name: str, component: str) -> DAVCalendar:
         calendar = self._resolve_collection(name, component)
-        self._cache_collection(component, name, calendar, self._collections_fetched_at)
+        # `fetched_at` defaults to `self._collections_fetched_at` already -
+        # no need to pass it explicitly here.
+        self._cache_collection(component, name, calendar)
         return calendar
 
     def _get_collection(self, name: str, component: str) -> DAVCalendar:
@@ -925,6 +979,9 @@ class CalDavService:
             calendar, cached_at = cached
             if not self._cache_expired(cached_at):
                 return calendar
+            # Past the TTL, re-resolve rather than trust the entry: the name
+            # may since have been given to a different collection (see the
+            # cache's declaration).
             del self._calendar_cache[(component, name)]
         self._ensure_collections()
         return self._resolve_and_cache(name, component)
@@ -1040,7 +1097,9 @@ class CalDavService:
             # ambiguity that `_resolve_collection` is supposed to surface.
             for calendar, name in zip(calendars, names, strict=True):
                 if name_counts[name] == 1:
-                    self._cache_collection("VTODO", name, calendar, self._collections_fetched_at)
+                    self._cache_collection(
+                        "VTODO", name, calendar, fetched_at=self._collections_fetched_at
+                    )
 
             return [
                 {"name": name, "url": str(calendar.url)}
@@ -1097,7 +1156,7 @@ class CalDavService:
             )
 
             self._invalidate_collection_caches()
-            self._cache_collection("VTODO", display_name, calendar, monotonic())
+            self._cache_collection("VTODO", display_name, calendar, fetched_at=monotonic())
             return {"name": display_name, "url": str(calendar.url)}
 
     def _make_collection(
@@ -1238,7 +1297,7 @@ class CalDavService:
             # display name, so drop it (component/color metadata is keyed by
             # href and unaffected, but is cleared together for simplicity).
             self._invalidate_collection_caches()
-            self._cache_collection("VTODO", new_display_name, calendar, monotonic())
+            self._cache_collection("VTODO", new_display_name, calendar, fetched_at=monotonic())
             return {"name": new_display_name, "url": str(calendar.url)}
 
     def list_tasks(
@@ -1596,7 +1655,9 @@ class CalDavService:
                     }
                 )
                 if sum(1 for entry in result if entry["name"] == name) == 1:
-                    self._cache_collection("VEVENT", name, calendar, self._collections_fetched_at)
+                    self._cache_collection(
+                        "VEVENT", name, calendar, fetched_at=self._collections_fetched_at
+                    )
             # Drop cache entries that turned out to be ambiguous after all.
             counts: dict[str, int] = {}
             for entry in result:
@@ -1651,8 +1712,8 @@ class CalDavService:
                 except Exception as exc:
                     raise _translate(exc) from exc
 
-            self._cache_collection("VEVENT", display_name, calendar)
             self._invalidate_collection_caches()
+            self._cache_collection("VEVENT", display_name, calendar, fetched_at=monotonic())
             return {"name": display_name, "url": str(calendar.url), "farbe": farbe}
 
     def delete_calendar(self, calendar_name: str) -> None:
@@ -1743,9 +1804,9 @@ class CalDavService:
 
             final_name = new_display_name if new_display_name is not None else calendar_name
             self._calendar_cache.pop(("VEVENT", calendar_name), None)
-            self._cache_collection("VEVENT", final_name, calendar)
             # A color change is reflected in the cached metadata, so drop it.
             self._invalidate_collection_caches()
+            self._cache_collection("VEVENT", final_name, calendar, fetched_at=monotonic())
             return {"name": final_name, "url": str(calendar.url), "farbe": farbe}
 
     def list_events(
