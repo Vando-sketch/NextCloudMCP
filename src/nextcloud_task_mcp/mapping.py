@@ -1036,6 +1036,13 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     clearing and setting the same field in one call, or naming an unknown
     field (including "titel", which cannot be cleared), raises
     `InvalidTaskDataError`.
+
+    `start_datum`/`faellig_datum` keep the zone they name and are otherwise
+    written in the zone the task's DTSTART already uses (`_anchored`), exactly
+    as `apply_event_fields` does for DTSTART/DTEND. A recurring VTODO pinned to
+    a fixed UTC instant slides an hour at every DST transition, and DTSTART and
+    DUE anchored to two different zones silently change the task's window at
+    the next one (finding 5.7).
     """
     clear = tuple(fields.clear or ())
     _validate_clear(fields, clear)
@@ -1049,12 +1056,28 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         elif ical_name is not None and ical_name in todo:
             del todo[ical_name]
 
+    # The zone the task is already anchored to, read before its DTSTART is
+    # replaced, so every value written below goes on the wire in that one zone
+    # instead of each keeping whichever zone it happened to parse in.
+    zone = _component_zone(todo)
+
     if fields.titel is not None:
         _set(todo, "summary", fields.titel)
     if fields.start_datum is not None:
-        _set(todo, "dtstart", parse_datetime_input(fields.start_datum))
+        start_value = parse_datetime_input(fields.start_datum, keep_zone=True)
+        if not names_timezone(fields.start_datum):
+            # A start that names no zone means "this instant", not "this task
+            # now lives in that zone" - so it is written in the task's own.
+            # Naming a zone explicitly is how a task is *moved* to one, and
+            # then everything below follows the new anchor.
+            start_value = _anchored(start_value, zone)
+        _set(todo, "dtstart", start_value)
+        zone = _component_zone(todo)
     if fields.faellig_datum is not None:
-        _set(todo, "due", parse_datetime_input(fields.faellig_datum))
+        due_value = parse_datetime_input(fields.faellig_datum, keep_zone=True)
+        if not names_timezone(fields.faellig_datum):
+            due_value = _anchored(due_value, zone)
+        _set(todo, "due", due_value)
     if fields.prioritaet is not None:
         _set(todo, "priority", priority_label_to_ical(fields.prioritaet))
     if fields.fortschritt_prozent is not None:

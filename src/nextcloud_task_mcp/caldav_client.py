@@ -525,7 +525,11 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     """
     seen_tzids = {str(c.get("TZID", "")) for c in vcal.subcomponents if c.name == "VTIMEZONE"}
     zones: dict[str, ZoneInfo] = {}
-    for prop_name in ("dtstart", "dtend"):
+    # "due" is the VTODO counterpart of "dtend": since finding 5.7,
+    # `mapping.apply_task_fields` anchors DTSTART/DUE the way
+    # `apply_event_fields` anchors DTSTART/DTEND, so a *task* can reference a
+    # TZID here too and needs the same VTIMEZONE written alongside it.
+    for prop_name in ("dtstart", "dtend", "due"):
         prop = component.get(prop_name)
         if prop is None:
             continue
@@ -1467,6 +1471,7 @@ class CalDavService:
             vcal = Calendar()
             vcal.add("prodid", "-//nextcloud-task-mcp//EN")
             vcal.add("version", "2.0")
+            _sync_vtimezones(vcal, todo)
             vcal.add_component(todo)
             ical_text = vcal.to_ical().decode("utf-8")
 
@@ -1497,6 +1502,7 @@ class CalDavService:
                 if master is None:
                     master = todo_obj.icalendar_component
                 mapping.apply_task_fields(master, fields)
+                _sync_vtimezones(todo_obj.icalendar_instance, master)
                 todo_obj.save()
 
             try:
