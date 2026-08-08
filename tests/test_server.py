@@ -618,6 +618,8 @@ def test_list_events_delegates_with_filters(tools, fake_service):
 
 def test_create_event_builds_event_fields(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
+    expected_event = {"uid": "new-uid", "titel": "Meeting", "start": "2026-07-20T14:00:00"}
+    fake_service.get_event.return_value = expected_event
     result = _run(
         tools["create_event"].fn(
             kalender_name="Termine",
@@ -627,24 +629,48 @@ def test_create_event_builds_event_fields(tools, fake_service):
             status="bestätigt",
         )
     )
-    assert result == {"uid": "new-uid"}
+    assert result == expected_event
     (cal_name, fields), _ = fake_service.create_event.call_args
     assert cal_name == "Termine"
     assert fields.titel == "Meeting"
     assert fields.status == "bestätigt"
     assert fields.clear == ()
+    fake_service.get_event.assert_called_once_with("Termine", "new-uid")
 
 
 def test_update_event_passes_clear_fields(tools, fake_service):
-    _run(
+    expected_event = {"uid": "event-1", "titel": "Meeting", "ort": None}
+    fake_service.get_event.return_value = expected_event
+    result = _run(
         tools["update_event"].fn(
             kalender_name="Termine",
             event_uid="event-1",
             felder_leeren=["ende", "ort"],
         )
     )
+    assert result == expected_event
     (_, _, fields), _ = fake_service.update_event.call_args
     assert fields.clear == ("ende", "ort")
+    fake_service.get_event.assert_called_once_with("Termine", "event-1")
+
+
+def test_list_events_compacts_large_exdate_list(tools, fake_service):
+    exdates_15 = [f"2026-08-{i:02d}" for i in range(1, 16)]
+    fake_service.list_events.return_value = [
+        {"uid": "e1", "ausnahme_daten": exdates_15},
+        {"uid": "e2", "ausnahme_daten": ["2026-08-01", "2026-08-02", "2026-08-03"]},
+        {"uid": "e3", "ausnahme_daten": []},
+        {"uid": "e4", "ausnahme_daten": None},
+    ]
+    results = _run(tools["list_events"].fn(kalender_namen=["Termine"]))
+    assert results[0]["ausnahme_daten"] == {
+        "anzahl": 15,
+        "erste": exdates_15[:5],
+        "hinweis": "gekürzt - vollständige Liste über get_event abrufen",
+    }
+    assert results[1]["ausnahme_daten"] == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert results[2]["ausnahme_daten"] == []
+    assert results[3]["ausnahme_daten"] is None
 
 
 # --- Attendees (teilnehmer) ---
