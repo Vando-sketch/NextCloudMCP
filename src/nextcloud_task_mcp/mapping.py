@@ -387,7 +387,7 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
 
 
-def parse_rrule_text(text: str) -> vRecur:
+def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur:
     """Validate and parse raw RFC 5545 RRULE text (e.g. "FREQ=WEEKLY;BYDAY=MO").
 
     Shared by tasks (VTODO RRULE) and events (`event_mapping._parse_rrule`,
@@ -398,6 +398,36 @@ def parse_rrule_text(text: str) -> vRecur:
     never what the caller meant.
     """
     stripped = text.strip()
+    if stripped.upper().startswith("RRULE:"):
+        stripped = stripped[6:].strip()
+
+    VALID_PARTS = {
+        "FREQ", "UNTIL", "COUNT", "INTERVAL", "BYSECOND", "BYMINUTE",
+        "BYHOUR", "BYDAY", "BYMONTHDAY", "BYYEARDAY", "BYWEEKNO", "BYMONTH",
+        "BYSETPOS", "WKST"
+    }
+
+    seen = set()
+    for part in stripped.split(";"):
+        if not part:
+            continue
+        if "=" not in part:
+            raise InvalidTaskDataError(
+                f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
+                "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
+            )
+        key = part.split("=")[0].upper()
+        if key not in VALID_PARTS:
+            raise InvalidTaskDataError(f"Unknown RRULE part: {key}")
+        if key in seen:
+            raise InvalidTaskDataError(f"Duplicate RRULE part: {key}")
+        seen.add(key)
+
+    if "FREQ" not in seen:
+        raise InvalidTaskDataError("wiederholung requires a FREQ part.")
+    if "UNTIL" in seen and "COUNT" in seen:
+        raise InvalidTaskDataError("wiederholung cannot contain both UNTIL and COUNT.")
+
     try:
         recur = vRecur.from_ical(stripped)
     except Exception:
@@ -407,6 +437,39 @@ def parse_rrule_text(text: str) -> vRecur:
             f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
             "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
         )
+
+    if "INTERVAL" in recur:
+        if recur["INTERVAL"][0] < 1:
+            raise InvalidTaskDataError("INTERVAL must be >= 1.")
+    if "COUNT" in recur:
+        if recur["COUNT"][0] < 1:
+            raise InvalidTaskDataError("COUNT must be >= 1.")
+    if "BYMONTHDAY" in recur:
+        if 0 in recur["BYMONTHDAY"]:
+            raise InvalidTaskDataError("BYMONTHDAY cannot be 0.")
+    if "BYMONTH" in recur:
+        if any(m < 1 or m > 12 for m in recur["BYMONTH"]):
+            raise InvalidTaskDataError("BYMONTH must be between 1 and 12.")
+    if "BYHOUR" in recur:
+        if any(h < 0 or h > 23 for h in recur["BYHOUR"]):
+            raise InvalidTaskDataError("BYHOUR must be between 0 and 23.")
+            
+    if anchor is not None and "UNTIL" in recur:
+        until_val = recur["UNTIL"][0]
+        if isinstance(anchor, datetime):
+            anchor_dt = anchor.astimezone(timezone.utc)
+            if not isinstance(until_val, datetime):
+                until_dt = datetime.combine(until_val, time.min, tzinfo=timezone.utc)
+            else:
+                until_dt = until_val if until_val.tzinfo else until_val.replace(tzinfo=timezone.utc)
+                until_dt = until_dt.astimezone(timezone.utc)
+            if until_dt < anchor_dt:
+                raise InvalidTaskDataError("UNTIL cannot be before the start date.")
+        else:
+            until_date = until_val.date() if isinstance(until_val, datetime) else until_val
+            if until_date < anchor:
+                raise InvalidTaskDataError("UNTIL cannot be before the start date.")
+
     return recur
 
 
@@ -716,7 +779,11 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
             parameters={"RELTYPE": "PARENT"},
         )
     if fields.wiederholung is not None:
-        _set(todo, "rrule", parse_rrule_text(fields.wiederholung))
+        anchor_val = None
+        dtstart_prop = todo.get("dtstart")
+        if dtstart_prop is not None:
+            anchor_val = getattr(dtstart_prop, "dt", None)
+        _set(todo, "rrule", parse_rrule_text(fields.wiederholung, anchor_val))
 
     if fields.erinnerungen is not None:
         apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
@@ -784,6 +851,8 @@ def _extract_rrule(component) -> str | None:
     rrule = component.get("rrule")
     if rrule is None:
         return None
+    if isinstance(rrule, list):
+        rrule = rrule[0]
     return rrule.to_ical().decode()
 
 

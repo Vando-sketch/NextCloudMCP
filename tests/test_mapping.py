@@ -1186,6 +1186,62 @@ def test_wiederholung_empty_result_is_invalid():
         mapping.parse_rrule_text("not-a-valid-rrule")
 
 
+def test_wiederholung_semantic_validations():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20")
+
+    # Missing FREQ
+    with pytest.raises(InvalidTaskDataError, match="FREQ"):
+        _apply(todo, wiederholung="INTERVAL=2")
+
+    # Duplicate parts
+    with pytest.raises(InvalidTaskDataError, match="Duplicate"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;FREQ=DAILY")
+
+    # Values
+    with pytest.raises(InvalidTaskDataError, match="INTERVAL must be >= 1"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;INTERVAL=0")
+    with pytest.raises(InvalidTaskDataError, match="COUNT must be >= 1"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;COUNT=0")
+    with pytest.raises(InvalidTaskDataError, match="BYMONTHDAY cannot be 0"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;BYMONTHDAY=0")
+    with pytest.raises(InvalidTaskDataError, match="BYMONTH must be between 1 and 12"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;BYMONTH=13")
+    with pytest.raises(InvalidTaskDataError, match="BYHOUR must be between 0 and 23"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;BYHOUR=99")
+
+    # UNTIL and COUNT together
+    with pytest.raises(InvalidTaskDataError, match="UNTIL and COUNT"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;UNTIL=20261231T000000Z;COUNT=5")
+
+    # Unknown parts
+    with pytest.raises(InvalidTaskDataError, match="Unknown"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;UNKNOWN=1")
+
+    # UNTIL before anchor
+    with pytest.raises(InvalidTaskDataError, match="UNTIL cannot be before the start date"):
+        _apply(todo, wiederholung="FREQ=WEEKLY;UNTIL=20260101T000000Z")
+
+
+def test_wiederholung_strips_rrule_prefix():
+    todo = _new_todo()
+    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="RRULE:FREQ=DAILY")
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+
+
+def test_extract_rrule_handles_duplicate_rrule_property():
+    """A duplicated RRULE property from import_ics must not crash reads."""
+    todo = _todo_from_ics(
+        "BEGIN:VTODO\n"
+        "UID:task-1\n"
+        "SUMMARY:Task\n"
+        "RRULE:FREQ=DAILY\n"
+        "RRULE:FREQ=WEEKLY\n"
+        "END:VTODO\n"
+    )
+    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+
+
 def test_wiederholung_without_start_rejected():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError, match="start_datum"):

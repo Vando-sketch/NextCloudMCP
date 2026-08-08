@@ -354,7 +354,7 @@ def _utc_value(value: datetime) -> datetime:
     return value
 
 
-def _parse_rrule(text: str) -> vRecur:
+def _parse_rrule(text: str, anchor: date | datetime | None = None) -> vRecur:
     """`mapping.parse_rrule_text`, re-raised as the event-side error class.
 
     The shared parser lives in `mapping.py` (tasks and events use the exact
@@ -363,7 +363,7 @@ def _parse_rrule(text: str) -> vRecur:
     with the same message - same pattern as `_parse_datetime` above.
     """
     try:
-        return parse_rrule_text(text)
+        return parse_rrule_text(text, anchor=anchor)
     except InvalidTaskDataError as exc:
         raise InvalidEventDataError(str(exc)) from None
 
@@ -644,7 +644,11 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
             raise InvalidEventDataError(str(exc)) from None
         _set(event, "class", ical_class)
     if fields.wiederholung is not None:
-        _set(event, "rrule", _parse_rrule(fields.wiederholung))
+        anchor_val = None
+        dtstart_prop = event.get("dtstart")
+        if dtstart_prop is not None:
+            anchor_val = getattr(dtstart_prop, "dt", None)
+        _set(event, "rrule", _parse_rrule(fields.wiederholung, anchor=anchor_val))
     if fields.ausnahme_daten is not None:
         # Replace, not append: drop every existing EXDATE, then write all
         # entries as one EXDATE property with a comma-separated value list.
