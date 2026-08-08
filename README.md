@@ -172,20 +172,20 @@ Returns all available Nextcloud task lists (calendars supporting VTODO) as
 Event-only calendars (e.g. Nextcloud's default "Personal" calendar) are
 excluded — `list_calendars` is their counterpart.
 
-### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, prioritaet=None, tag=None, suchtext=None, limit=None, list_name=None)`
+### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
 
-Returns tasks across one, several, or all task lists (`listen_namen=None` queries all lists; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed tasks. Each task
+Returns tasks across one, several, or all task lists (`listen_namen=None` queries *every* list on the account, unbounded unless you narrow it; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed tasks. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
 `fortschritt_prozent`, `status` (`"offen"` / `"erledigt"`), `ort`, `url`, `tags`,
 `erinnerungen`, `notizen`, `uebergeordnete_uid` (parent task UID, or `null` if not a subtask),
-`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), and `liste` (the task list's display name).
+`wiederholung` (raw RRULE text, or `null` if the task doesn't recur — read-only), `liste` (the task list's display name), and `liste_url` (its unique URL). Nextcloud allows two lists to share a name: `liste` cannot tell them apart, but `liste_url` can. You still cannot address such a list by name (it is ambiguous), so it must be renamed in Nextcloud.
 
-Results are sorted by `faellig_datum` ascending (tasks without a due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact, case-insensitive), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds). `limit` (must be `> 0`) caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
+Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
 
 ### `get_task(list_name, task_uid)`
 
-Fetches a single task by UID, without listing the whole task list. Returns the same
-dict shape as one entry from `list_tasks`.
+Fetches a single task by UID, without listing the whole task list. Returns what one
+entry from `list_tasks` holds, minus its `liste` key.
 
 ### `create_task(list_name, titel, ...)`
 
@@ -208,9 +208,13 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
 `faellig_datum` if set, otherwise before `start_datum`; a relative reminder without either
-date raises an error. Absolute reminders are stored in UTC per RFC 5545, but reading reminders
-back formats them in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
-See `docs/tools.md` for details.
+date raises an error. Absolute reminders without a UTC offset are interpreted in the server's
+default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`) and stored as UTC per RFC
+5545; reading them back formats the same instant in the default timezone, so the string may
+differ from what was written. Reading a reminder and writing it back is safe — the alarm is
+recognized as already present and left alone — but the strings are normalized (`"-P1W"` reads
+back as `"-P7D"`, `"...Z"` as the default timezone's offset). Alarms whose trigger this format
+cannot express are not listed, and are never touched by a write; see `docs/tools.md`.
 
 > **BREAKING CHANGE**: Server timezone handling uses a single configurable default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC-hardcoded behavior.
 
@@ -219,12 +223,15 @@ See `docs/tools.md` for details.
 (`VALUE=DATE`); any other ISO 8601 value is a datetime, and a *naive* datetime (no UTC
 offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`).
 Returned timestamps carry the default timezone's offset (e.g. `+02:00`).
+An event keeps the timezone it is anchored to, so a value read from `get_event` can be written
+straight back through `update_event` without the event losing that anchor — which is what keeps
+a recurring event on its wall-clock time across daylight-saving changes.
 
 ### `update_task(list_name, task_uid, ...)`
 
 Same fields as `create_task`, all optional except `task_uid`. Only fields you pass are
 changed; everything else on the task is left untouched. Passing `erinnerungen` replaces
-*all* existing reminders on the task.
+the reminders `list_tasks` shows; `felder_leeren` clears *every* alarm instead.
 
 To remove a property entirely (e.g. delete a due date), list its field name in the
 optional `felder_leeren` parameter instead of just omitting it — omitting a field

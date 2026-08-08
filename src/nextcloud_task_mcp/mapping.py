@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -25,6 +27,13 @@ VISIBILITY_LABELS: dict[str, str] = {
 # `parse_datetime_input` is gated on this pattern rather than a bare
 # try/except around `date.fromisoformat` (B1).
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Identity of a VALARM trigger, used to match the reminder specs a caller
+# passes against the alarms a component already carries: ("dur", timedelta)
+# for a relative trigger, ("dt", UTC datetime) for an absolute one. Built by
+# `_trigger_key` so that equivalent spellings ("-P1W"/"-P7D", "...Z"/"+00:00")
+# compare equal.
+_TriggerKey = tuple[str, datetime] | tuple[str, timedelta]
 
 # Maps the German, LLM-facing `felder_leeren` entry name to the
 # (TaskFields attribute name, iCalendar property name) it clears. "titel" is
@@ -80,10 +89,66 @@ class TaskFields:
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
-_DEFAULT_TIMEZONE: ZoneInfo = ZoneInfo("Europe/Berlin")
+#: The zone this server falls back to before `set_default_timezone` runs, kept
+#: in sync with `config.Settings.default_timezone` (the value the server
+#: actually applies at startup).
+_SHIPPED_DEFAULT_TIMEZONE = "Europe/Berlin"
+
+# IANA names that denote UTC itself. A zone from this set is stored as
+# `datetime.timezone.utc` rather than as a `ZoneInfo`, so `icalendar` writes
+# the plain `...Z` form instead of `;TZID=UTC:...` plus a VTIMEZONE holding one
+# zero-offset observance - which is what `MCP_DEFAULT_TIMEZONE=UTC` is
+# documented to do ("restores the previous UTC behavior"). Zones that merely
+# *happen* to sit at +00:00 (Europe/London in winter, Africa/Abidjan) are real,
+# distinct zones and deliberately not listed.
+_UTC_ZONE_KEYS = frozenset(
+    {
+        "UTC",
+        "Etc/UTC",
+        "Etc/GMT",
+        "Etc/GMT+0",
+        "Etc/GMT-0",
+        "Etc/GMT0",
+        "Etc/Greenwich",
+        "Etc/Universal",
+        "Etc/Zulu",
+        "GMT",
+        "GMT+0",
+        "GMT-0",
+        "GMT0",
+        "Greenwich",
+        "Universal",
+        "Zulu",
+    }
+)
+
+_logger = logging.getLogger(__name__)
 
 
-def set_default_timezone(zone: str | ZoneInfo) -> None:
+def _initial_default_timezone() -> tzinfo:
+    """Resolve the shipped default zone, falling back to UTC if tzdata is absent.
+
+    A Python installation without the IANA database (a slim container image,
+    Windows without the `tzdata` package) cannot resolve any zone name at all.
+    Raising from a module-level statement would take the whole server down with
+    an unhandled `ZoneInfoNotFoundError` traceback before the config layer -
+    which reports missing/invalid zones properly - even gets to run.
+    """
+    try:
+        return ZoneInfo(_SHIPPED_DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        _logger.warning(
+            "Timezone database unavailable: %r could not be resolved, falling back to "
+            "UTC. Install the 'tzdata' package to use MCP_DEFAULT_TIMEZONE.",
+            _SHIPPED_DEFAULT_TIMEZONE,
+        )
+        return timezone.utc
+
+
+_DEFAULT_TIMEZONE: tzinfo = _initial_default_timezone()
+
+
+def set_default_timezone(zone: str | tzinfo) -> None:
     """Set the server-wide default timezone."""
     global _DEFAULT_TIMEZONE
     if isinstance(zone, str):
@@ -92,9 +157,37 @@ def set_default_timezone(zone: str | ZoneInfo) -> None:
         _DEFAULT_TIMEZONE = zone
 
 
-def get_default_timezone() -> ZoneInfo:
+def get_default_timezone() -> tzinfo:
     """Return the server-wide default timezone (defaults to Europe/Berlin)."""
     return _DEFAULT_TIMEZONE
+
+
+def _resolve_in_zone(value: datetime) -> datetime:
+    """Settle a zone-anchored wall-clock datetime into the form it is written in.
+
+    Two adjustments, both of which only matter once the zone is *kept* (the
+    `keep_zone=True` path, i.e. events) instead of collapsed to a UTC instant:
+
+    - A zone that *is* UTC collapses to `datetime.timezone.utc`, so the value
+      is serialized as `...Z` instead of as a TZID reference (`_UTC_ZONE_KEYS`).
+    - A wall clock reading that the zone's spring-forward gap skips (02:30 on a
+      day that jumps 02:00 -> 03:00) is respelled as the real local time of the
+      same instant (03:30). `zoneinfo` resolves such a reading with the
+      pre-transition offset (`fold=0`), which is a well-defined *instant* - but
+      writing it out as `DTSTART;TZID=Europe/Berlin:...T023000` hands every
+      other client a reading that never happens, to resolve its own way.
+      Ambiguous readings (the autumn overlap) are left exactly as they are:
+      they do happen, twice, and `fold=0` picks the earlier one.
+    """
+    zone = value.tzinfo
+    if not isinstance(zone, ZoneInfo):
+        return value
+    if zone.key in _UTC_ZONE_KEYS:
+        return value.replace(tzinfo=timezone.utc)
+    settled = value.astimezone(timezone.utc).astimezone(zone)
+    if settled.replace(tzinfo=None) != value.replace(tzinfo=None):
+        return settled
+    return value
 
 
 def format_datetime_output(value: date | datetime | None) -> str | None:
@@ -117,6 +210,29 @@ def format_datetime_output(value: date | datetime | None) -> str | None:
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
+
+
+def _local_wall_time(day: date, wall: time) -> datetime:
+    """A wall clock reading of a local day, as an instant in the default timezone."""
+    return _resolve_in_zone(datetime.combine(day, wall, tzinfo=get_default_timezone()))
+
+
+def local_midnight(day: date) -> datetime:
+    """The first instant of a local day, in the server's default timezone.
+
+    The one definition of where a day starts, shared by every part of the
+    server that has to decide which day something falls in: `get_agenda`'s
+    events and tasks, `von`/`bis` and `faellig_vor`/`faellig_nach` bounds, and
+    the instant an all-day value is compared at.
+
+    Not every day has a midnight: America/Santiago, Asia/Beirut and others move
+    their clocks *at* 00:00, so on a transition day the reading 00:00 never
+    happens. `zoneinfo` still maps it to the correct instant - the transition
+    itself is that day's first moment - but a bound like this is also printed
+    back to callers (`get_free_busy` reports the window it used), so it is
+    respelled as the day's first real reading. Same instant either way.
+    """
+    return _local_wall_time(day, time.min)
 
 
 def priority_label_to_ical(label: str) -> int:
@@ -154,6 +270,36 @@ def visibility_label_to_ical(label: str) -> str:
         raise InvalidTaskDataError(
             f"Unknown sichtbarkeit '{label}'. Expected one of: {', '.join(VISIBILITY_LABELS)}."
         ) from None
+
+
+def _split_timezone_name(text: str) -> tuple[str, ZoneInfo | None]:
+    """Split "<datetime> <IANA name>" into its two parts.
+
+    The zone is None (and the text returned unchanged) when the value names no
+    zone this machine knows - a plain datetime, or a trailing word that is not
+    a zone name, both of which the datetime parser then rejects or accepts on
+    its own terms.
+    """
+    if " " not in text:
+        return text, None
+    candidate_text, _, candidate_zone = text.rpartition(" ")
+    try:
+        return candidate_text, ZoneInfo(candidate_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return text, None
+
+
+def names_timezone(value: str) -> bool:
+    """Whether this input names an IANA timezone itself (e.g. "... Europe/Berlin").
+
+    The difference between a zone the *caller* chose and the default one this
+    server attached to a naive value. Both come back from
+    `parse_datetime_input(keep_zone=True)` as an ordinary `ZoneInfo`, but only
+    the first is a statement about which zone the value belongs in - which is
+    what lets `event_mapping` move an event to another zone on request while
+    still writing everything else in the zone the event already has.
+    """
+    return _split_timezone_name(value.strip())[1] is not None
 
 
 def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datetime:
@@ -203,6 +349,10 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       default `fold=0`, i.e. with the pre-transition offset, rather than
       rejected: refusing a timestamp for one hour twice a year would be a
       worse failure mode than picking the earlier of two plausible instants.
+      With `keep_zone=True` a nonexistent reading is additionally respelled as
+      the real local time of that same instant (02:30 -> 03:30), so what goes
+      on the wire is a wall clock reading that actually happens - see
+      `_resolve_in_zone`.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):
@@ -211,16 +361,7 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
         except ValueError:
             pass  # fall through to the datetime/error path below
 
-    dt_text = text
-    zone: ZoneInfo | None = None
-    if " " in text:
-        candidate_text, _, candidate_zone = text.rpartition(" ")
-        try:
-            zone = ZoneInfo(candidate_zone)
-        except (ZoneInfoNotFoundError, ValueError):
-            zone = None
-        else:
-            dt_text = candidate_text
+    dt_text, zone = _split_timezone_name(text)
 
     normalized = dt_text[:-1] + "+00:00" if dt_text.endswith("Z") else dt_text
     try:
@@ -235,10 +376,10 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
                     "timezone name cannot both be given - use one or the other."
                 )
             dt = dt.replace(tzinfo=zone)
-            return dt if keep_zone else dt.astimezone(timezone.utc)
+            return _resolve_in_zone(dt) if keep_zone else dt.astimezone(timezone.utc)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=get_default_timezone())
-            return dt if keep_zone else dt.astimezone(timezone.utc)
+            return _resolve_in_zone(dt) if keep_zone else dt.astimezone(timezone.utc)
         return dt.astimezone(timezone.utc)
 
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
@@ -305,6 +446,12 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
     ISO 8601 datetime. This works the same whether DUE/DTSTART is an all-day
     `date` or a full `datetime` - RFC 5545 permits a relative VALARM trigger
     to be RELATED to a DATE-valued DUE/DTSTART.
+
+    The leading "-" is what makes a relative reminder fire *before* its
+    anchor. A positive duration ("PT30M") is legal RFC 5545 and accepted as
+    written - it schedules the reminder half an hour *after* the due/start
+    date, which is occasionally what a caller wants and never what a missing
+    sign means to guess about.
     """
     trigger_value, trigger_params = _parse_trigger(spec, has_due=has_due, has_start=has_start)
     alarm = Alarm()
@@ -312,6 +459,139 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
     alarm.add("description", description or "Reminder")
     alarm.add("trigger", trigger_value, parameters=trigger_params)
     return alarm
+
+
+def _trigger_key(value: datetime | timedelta) -> _TriggerKey:
+    """Identity of a trigger, independent of how it was spelled.
+
+    "-P1W" and "-P7D" are the same relative trigger, and "...Z" and
+    "...+02:00" name the same instant, so both compare equal here.
+    """
+    if isinstance(value, datetime):
+        return ("dt", value.astimezone(timezone.utc))
+    return ("dur", value)
+
+
+def _expected_related(component) -> str | None:
+    """The RELATED anchor `build_alarm` would give a relative trigger on this component.
+
+    None when the component has neither DUE nor DTSTART - a relative reminder
+    cannot be written onto it at all.
+    """
+    if "due" in component:
+        return "END"
+    if "dtstart" in component:
+        return "START"
+    return None
+
+
+def _has_anchor(component, related: str) -> bool:
+    """Whether the component carries the property a RELATED value names.
+
+    START is DTSTART; END is DUE on a task and DTEND (or DTSTART+DURATION) on
+    an event. An anchor the component does not have cannot place an alarm at a
+    different moment than the anchor it does have - which is what makes a
+    differently-named anchor harmless in `_read_alarm`.
+    """
+    if related == "START":
+        return "dtstart" in component
+    if related == "END":
+        return "due" in component or "dtend" in component or "duration" in component
+    return False
+
+
+def _read_alarm(alarm, component) -> tuple[str, _TriggerKey] | None:
+    """Render one VALARM's TRIGGER as a reminder spec plus its identity, or None.
+
+    None means "this alarm has no `erinnerungen` spelling": returning a string
+    for it would either be a lie about when it fires or a value the write path
+    would reject. That covers a missing TRIGGER, a repeated TRIGGER property
+    (`icalendar` hands those back as a list), a DATE-valued trigger, an
+    absolute trigger whose TZID cannot be resolved, a relative trigger on a
+    component with neither DUE nor DTSTART (nothing to anchor to, so writing
+    the string back would be rejected), and a relative trigger anchored to an
+    anchor the component really has while `build_alarm` would re-derive the
+    other one - `RELATED=END` on an event with a DTEND, `RELATED=START` on a
+    task that has both dates. Such alarms are left strictly alone by
+    `apply_alarms`.
+
+    A named anchor the component does *not* have is not a mismatch: RELATED is
+    omissible and defaults to START, so `TRIGGER:-PT30M` on a task with only a
+    due date is the ordinary wire form for "30 minutes before it is due", not
+    an alarm hanging off a DTSTART that isn't there.
+    """
+    prop = alarm.get("trigger")
+    if prop is None:
+        return None
+    value = getattr(prop, "dt", None)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            zone = _trigger_zone(prop)
+            if zone is None:
+                return None
+            value = value.replace(tzinfo=zone)
+        formatted = format_datetime_output(value)
+        if formatted is None:
+            return None
+        return formatted, _trigger_key(value)
+    if isinstance(value, timedelta):
+        expected_related = _expected_related(component)
+        if expected_related is None:
+            return None
+        params = getattr(prop, "params", {}) or {}
+        # RFC 5545: a TRIGGER without RELATED is anchored to the start.
+        related = str(params.get("RELATED", "START")).upper()
+        if related != expected_related and _has_anchor(component, related):
+            return None
+        return vDuration(value).to_ical().decode(), _trigger_key(value)
+    return None
+
+
+def apply_alarms(component, specs: list[str], description: str) -> None:
+    """Replace the component's reminders with `specs`, without collateral damage.
+
+    Only VALARMs that `extract_alarms` can express are up for replacement:
+    - an alarm already triggering at one of the requested moments is left
+      exactly as it is, keeping its ACTION, DESCRIPTION, UID and dismiss state
+      (ACKNOWLEDGED / X-MOZ-LASTACK) - rebuilding it would make an already
+      dismissed reminder fire again;
+    - an alarm whose trigger is not in the list is removed (that is what
+      "replaces all reminders" means);
+    - an alarm this format cannot express (see `_read_alarm`) is never touched,
+      because it was never visible to the caller in the first place. Clearing
+      "erinnerungen" via `felder_leeren` still removes every VALARM.
+
+    Duplicate specs (including different spellings of the same trigger) produce
+    one alarm, not several.
+    """
+    has_due = "due" in component
+    has_start = "dtstart" in component
+
+    wanted: dict[_TriggerKey, str] = {}
+    for spec in specs:
+        value, _params = _parse_trigger(spec, has_due=has_due, has_start=has_start)
+        wanted.setdefault(_trigger_key(value), spec)
+
+    kept: set[_TriggerKey] = set()
+    subcomponents = []
+    for sub in component.subcomponents:
+        if getattr(sub, "name", None) != "VALARM":
+            subcomponents.append(sub)
+            continue
+        read = _read_alarm(sub, component)
+        if read is None:
+            subcomponents.append(sub)
+            continue
+        key = read[1]
+        if key in wanted and key not in kept:
+            kept.add(key)
+            subcomponents.append(sub)
+    for key, spec in wanted.items():
+        if key not in kept:
+            subcomponents.append(
+                build_alarm(spec, description, has_due=has_due, has_start=has_start)
+            )
+    component.subcomponents = subcomponents
 
 
 def _validate_clear(fields: TaskFields, clear: tuple[str, ...]) -> None:
@@ -385,14 +665,7 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
         )
 
     if fields.erinnerungen is not None:
-        todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
-        has_due = "due" in todo
-        has_start = "dtstart" in todo
-        title_for_alarm = str(todo.get("summary", "Reminder"))
-        for spec in fields.erinnerungen:
-            todo.add_component(
-                build_alarm(spec, title_for_alarm, has_due=has_due, has_start=has_start)
-            )
+        apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
 
 
 def mark_completed(todo) -> None:
@@ -464,7 +737,9 @@ def extract_alarms(component) -> list[str]:
     Returns each alarm's TRIGGER in the string format accepted by create_task /
     create_event:
     - Relative trigger (timedelta): RFC 5545 duration string, e.g. "-PT30M", "-P1D",
-      serialized via `vDuration`.
+      serialized via `vDuration`. Equivalent spellings are normalized to the
+      canonical one ("-P1W" reads back as "-P7D", "-PT90M" as "-PT1H30M") -
+      the same trigger, a different string.
     - Absolute trigger (datetime): ISO 8601 string with offset, e.g.
       "2026-08-07T09:00:00+02:00". RFC 5545 requires absolute triggers to be
       UTC, and this server only ever writes them that way - but other clients
@@ -472,58 +747,107 @@ def extract_alarms(component) -> list[str]:
       `icalendar` hands back as a *naive* datetime with the zone left in the
       property's parameters. Reading that as UTC would silently shift the
       reminder by the zone's offset, so the TZID parameter is resolved via
-      `zoneinfo` when present; a naive value without any TZID is assumed to be
-      UTC (B2), and an unknown TZID name falls back to UTC rather than
-      dropping the alarm. Output is formatted in the server's default timezone.
+      `_trigger_zone` (which understands plain IANA names, Windows/Outlook
+      names, and the prefixed forms Evolution and older clients emit - see
+      `_resolve_tzid`); a naive value without any TZID is taken at its word as
+      UTC (B2), and a TZID this server cannot resolve is *not* silently read
+      as UTC - the alarm is skipped instead (see `_read_alarm`), because
+      guessing a zone could shift the reminder by hours. Output is formatted
+      in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), the same
+      convention DTSTART/DUE follow.
 
     Alarms appear in the returned list in the order they are defined in the
-    component. A VALARM without a TRIGGER, or with a TRIGGER value that is neither
-    a timedelta nor a datetime (e.g. malformed or unsupported trigger types),
-    is skipped silently (a foreign client's odd alarm must never break a listing).
+    component, and only alarms whose trigger this format can express are
+    listed at all - see `_read_alarm` for the ones that are skipped and
+    `apply_alarms` for how they survive a write untouched.
 
-    Two properties of an alarm deliberately do NOT survive this string form,
-    because `erinnerungen` has no slot for them: the TRIGGER's RELATED
-    parameter (START vs END) and a foreign ACTION (EMAIL/AUDIO). Writing an
-    extracted reminder back re-derives RELATED from the component's own
-    DUE/DTSTART (see `build_alarm`) and always writes ACTION=DISPLAY - which
-    reproduces this server's own alarms exactly, but can re-anchor an alarm a
-    different client wrote. VALARM DURATION/REPEAT (alarm self-repetition) is
-    not modelled either.
+    What the string form still cannot carry, for the alarms it does list: a
+    foreign ACTION (EMAIL/AUDIO), an ATTACH, and VALARM DURATION/REPEAT (alarm
+    self-repetition). Those are preserved as long as the alarm stays in the
+    list a write passes back; a reminder whose time is *changed* is replaced by
+    a plain DISPLAY alarm. `export_calendar`/`import_ics` round-trip every
+    alarm verbatim and are the lossless path.
     """
     alarms: list[str] = []
     for sub in getattr(component, "subcomponents", []):
         if getattr(sub, "name", None) != "VALARM":
             continue
-        prop = sub.get("trigger")
-        if prop is None:
-            continue
-        dt_val = getattr(prop, "dt", prop)
-        if isinstance(dt_val, timedelta):
-            alarms.append(vDuration(dt_val).to_ical().decode())
-        elif isinstance(dt_val, datetime):
-            if dt_val.tzinfo is None:
-                dt_val = dt_val.replace(tzinfo=_trigger_zone(prop))
-            formatted = format_datetime_output(dt_val)
-            if formatted is not None:
-                alarms.append(formatted)
+        read = _read_alarm(sub, component)
+        if read is not None:
+            alarms.append(read[0])
     return alarms
 
 
-def _trigger_zone(prop: Any) -> timezone | ZoneInfo:
+# Windows/Outlook zone names for the zones this server is most likely to meet.
+# They are not IANA names, so `zoneinfo` cannot resolve them; the mapping is
+# the CLDR windowsZones default ("001") territory for each. Deliberately a
+# short list of the common ones rather than all ~140 - anything not in it is
+# handled by `_trigger_zone` returning None (the alarm is then left alone
+# instead of being reported at a guessed time).
+_WINDOWS_TZIDS: dict[str, str] = {
+    "utc": "Etc/UTC",
+    "gmt standard time": "Europe/London",
+    "greenwich standard time": "Atlantic/Reykjavik",
+    "w. europe standard time": "Europe/Berlin",
+    "central europe standard time": "Europe/Budapest",
+    "central european standard time": "Europe/Warsaw",
+    "romance standard time": "Europe/Paris",
+    "e. europe standard time": "Europe/Chisinau",
+    "fle standard time": "Europe/Kyiv",
+    "gtb standard time": "Europe/Bucharest",
+    "russian standard time": "Europe/Moscow",
+    "eastern standard time": "America/New_York",
+    "central standard time": "America/Chicago",
+    "mountain standard time": "America/Denver",
+    "pacific standard time": "America/Los_Angeles",
+    "india standard time": "Asia/Kolkata",
+    "china standard time": "Asia/Shanghai",
+    "tokyo standard time": "Asia/Tokyo",
+    "aus eastern standard time": "Australia/Sydney",
+}
+
+
+def _resolve_tzid(tzid: str) -> ZoneInfo | None:
+    """Resolve a TZID parameter to a zone, or None if it names no zone we know.
+
+    Three forms are accepted, in order: a plain IANA name ("Europe/Berlin"), a
+    Windows/Outlook zone name ("W. Europe Standard Time", see `_WINDOWS_TZIDS`),
+    and the prefixed forms Evolution and older clients emit
+    ("/freeassociation.sourceforge.net/Europe/Berlin"), whose trailing path
+    segments are an IANA name.
+    """
+    name = tzid.strip()
+    for candidate in (name, _WINDOWS_TZIDS.get(name.lower(), "")):
+        if not candidate:
+            continue
+        try:
+            return ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    parts = [part for part in name.split("/") if part]
+    for count in (3, 2):
+        if len(parts) > count:
+            try:
+                return ZoneInfo("/".join(parts[-count:]))
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+    return None
+
+
+def _trigger_zone(prop: Any) -> timezone | ZoneInfo | None:
     """The zone a naive absolute TRIGGER value is expressed in.
 
-    Only ever the TZID parameter another client attached to the property, or
-    UTC when there is none (or the name isn't one `zoneinfo` knows - a
-    reminder at the wrong-but-plausible hour beats dropping it silently).
+    UTC when the property carries no TZID at all (RFC 5545 requires absolute
+    triggers to be UTC, so that is the value's own claim). Otherwise the zone
+    the TZID names, or None when it names none this server can resolve -
+    reporting such a reminder at a guessed hour would be worse than not
+    listing it, since the alarm itself is preserved either way.
     """
     params = getattr(prop, "params", {}) or {}
     tzid = params.get("TZID")
     if not tzid:
         return timezone.utc
-    try:
-        return ZoneInfo(str(tzid))
-    except (ZoneInfoNotFoundError, ValueError):
-        return timezone.utc
+    return _resolve_tzid(str(tzid))
 
 
 def parse_vtodo(component) -> dict[str, Any]:
@@ -567,17 +891,64 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     parsed = parse_datetime_input(value)
     if isinstance(parsed, datetime):
         return parsed
-    time_of_day = time(23, 59, 59) if end_of_day else time.min
-    return datetime.combine(parsed, time_of_day, tzinfo=get_default_timezone())
+    if end_of_day:
+        return _local_wall_time(parsed, time(23, 59, 59))
+    return local_midnight(parsed)
 
 
-def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, str]:
-    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
-    due_text = task.get("faellig_datum")
-    titel = str(task.get("titel") or "")
+def _task_due_instant(due_text: str | None) -> datetime | None:
+    """A task's own stored `faellig_datum` as a comparable instant, or None.
+
+    None means "cannot be placed on a timeline at all": either the task has no
+    due date, or the value the server stores is not one this server can read
+    (a foreign client's `DUE` holding a bare time or a period, say). Both are
+    treated identically - excluded from a due-date filter, sorted last -
+    because sorting reads *every* task's due date, so raising here would let
+    one unreadable task turn an entire healthy listing into an error.
+    """
     if due_text is None:
+        return None
+    try:
+        return _to_comparable_datetime(due_text, end_of_day=False)
+    except InvalidTaskDataError:
+        _logger.debug("Ignoring unreadable faellig_datum %r while filtering/sorting", due_text)
+        return None
+
+
+def _collation_key(value: str) -> tuple[str, str]:
+    """A rough locale-independent collation key for a title.
+
+    Raw codepoint order files every umlaut after "Z" ("Ärztin" behind
+    "Zahnarzt"), which reads as no order at all in a German-facing listing.
+    Decomposing (NFKD) and dropping the combining marks sorts "Ä" with "A";
+    case-folding sorts "ärztin" with "Ärztin" and "ß" with "ss", which is
+    also DIN 5007 variant 1's rule. This is not full locale-aware collation -
+    that needs a collation library this server does not depend on - so the
+    original string is kept as a tiebreak to stay deterministic.
+    """
+    decomposed = unicodedata.normalize("NFKD", value)
+    return ("".join(c for c in decomposed if not unicodedata.combining(c)).casefold(), value)
+
+
+def _fold(value: str) -> str:
+    """Normalize text for caseless, spelling-independent matching.
+
+    "ü" has two Unicode spellings (precomposed, or "u" plus a combining
+    diaeresis) that no client is consistent about, and `.lower()` leaves "ß"
+    and "SS" different - both of which matter in a German-language API.
+    NFC-normalizing and case-*folding* (not lowercasing) makes either
+    spelling of an umlaut, and either spelling of a sharp s, match.
+    """
+    return unicodedata.normalize("NFC", value).casefold()
+
+
+def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, tuple[str, str]]:
+    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
+    titel = _collation_key(str(task.get("titel") or ""))
+    due = _task_due_instant(task.get("faellig_datum"))
+    if due is None:
         return (1, datetime.max.replace(tzinfo=timezone.utc), titel)
-    return (0, _to_comparable_datetime(due_text, end_of_day=False), titel)
+    return (0, due, titel)
 
 
 def filter_tasks(
@@ -592,41 +963,42 @@ def filter_tasks(
 ) -> list[dict[str, Any]]:
     """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
-    `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is given,
-    tasks with no `faellig_datum` (due date) are excluded.
+    `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is
+    actually given, tasks with no readable `faellig_datum` (due date) are excluded.
     `prioritaet`: "hoch"/"mittel"/"niedrig", validated against `PRIORITY_LABELS`
     (unknown value raises `InvalidTaskDataError`).
-    `tag`: exact, case-insensitive match against one `tags` entry.
-    `suchtext`: case-insensitive substring match over `titel` and `notizen`
-    (skipping None values).
+    `tag`: exact match against one `tags` entry, `suchtext`: substring match over
+    `titel` and `notizen` (skipping None values); both compare case- and
+    spelling-insensitively (see `_fold`).
 
-    Results are sorted by `faellig_datum` ascending (tasks without a due date last),
-    then by `titel`. `limit`, if given, must be a positive integer and caps the number
-    of results returned, applied last.
+    An empty string means "no filter" for every one of them, due bounds included -
+    clients spell an unset argument that way, and these used to disagree about it
+    (an error, an empty result, a no-op, and an error again). `limit` keeps
+    rejecting 0: an integer parameter spells "unset" as None, so 0 is a caller
+    asking for zero results, which is a mistake worth reporting.
+
+    Results are sorted by `faellig_datum` ascending (tasks without a readable due
+    date last), then by `titel` (see `_collation_key`). `limit`, if given, must be a
+    positive integer and caps the number of results returned, applied last.
     """
     if limit is not None and limit <= 0:
         raise InvalidTaskDataError(f"limit must be greater than 0, got {limit}.")
 
-    if prioritaet is not None:
+    if prioritaet:
         if prioritaet not in PRIORITY_LABELS:
             raise InvalidTaskDataError(
                 f"Unknown prioritaet '{prioritaet}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
             )
         tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
 
-    if due_before is not None or due_after is not None:
-        before_bound = (
-            _to_comparable_datetime(due_before, end_of_day=True) if due_before is not None else None
-        )
-        after_bound = (
-            _to_comparable_datetime(due_after, end_of_day=False) if due_after is not None else None
-        )
+    if due_before or due_after:
+        before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
+        after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
         filtered: list[dict[str, Any]] = []
         for task in tasks:
-            due_text = task.get("faellig_datum")
-            if due_text is None:
+            due_dt = _task_due_instant(task.get("faellig_datum"))
+            if due_dt is None:
                 continue
-            due_dt = _to_comparable_datetime(due_text, end_of_day=False)
             if before_bound is not None and due_dt > before_bound:
                 continue
             if after_bound is not None and due_dt < after_bound:
@@ -634,17 +1006,17 @@ def filter_tasks(
             filtered.append(task)
         tasks = filtered
 
-    if tag is not None:
-        wanted = tag.lower()
-        tasks = [task for task in tasks if any(t.lower() == wanted for t in task.get("tags") or [])]
+    if tag:
+        wanted = _fold(tag)
+        tasks = [task for task in tasks if any(_fold(t) == wanted for t in task.get("tags") or [])]
 
-    if suchtext is not None:
-        needle = suchtext.lower()
+    if suchtext:
+        needle = _fold(suchtext)
         tasks = [
             task
             for task in tasks
             if any(
-                needle in value.lower()
+                needle in _fold(value)
                 for value in (task.get("titel"), task.get("notizen"))
                 if value is not None
             )

@@ -6,8 +6,8 @@ import logging
 import re
 import threading
 import uuid
-from collections.abc import Callable, Iterator
-from datetime import datetime, time, timedelta, timezone
+from collections.abc import Callable, Iterable, Iterator
+from datetime import datetime, timedelta, timezone
 from time import monotonic
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
@@ -81,6 +81,10 @@ _RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
 # out-of-band change can go unnoticed while still keeping the common case
 # (several tool calls in one burst) cheap.
 _COLLECTION_CACHE_TTL_SECONDS = 60.0
+
+# How far the daylight-saving transitions written into an attached VTIMEZONE
+# reach (see `_sync_vtimezones`). Matches `_RANGE_MAX`.
+_VTIMEZONE_HORIZON = _RANGE_MAX.date()
 
 # The two supported task<->event link semantics, mapped to the RELATED-TO
 # RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
@@ -428,6 +432,12 @@ def _parse_deleted_at(raw: str | None) -> str | None:
     (`DateTimeInterface::ATOM`, e.g. from newer server versions) - both are
     accepted; anything else parses to None rather than raising, since this is
     a display-only field.
+
+    This is the server's own record of when it deleted something, always
+    UTC-based, so an ISO value that arrives *without* an offset is read as UTC
+    rather than as a local wall clock - unlike caller input, and unlike the
+    floating times foreign clients put in calendar components. It is then
+    rendered in the default timezone like every other timestamp.
     """
     if raw is None:
         return None
@@ -441,9 +451,11 @@ def _parse_deleted_at(raw: str | None) -> str | None:
         pass
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return mapping.format_datetime_output(dt)
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return mapping.format_datetime_output(dt)
 
 
 def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None]:
@@ -469,6 +481,22 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
     return None, None
 
 
+def _zone_preserving_isoformat(value: datetime) -> str:
+    """Render a datetime so that parsing it back keeps its zone, not just its offset.
+
+    `EventFields` takes strings, so anything handed to it internally
+    (`create_event_from_task`) has to survive a second trip through
+    `mapping.parse_datetime_input`. `isoformat()` writes a numeric offset,
+    which names an instant but no zone - the event would end up pinned to a UTC
+    instant instead of anchored to the zone its start was resolved in. The
+    "<naive datetime> <IANA name>" form that same parser accepts keeps it.
+    """
+    zone = value.tzinfo
+    if isinstance(zone, ZoneInfo):
+        return f"{value.replace(tzinfo=None).isoformat()} {zone.key}"
+    return value.isoformat()
+
+
 def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     """Ensure `vcal` has a VTIMEZONE for every IANA zone `component` uses.
 
@@ -481,6 +509,14 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     one (via `icalendar.Timezone.from_tzinfo`) for each such zone and adds
     it to `vcal`, skipping any TZID `vcal` already has (mirroring
     `export_calendar`'s `seen_tzids` de-dup pattern).
+
+    `icalendar` writes the zone's transitions as an explicit RDATE list rather
+    than as a recurrence rule, and stops at 2038-01-01 unless told otherwise;
+    a client reading such a component applies the last observance it finds to
+    every later date, so a weekly event's summer occurrences would come out an
+    hour off from 2038 on. The list is therefore generated up to
+    `_VTIMEZONE_HORIZON` instead, at a cost of about 2 KB per written event -
+    the same horizon `_RANGE_MAX` already treats as "far enough".
     """
     seen_tzids = {str(c.get("TZID", "")) for c in vcal.subcomponents if c.name == "VTIMEZONE"}
     zones: dict[str, ZoneInfo] = {}
@@ -506,7 +542,9 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
         # any VEVENT/VTODO already in `vcal` - required by RFC 5545 3.6.5,
         # and `update_event` syncs onto a component already carrying its
         # VEVENT, unlike `create_event`'s empty `vcal`.
-        vcal.subcomponents.insert(0, Timezone.from_tzinfo(zone, tzid=tzid))
+        vcal.subcomponents.insert(
+            0, Timezone.from_tzinfo(zone, tzid=tzid, last_date=_VTIMEZONE_HORIZON)
+        )
         seen_tzids.add(tzid)
 
 
@@ -1205,24 +1243,55 @@ class CalDavService:
         only_open: bool = True,
         due_before: str | None = None,
         due_after: str | None = None,
+        limit: int | None = None,
+        *,
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
-        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
 
+        `list_names` is a display name, a list of them, or `None` for every
+        task list on the account; an empty list is an empty scope (no request,
+        no results - the filter arguments are still validated). Repeating a
+        name queries that list once, not twice. `""` is a name like any other,
+        i.e. an unknown one.
+
         `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
         parsed results via `mapping.filter_tasks`. Each task dict gains a "liste"
-        key set to its task list display name.
+        key set to its task list display name. That name is what every other task
+        tool takes, with one honest exception: Nextcloud permits two task lists to
+        share a display name, and then "liste" cannot tell them apart (nor can any
+        by-name call - `_resolve_collection` reports such a name as ambiguous
+        rather than guessing). Renaming one of them in Nextcloud is the only fix.
+
+        Anything added to this signature goes after `limit`, keyword-only: the
+        parameters up to and including `limit` are a positional prefix callers
+        may rely on.
         """
+        if isinstance(list_names, str):
+            list_names = [list_names]
         if list_names is not None and not list_names:
-            return []
+            # Nothing to query, but a caller passing limit=0 or an unknown
+            # prioritaet still deserves to hear about it rather than get a
+            # plausible-looking empty result.
+            return mapping.filter_tasks(
+                [],
+                due_before=due_before,
+                due_after=due_after,
+                prioritaet=prioritaet,
+                tag=tag,
+                suchtext=suchtext,
+                limit=limit,
+            )
 
         with self._lock:
-            tasks = self._collect_tasks(list_names, only_open)
+            if list_names is None:
+                tasks = self._tasks_from_every_list(only_open)
+            else:
+                tasks = self._tasks_from_named_lists(list_names, only_open)
 
-        result = mapping.filter_tasks(
+        return mapping.filter_tasks(
             tasks,
             due_before=due_before,
             due_after=due_after,
@@ -1231,61 +1300,94 @@ class CalDavService:
             suchtext=suchtext,
             limit=limit,
         )
-        # "quelle_url" is collected alongside "liste" for `get_agenda`'s
-        # provenance (see `_collect_tasks`), but isn't part of this method's
-        # documented return shape - only `get_agenda` keeps it.
-        for item in result:
-            item.pop("quelle_url", None)
-        return result
 
-    def _collect_tasks(
-        self, list_names: list[str] | str | None, only_open: bool
+    def _parse_todos(
+        self, todos: Iterable[Any], list_name: str, list_url: str
     ) -> list[dict[str, Any]]:
-        """Query and parse VTODOs from the target task lists.
+        """Parse one list's VTODO objects, stamping each with the list it came from."""
+        parsed = []
+        for todo in todos:
+            task = mapping.parse_vtodo(todo.icalendar_component)
+            task["liste"] = list_name
+            task["liste_url"] = list_url
+            parsed.append(task)
+        return parsed
 
-        Shared by `list_tasks` and `get_agenda` so the two can never disagree
-        about which tasks a given (list_names, only_open) selection matches -
-        `get_agenda` applies the exact same query, then its own due-date
-        filter, rather than re-deriving the logic. Each parsed dict carries
-        "liste" (the task list's display name) and "quelle_url" (the CalDAV
-        URL of the specific list it was actually read from - the *resolved*
-        collection, so it reflects a stale-cache retry if one happened, see
-        `_with_collection`). `list_tasks` strips "quelle_url" before
-        returning; `get_agenda` keeps it, since that's what makes a returned
-        task traceable to one specific list even when two lists share a
-        display name (the failure mode this was added for).
+    def _tasks_from_named_lists(
+        self, list_names: list[str], only_open: bool
+    ) -> list[dict[str, Any]]:
+        """Tasks from the named lists, each queried through the cache-aware path.
 
-        Must be called with `self._lock` held, like every other CalDAV op.
-        An explicit empty `list_names` list needs no special-casing here: it
-        already means "these zero lists" to `_task_lists`, so the loop below
-        simply iterates zero targets and returns `[]`.
+        Names are de-duplicated (keeping the caller's order): the same list
+        named twice used to be fetched twice, so every one of its tasks
+        appeared twice in the result. Each name is resolved once, inside
+        `_with_collection` - which also means a resolution failure is
+        translated like any other CalDAV error, and a stale cache entry is
+        re-resolved once.
         """
 
-        def op(calendar: DAVCalendar) -> tuple[list[Any], str]:
-            todos = calendar.todos(include_completed=not only_open)
-            return list(todos), str(calendar.url)
+        def op(calendar: DAVCalendar):
+            return calendar.todos(include_completed=not only_open), str(calendar.url)
 
-        targets = self._task_lists(list_names)
         tasks: list[dict[str, Any]] = []
-        for name, target_calendar in targets:
+        for name in dict.fromkeys(list_names):
             try:
-                if list_names is not None:
-                    todos, source_url = self._with_collection(name, "VTODO", op)
-                else:
-                    todos, source_url = op(target_calendar)
+                todos, url = self._with_collection(name, "VTODO", op)
             except TaskMcpError:
                 raise
             except caldav_error.NotFoundError as exc:
                 raise TaskListNotFoundError(f"Task list '{name}' was not found.") from exc
             except Exception as exc:
                 raise _translate(exc) from exc
+            tasks.extend(self._parse_todos(todos, name, url))
+        return tasks
 
-            for todo in todos:
-                parsed = mapping.parse_vtodo(todo.icalendar_component)
-                parsed["liste"] = name
-                parsed["quelle_url"] = source_url
-                tasks.append(parsed)
+    def _tasks_from_every_list(
+        self, only_open: bool, *, may_retry: bool = True
+    ) -> list[dict[str, Any]]:
+        """Tasks from every VTODO collection on the account.
 
+        The collections are queried as the objects the (cached) listing
+        returned rather than re-resolved by name, which is what keeps two
+        lists sharing a display name both reachable - that name is ambiguous
+        on purpose. The cost is that `_with_collection`'s stale-cache retry
+        doesn't apply here, so it is done once over the whole pass instead: a
+        404 anywhere in the pass means the cached listing is out of date (the
+        list was deleted or recreated server-side), the caches are dropped and
+        the pass is repeated against a freshly listed set. Without it, one
+        deleted task list would make every all-lists query fail for the
+        remaining life of the process.
+
+        "Anywhere in the pass" includes enumerating the lists: reading a
+        cached collection's display name is itself a request, so `_task_lists`
+        is inside the retry rather than in front of it. A stale object found
+        there would otherwise escape as a generic not-found error with the
+        cache left untouched - the same permanent failure, one call earlier.
+        """
+        tasks: list[dict[str, Any]] = []
+        name: str | None = None
+        try:
+            try:
+                for name, calendar in self._task_lists():
+                    todos = calendar.todos(include_completed=not only_open)
+                    tasks.extend(self._parse_todos(todos, name, str(calendar.url)))
+            except caldav_error.NotFoundError as exc:
+                if may_retry:
+                    self._invalidate_collection_caches()
+                    return self._tasks_from_every_list(only_open, may_retry=False)
+                # A freshly listed collection that still 404s is genuinely
+                # gone mid-request, not a stale cache entry. `name` is None
+                # when the enumeration itself failed, before any list was
+                # named.
+                raise TaskListNotFoundError(
+                    f"Task list '{name}' was not found."
+                    if name is not None
+                    else "A task list was not found while listing the task lists."
+                ) from exc
+        except TaskMcpError:
+            raise
+        except Exception as exc:
+            raise _translate(exc) from exc
         return tasks
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
@@ -1408,23 +1510,17 @@ class CalDavService:
         parsed = mapping.parse_datetime_input(value)
         if isinstance(parsed, datetime):
             return parsed
-        day_start = datetime.combine(parsed, time.min, tzinfo=mapping.get_default_timezone())
-        return day_start + timedelta(days=1) if exclusive_end else day_start
+        return mapping.local_midnight(parsed + timedelta(days=1) if exclusive_end else parsed)
 
-    def _task_lists(self, list_names: list[str] | str | None) -> list[tuple[str, DAVCalendar]]:
-        """Return (display name, calendar) pairs for the VTODO task lists to query.
+    def _task_lists(self) -> list[tuple[str, DAVCalendar]]:
+        """Return (display name, calendar) pairs for every VTODO task list on the account.
 
-        With explicit `list_names`, each is resolved individually (going
-        through the cache); unknown names raise `TaskListNotFoundError`
-        instead of being skipped, so a typo can't silently produce an empty
-        result. With `None`, every VTODO-supporting calendar on the account
-        is returned, freshly listed.
+        Read from the cached collection listing (`_list_collections`), not
+        re-listed per call. Named lists deliberately don't come through here:
+        they are resolved one at a time by `_with_collection`, so an unknown
+        name raises `TaskListNotFoundError` instead of being skipped and a
+        typo can't silently produce an empty result.
         """
-        if isinstance(list_names, str):
-            list_names = [list_names]
-        if list_names is not None:
-            return [(name, self._get_collection(name, "VTODO")) for name in list_names]
-
         calendars = self._list_collections()
         result: list[tuple[str, DAVCalendar]] = []
         for calendar in calendars:
@@ -2043,10 +2139,26 @@ class CalDavService:
                     "for the event instead."
                 )
 
-            parsed_start = mapping.parse_datetime_input(start_spec)
+            parsed_start = mapping.parse_datetime_input(start_spec, keep_zone=True)
+            if isinstance(parsed_start, datetime) and start is None:
+                # A task's due date is stored as a bare UTC instant (VTODOs
+                # keep no zone) and read back with a numeric offset, so there
+                # is no zone left to carry over - but the wall clock the caller
+                # originally typed was in the server's default zone, and a
+                # timebox should look like the event that same value would
+                # produce through `create_event`. An explicit `start` argument
+                # keeps `create_event`'s own rules instead: a named zone is
+                # preserved below, a numeric offset stays UTC.
+                parsed_start = parsed_start.astimezone(mapping.get_default_timezone())
             if isinstance(parsed_start, datetime):
-                ende = (parsed_start + timedelta(minutes=dauer_minuten)).isoformat()
-                start_value = parsed_start.isoformat()
+                # `dauer_minuten` is a real duration: adding it to a zone-aware
+                # datetime would do wall-clock arithmetic, stretching a block
+                # that spans a DST change by the transition's own hour.
+                parsed_end = (
+                    parsed_start.astimezone(timezone.utc) + timedelta(minutes=dauer_minuten)
+                ).astimezone(parsed_start.tzinfo)
+                start_value = _zone_preserving_isoformat(parsed_start)
+                ende = _zone_preserving_isoformat(parsed_end)
             else:
                 # All-day due date -> one-day all-day event (inclusive end).
                 start_value = parsed_start.isoformat()
@@ -2087,7 +2199,17 @@ class CalDavService:
         enough to trace a surprising agenda entry back to a real collection;
         the URL is unambiguous. This is what makes a future "agenda shows
         something no other tool can find" report traceable to one specific
-        collection instead of a guess.
+        collection instead of a guess. (Tasks additionally retain their
+        "liste_url" from `list_tasks`).
+
+        Because a CalDAV time-range REPORT resolves all-day and floating values
+        in the *calendar collection's* timezone (RFC 4791 9.9) - the Nextcloud
+        account's setting, which need not be `MCP_DEFAULT_TIMEZONE` - the event
+        query covers the neighbouring days as well and the local day is cut out
+        of the result here (`event_mapping.events_in_window`). Otherwise a
+        neighbouring day's all-day event can appear in the agenda, or a
+        floating one an hour before midnight go missing, purely from the two
+        zones disagreeing.
         """
         parsed = mapping.parse_datetime_input(datum)
         if isinstance(parsed, datetime):
@@ -2095,11 +2217,25 @@ class CalDavService:
                 f"datum must be a date-only 'YYYY-MM-DD' string, got '{datum}'."
             )
 
-        with self._lock:
-            raw_events = self._collect_events(calendar_names, datum, datum, expand=True)
-            termine = event_mapping.filter_events(raw_events, suchtext=None, tag=None, limit=None)
+        day_start, day_end = event_mapping.local_day_window(parsed)
 
-            raw_tasks = self._collect_tasks(list_names, only_open=True)
+        with self._lock:
+            raw_events = self._collect_events(
+                calendar_names,
+                von=(parsed - timedelta(days=1)).isoformat(),
+                bis=(parsed + timedelta(days=1)).isoformat(),
+                expand=True,
+            )
+            filtered_events = event_mapping.filter_events(
+                raw_events, suchtext=None, tag=None, limit=None
+            )
+            termine = event_mapping.events_in_window(filtered_events, day_start, day_end)
+
+            if list_names is None:
+                raw_tasks = self._tasks_from_every_list(only_open=True)
+            else:
+                raw_tasks = self._tasks_from_named_lists(list_names, only_open=True)
+
             aufgaben = mapping.filter_tasks(
                 raw_tasks,
                 due_before=datum,
@@ -2109,6 +2245,9 @@ class CalDavService:
                 suchtext=None,
                 limit=None,
             )
+
+            for task in aufgaben:
+                task["quelle_url"] = task["liste_url"]
 
             return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
 
@@ -2188,8 +2327,15 @@ class CalDavService:
         address = benutzer if is_mailto else f"mailto:{benutzer}"
         bare = address[len("mailto:") :]
 
+        # RFC 5545 3.6.4 (and RFC 6638's scheduling profile of it): a
+        # VFREEBUSY's DTSTART/DTEND are UTC. caldav puts these datetimes
+        # straight into the VFREEBUSY it POSTs, where `icalendar` would write a
+        # zone-aware bound as `DTSTART;TZID=Europe/Berlin:...` - a TZID
+        # reference in a request that carries no VTIMEZONE to resolve it with.
         try:
-            response = principal.freebusy_request(start, end, [address])
+            response = principal.freebusy_request(
+                start.astimezone(timezone.utc), end.astimezone(timezone.utc), [address]
+            )
         except TaskMcpError:
             raise
         except Exception as exc:

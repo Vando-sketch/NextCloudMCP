@@ -102,7 +102,8 @@ def test_list_notes_excludes_content_and_parses_summaries():
             "titel": "Foo",
             "kategorie": None,
             "favorit": False,
-            "geaendert": "1970-01-01T00:00:00+00:00",
+            # Output timestamps carry the server's default timezone.
+            "geaendert": "1970-01-01T01:00:00+01:00",
         }
     ]
     assert captured[0].url.params["exclude"] == "content"

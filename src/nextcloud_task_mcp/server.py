@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 from . import event_mapping, mapping, notes_mapping
 from .caldav_client import CalDavService
 from .config import Settings, is_local_hostname
-from .errors import InvalidTaskDataError, TaskMcpError
+from .errors import TaskMcpError
 from .notes_client import NotesService
 from .personal_auth import PersonalAuthProvider
 
@@ -173,17 +173,21 @@ def build_server(
         nur_offene: bool = True,
         faellig_vor: str | None = None,
         faellig_nach: str | None = None,
+        limit: int | None = None,
+        *,
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
-        limit: int | None = None,
         list_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """List tasks across one, several, or all Nextcloud task lists.
 
         Args:
             listen_namen: Optional list of task list display names to query;
-                None queries every task list on the account.
+                None queries **every** task list on the account. That is one
+                request per list and returns every open task in the account
+                unless something narrows it - pass `listen_namen`, a due-date
+                bound, or `limit` unless you really want the lot.
             nur_offene: If True (default), only return tasks that are not completed.
             faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
@@ -191,18 +195,24 @@ def build_server(
             faellig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
-            prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
-            tag: Optional category/tag filter (exact, case-insensitive match).
-            suchtext: Optional case-insensitive substring filter over title (titel)
-                and notes (notizen).
             limit: Optional maximum number of results to return (must be > 0).
+            prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
+            tag: Optional category/tag filter (exact match).
+            suchtext: Optional substring filter over title (titel) and notes
+                (notizen). Both it and `tag` ignore case and Unicode spelling
+                ("STRASSE" matches "Straße").
             list_name: Deprecated alias for `listen_namen` (takes a single list display name).
                 Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
                 is an error.
 
-        If `faellig_vor` and/or `faellig_nach` is given, tasks with no faellig_datum
-        (due date) at all are excluded - they can't be judged "before"/"after"
-        anything. Results are sorted by faellig_datum ascending (tasks without a due date last),
+        An empty string is "no filter" for every filter that takes one -
+        prioritaet, tag, suchtext, faellig_vor and faellig_nach alike. (`limit`
+        still rejects 0: omit it rather than ask for zero results.) An empty
+        `listen_namen` list is an empty scope and returns nothing.
+
+        If `faellig_vor` and/or `faellig_nach` is given, tasks with no readable
+        faellig_datum (due date) are excluded - they can't be judged "before"/"after"
+        anything. Results are sorted by faellig_datum ascending (those tasks last),
         then by titel. `limit` is applied last, after merging across lists.
 
         Returns:
@@ -211,20 +221,17 @@ def build_server(
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
-            accepts), notizen, uebergeordnete_uid (None unless the task is a
+            accepts; alarms whose trigger this form cannot express are omitted,
+            and update_task leaves those untouched), notizen,
+            uebergeordnete_uid (None unless the task is a
             subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
-            or None if the task doesn't recur; read-only - this server can't
-            create/edit recurrence), and liste (the display name of the task list
-            containing the task).
+            create/edit recurrence), liste (the display name of the task list
+            containing the task), and liste_url (the collection URL of the task
+            list, which tells same-named lists apart, though no tool accepts a
+            URL to act on them - an ambiguous name still must be renamed).
         """
         if list_name is not None and listen_namen is not None:
-
-            def _fail_alias():
-                raise InvalidTaskDataError(
-                    "list_name is the deprecated alias of listen_namen; pass only one"
-                )
-
-            await _call(_fail_alias)
+            raise ToolError("list_name is the deprecated alias of listen_namen; pass only one")
 
         target_list_names: list[str] | None
         if list_name is not None:
@@ -255,9 +262,10 @@ def build_server(
             task_uid: UID of the task to fetch.
 
         Returns:
-            A task dict with the same shape as one entry from list_tasks: uid,
-            titel, start_datum, faellig_datum, prioritaet, fortschritt_prozent,
-            status, ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
+            A task dict holding what one entry from list_tasks holds, minus its
+            "liste" key (the list is `list_name`, which you passed): uid, titel,
+            start_datum, faellig_datum, prioritaet, fortschritt_prozent, status,
+            ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
             wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
@@ -293,6 +301,9 @@ def build_server(
             erinnerungen: Optional list of reminders, each either a relative RFC 5545
                 duration (e.g. "-P1D", "-PT1H", relative to faellig_datum, falling
                 back to start_datum) or an absolute ISO 8601 datetime -> VALARM.
+                The leading "-" is what makes a relative reminder fire *before*
+                that date; a positive duration ("PT30M") is valid and means 30
+                minutes *after* it.
             notizen: Optional notes -> DESCRIPTION.
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
@@ -519,7 +530,9 @@ def build_server(
             tags, erinnerungen (list of reminder strings, each either a relative
             RFC 5545 duration like "-PT30M" or an absolute ISO 8601 datetime
             like "2026-08-07T09:00:00+00:00", exactly what create_event/update_event
-            accepts), status ("bestätigt"/"vorläufig"/"abgesagt" or None),
+            accepts; alarms whose trigger this form cannot express - an
+            end-anchored one, say - are omitted, and update_event leaves those
+            untouched), status ("bestätigt"/"vorläufig"/"abgesagt" or None),
             sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten,
             url, verknuepfte_aufgaben (RELATED-TO links; each entry's
             "beziehung" uses the same values as link_task_to_event's
@@ -600,7 +613,9 @@ def build_server(
                 occurrences of a recurring event -> EXDATE.
             erinnerungen: Optional reminders, each either a relative RFC 5545
                 duration before the start (e.g. "-PT30M", "-P1D") or an
-                absolute ISO 8601 datetime -> VALARM.
+                absolute ISO 8601 datetime -> VALARM. The leading "-" is what
+                makes a relative reminder fire *before* the start; a positive
+                duration ("PT30M") is valid and means 30 minutes *after* it.
             url: Optional URL -> URL.
             verknuepfte_aufgabe: Optional UID of an existing task this event
                 reserves time for -> RELATED-TO;RELTYPE=PARENT on the event

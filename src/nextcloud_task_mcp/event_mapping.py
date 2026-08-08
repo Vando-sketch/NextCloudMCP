@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from dateutil.rrule import rrulestr
 from icalendar import vRecur
 
 from .errors import InvalidEventDataError, InvalidTaskDataError
@@ -13,10 +15,12 @@ from .mapping import (
     VISIBILITY_LABELS,
     _extract_categories,
     _set,
-    build_alarm,
+    apply_alarms,
     extract_alarms,
     format_datetime_output,
     get_default_timezone,
+    local_midnight,
+    names_timezone,
     parse_datetime_input,
     visibility_label_to_ical,
 )
@@ -27,6 +31,12 @@ STATUS_LABELS: dict[str, str] = {
     "abgesagt": "CANCELLED",
 }
 _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
+
+#: How many occurrences of a series `_check_exdates_match_occurrences` expands
+#: before giving up on proving that an exception date names one of them. Ten
+#: thousand covers any plausible real series (192 years of weekly occurrences,
+#: 27 of daily ones) and takes ~20 ms even for a per-second rule.
+_RECURRENCE_SCAN_LIMIT = 10_000
 
 # RFC 5545 RELTYPE -> German relation name used in the `verknuepfte_aufgaben`
 # entries returned by `parse_vevent`. A RELATED-TO property without an
@@ -131,9 +141,12 @@ class EventFields:
     string of exactly the form "YYYY-MM-DD" makes the event all-day
     (VALUE=DATE), a naive datetime is interpreted in the server's default
     timezone and, since events pass `keep_zone=True`, keeps that zone
-    (DTSTART;TZID=...) instead of collapsing to UTC. For all-day events
-    `ende` is the *inclusive* last day; RFC 5545 DTEND is exclusive, so one
-    day is added when writing and subtracted again when parsing.
+    (DTSTART;TZID=...) instead of collapsing to UTC. A value that carries only
+    a numeric offset (the form `parse_vevent` returns) is re-expressed in the
+    zone the event is already anchored to, same instant - see `_anchored`. For
+    all-day events `ende` is the *inclusive* last day; RFC 5545 DTEND is
+    exclusive, so one day is added when writing and subtracted again when
+    parsing.
 
     `teilnehmer`, when set, *replaces* the event's full ATTENDEE set (not an
     append). Each entry is {"email": str (required), "name": str (optional),
@@ -250,6 +263,70 @@ def _parse_datetime(value: str) -> date | datetime:
         raise InvalidEventDataError(str(exc)) from None
 
 
+def _component_start(event) -> date | datetime | None:
+    """The component's DTSTART value, or None if it has none this module can read.
+
+    A `date` for an all-day event, a `datetime` otherwise - the two kinds every
+    other value of the component has to agree with.
+    """
+    prop = event.get("dtstart")
+    value = getattr(prop, "dt", None) if prop is not None else None
+    return value if isinstance(value, (date, datetime)) else None
+
+
+def _component_zone(event) -> tzinfo | None:
+    """The zone the component's DTSTART is expressed in, or None.
+
+    None for an all-day (date-valued) or absent DTSTART, and for a floating
+    one - none of those anchor anything to a zone.
+    """
+    value = _component_start(event)
+    return value.tzinfo if isinstance(value, datetime) else None
+
+
+def _wire_zone(zone: tzinfo | None) -> tzinfo:
+    """The zone a component's values are written in, given its DTSTART's zone.
+
+    An IANA zone is written as a `TZID` reference (with a matching VTIMEZONE,
+    see `caldav_client._sync_vtimezones`); anything else - a bare UTC instant,
+    or a fixed offset left by another client - is written as UTC, since
+    `icalendar` would otherwise emit a nonstandard `TZID="UTC+02:00"` naming no
+    real zone. Shared by everything that has to put several values of one
+    component into the same form: DTSTART/DTEND (`_anchored`) and EXDATE
+    (`_exdate_values`).
+    """
+    return zone if isinstance(zone, ZoneInfo) else timezone.utc
+
+
+def _anchored(value: date | datetime, zone: tzinfo | None) -> date | datetime:
+    """Express a datetime in the component's own zone, keeping the instant.
+
+    Whichever zone a value arrived in - the default one this server attaches to
+    naive input, or the plain UTC `parse_datetime_input` turns an explicit
+    "+02:00" into - it is written in the zone the component's DTSTART already
+    uses. Two things depend on that:
+
+    - `get_event` -> `update_event` must not re-anchor a recurring event to a
+      fixed UTC instant, the one form that reintroduces DST drift;
+    - DTSTART and DTEND must not end up anchored to *different* zones. Two such
+      ends are the same instant apart on the day they are written and an hour
+      apart after the next transition in either zone, so the event silently
+      changes length and nothing in the write path can see it (finding 2.5).
+
+    Only the spelling changes; the instant stays whatever the input meant,
+    including the rule that a naive value means the server's default timezone.
+    Moving an event to another zone is done by *naming* that zone, which
+    `apply_event_fields` handles before calling this (`mapping.names_timezone`).
+
+    `zone` is None when the component has no datetime DTSTART to anchor to (an
+    all-day or absent one), and dates carry no zone at all: both pass through.
+    Values always come from `_parse_datetime`, so a datetime here is aware.
+    """
+    if zone is None or not isinstance(value, datetime):
+        return value
+    return value.astimezone(_wire_zone(zone))
+
+
 def _as_utc(value: datetime) -> datetime:
     """Make a datetime comparable: a naive value is read in the default zone.
 
@@ -264,15 +341,16 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=get_default_timezone())
 
 
-def _local_midnight(value: date) -> datetime:
-    """Start of an all-day date, in the server's default timezone.
+def _utc_value(value: datetime) -> datetime:
+    """Read a value the format itself defines as UTC (a naive one included).
 
-    All-day values carry no time, so any comparison has to pick an instant for
-    them. `caldav_client._range_bound` and `mapping._to_comparable_datetime`
-    pick local midnight; these helpers must agree, or an all-day event's busy
-    block would start (and end) at the wrong hour of its own day.
+    The counterpart to `_as_utc` for properties RFC 5545 requires to be UTC -
+    FREEBUSY periods - where a missing `Z` is a spelling mistake rather than a
+    floating local time.
     """
-    return datetime.combine(value, time.min, tzinfo=get_default_timezone())
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _parse_rrule(text: str) -> vRecur:
@@ -293,6 +371,148 @@ def _parse_rrule(text: str) -> vRecur:
             "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
         )
     return recur
+
+
+def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
+    """Parse `ausnahme_daten` entries into values anchored to the event's DTSTART.
+
+    Every value of one EXDATE property shares that property's parameters, so
+    they must all be expressed the same way: in the zone DTSTART names when it
+    has one, in UTC otherwise. Mixing them lets `icalendar` write a single
+    `TZID=` next to a value that still carries its own `Z` suffix - forbidden
+    by RFC 5545 3.2.19, and invisible when read back - and, more importantly,
+    an exception date only cancels an occurrence when it names the same moment
+    the recurrence set produced, which is DTSTART's moment in DTSTART's zone.
+
+    Only the spelling is adjusted: each entry keeps the instant it parsed to,
+    including the rule that a naive entry means the server's default timezone.
+
+    For the same reason - one property, one set of parameters - every entry
+    must be the same *kind* as the event's own start: date-only entries for an
+    all-day event, datetimes otherwise. A mixed set (or the wrong kind) is
+    rejected rather than written: `icalendar` would put a DATE and a DATE-TIME
+    under one property with a single `TZID`, which RFC 5545 3.8.5.1 (one value
+    type per property) and 3.2.19 (no TZID on a value without local time) both
+    forbid, and which reads back looking fine. A date-only exception on a timed
+    series names no occurrence of it in any case.
+    """
+    start_value = _component_start(event)
+    all_day_event = start_value is not None and not isinstance(start_value, datetime)
+
+    target = _wire_zone(_component_zone(event))
+    values: list[date | datetime] = []
+    for entry in entries:
+        value = _parse_datetime(entry)
+        if isinstance(value, datetime):
+            value = value.astimezone(target)
+        values.append(value)
+
+    kinds = {isinstance(value, datetime) for value in values}
+    if start_value is not None:
+        kinds.add(not all_day_event)
+    if len(kinds) > 1:
+        if start_value is None:
+            raise InvalidEventDataError(
+                "ausnahme_daten entries must all be of one kind: either date-only "
+                "'YYYY-MM-DD' values or full datetimes, not both."
+            )
+        expected = "date-only 'YYYY-MM-DD' values" if all_day_event else "full datetimes"
+        state = "all-day" if all_day_event else "not all-day"
+        raise InvalidEventDataError(
+            f"ausnahme_daten entries must match the event's start: use {expected}, "
+            f"because the event is {state}."
+        )
+    return values
+
+
+def _occurrence_key(value: date | datetime, *, all_day: bool) -> date | datetime:
+    """Identity of one occurrence, for comparing exception dates against a series.
+
+    An all-day series is compared by date (`dateutil` yields its occurrences as
+    naive midnights); a timed one by instant, so an exception written in the
+    event's zone and an occurrence computed in it match whatever offset each
+    side happens to be spelled with.
+    """
+    if all_day:
+        return value.date() if isinstance(value, datetime) else value
+    return _as_utc(value).astimezone(timezone.utc) if isinstance(value, datetime) else value
+
+
+def _rdate_values(event) -> list[date | datetime]:
+    """Every RDATE value on the component (extra dates of the recurrence set)."""
+    rdate = event.get("rdate")
+    if rdate is None:
+        return []
+    entries = rdate if isinstance(rdate, list) else [rdate]
+    values: list[date | datetime] = []
+    for entry in entries:
+        for item in getattr(entry, "dts", []):
+            value = getattr(item, "dt", None)
+            if isinstance(value, (date, datetime)):
+                values.append(value)
+    return values
+
+
+def _check_exdates_match_occurrences(
+    event, entries: list[str], values: list[date | datetime]
+) -> None:
+    """Reject an exception date that names no occurrence of the event's series.
+
+    An EXDATE only cancels something when it names exactly a moment the
+    recurrence set produces. Miss it - by a day, by an hour, or by writing a
+    naive value that means the server's default timezone while the series runs
+    on another one - and the exception is stored, the occurrence stays, and
+    nothing anywhere says so. That silence was half of finding 2.2; the zone
+    anchoring above removed the most common cause, this reports what is left.
+
+    Deliberately best-effort, and never a false alarm:
+
+    - without an RRULE there is no occurrence set to check against (an EXDATE
+      on a non-recurring event is pointless, but that is not this check's
+      business), and neither is there when the rule or DTSTART is one
+      `dateutil` refuses;
+    - RDATE values count as occurrences too, being part of the same set;
+    - the scan stops after `_RECURRENCE_SCAN_LIMIT` occurrences and passes.
+      A per-second rule would otherwise be expanded a year deep to prove a
+      point, and "we could not check this cheaply" must not read as "this is
+      wrong".
+    """
+    rrule_prop = event.get("rrule")
+    dtstart_value = _component_start(event)
+    if rrule_prop is None or dtstart_value is None or not values:
+        return
+    all_day = not isinstance(dtstart_value, datetime)
+
+    wanted: dict[Any, str] = {}
+    for spec, value in zip(entries, values, strict=True):
+        wanted.setdefault(_occurrence_key(value, all_day=all_day), spec)
+    for extra in _rdate_values(event):
+        wanted.pop(_occurrence_key(extra, all_day=all_day), None)
+    if not wanted:
+        return
+    latest = max(wanted)
+
+    try:
+        rule = rrulestr(rrule_prop.to_ical().decode(), dtstart=dtstart_value)
+        for index, occurrence in enumerate(rule):
+            if index >= _RECURRENCE_SCAN_LIMIT:
+                return
+            key = _occurrence_key(occurrence, all_day=all_day)
+            wanted.pop(key, None)
+            if not wanted:
+                return
+            if key > latest:
+                break  # occurrences ascend, so nothing further can match
+    except (ValueError, TypeError, OverflowError):
+        return  # a rule (or a DTSTART) dateutil cannot expand proves nothing
+
+    spec = next(iter(wanted.values()))
+    raise InvalidEventDataError(
+        f"ausnahme_daten entry '{spec}' does not name an occurrence of this event's "
+        "wiederholung, so it would cancel nothing. Pass the occurrence exactly as "
+        "list_events/get_event reported its 'start' - a value without a timezone is "
+        "read in the server's default timezone, not in the event's."
+    )
 
 
 def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:
@@ -356,6 +576,13 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     field (including "titel" and "start", which cannot be cleared), raises
     `InvalidEventDataError`.
 
+    Timestamps are anchored to the zone the event already carries: a `start`,
+    `ende` or `ausnahme_daten` entry that names no zone of its own (only a
+    numeric offset, which is what `parse_vevent` hands back) is written in the
+    event's own DTSTART zone rather than as a bare UTC instant, so reading an
+    event and writing it back leaves it exactly as anchored as it was. See
+    `_anchored` and `_exdate_values`.
+
     `own_organizer` is the caller's own "mailto:..." address (discovered by
     `CalDavService` via a CalDAV principal lookup - this module makes no
     network calls itself, so the value has to be handed in). It is only used
@@ -383,12 +610,25 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         elif ical_name is not None and ical_name in event:
             del event[ical_name]
 
+    # The zone the event is already anchored to (read before its DTSTART is
+    # replaced), so every value written below goes on the wire in that one zone
+    # instead of each keeping whichever zone it happened to parse in.
+    zone = _component_zone(event)
+
     if fields.titel is not None:
         _set(event, "summary", fields.titel)
     if fields.start is not None:
-        _set(event, "dtstart", _parse_datetime(fields.start))
+        start_value = _parse_datetime(fields.start)
+        if not names_timezone(fields.start):
+            # A start that names no zone means "this instant", not "this event
+            # now lives in that zone" - so it is written in the event's own.
+            # Naming a zone explicitly is how an event is *moved* to one, and
+            # then everything below follows the new anchor.
+            start_value = _anchored(start_value, zone)
+        _set(event, "dtstart", start_value)
+        zone = _component_zone(event)
     if fields.ende is not None:
-        end_value = _parse_datetime(fields.ende)
+        end_value = _anchored(_parse_datetime(fields.ende), zone)
         if not isinstance(end_value, datetime):
             # `ende` is the inclusive last day; RFC 5545 DTEND is exclusive,
             # so the stored all-day end is one day later.
@@ -418,7 +658,10 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         if "exdate" in event:
             del event["exdate"]
         if fields.ausnahme_daten:
-            event.add("exdate", [_parse_datetime(entry) for entry in fields.ausnahme_daten])
+            exdate_entries = list(fields.ausnahme_daten)
+            exdate_values = _exdate_values(event, exdate_entries)
+            _check_exdates_match_occurrences(event, exdate_entries, exdate_values)
+            event.add("exdate", exdate_values)
     if fields.url is not None:
         _set(event, "url", fields.url)
     if fields.verknuepfte_aufgabe is not None:
@@ -464,18 +707,14 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
             _set(event, "organizer", own_organizer)
 
     if fields.erinnerungen is not None:
-        event.subcomponents = [c for c in event.subcomponents if c.name != "VALARM"]
-        has_start = "dtstart" in event
-        title_for_alarm = str(event.get("summary", "Reminder"))
-        for spec in fields.erinnerungen:
-            try:
-                # Relative reminders on a VEVENT resolve against DTSTART
-                # (RELATED=START); there is no DUE. build_alarm raises the
-                # "needs a start" error itself when DTSTART is absent.
-                alarm = build_alarm(spec, title_for_alarm, has_due=False, has_start=has_start)
-            except InvalidTaskDataError as exc:
-                raise InvalidEventDataError(str(exc)) from None
-            event.add_component(alarm)
+        try:
+            # Relative reminders on a VEVENT resolve against DTSTART
+            # (RELATED=START) - a VEVENT has no DUE, so `apply_alarms` derives
+            # that anchor by itself. It raises the "needs a start" error when
+            # DTSTART is absent.
+            apply_alarms(event, list(fields.erinnerungen), str(event.get("summary", "Reminder")))
+        except InvalidTaskDataError as exc:
+            raise InvalidEventDataError(str(exc)) from None
 
     _check_start_end_consistency(event)
 
@@ -712,7 +951,88 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     parsed = _parse_datetime(start)
     if isinstance(parsed, datetime):
         return (0, _as_utc(parsed))
-    return (0, _local_midnight(parsed))
+    return (0, local_midnight(parsed))
+
+
+def local_day_window(day: date) -> tuple[datetime, datetime]:
+    """The [start, end) instants one local day covers in the default timezone.
+
+    The single definition of "a day" for the parts of the server that decide
+    what belongs to one - `get_agenda`'s events, and (via the same local
+    midnights in `mapping._to_comparable_datetime`) its tasks. The end is the
+    *next* day's midnight rather than start + 24h, so a day with a
+    daylight-saving change is the 23 or 25 hours it really has.
+    """
+    return local_midnight(day), local_midnight(day + timedelta(days=1))
+
+
+def _event_interval(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """The instants a parsed event dict covers, or None if that can't be told.
+
+    All-day values are expanded from local midnight to the local midnight
+    after the (inclusive) last day, matching `event_busy_interval`'s treatment
+    of the same components; the returned end is exclusive. None means the
+    event has no usable start, or a start this module can't parse back - a
+    caller must then not draw conclusions from it.
+    """
+    start_text = event.get("start")
+    if not isinstance(start_text, str):
+        return None
+    try:
+        start_value = _parse_datetime(start_text)
+        end_text = event.get("ende")
+        end_value = _parse_datetime(end_text) if isinstance(end_text, str) else None
+    except InvalidEventDataError:
+        return None
+
+    if isinstance(start_value, datetime):
+        start_dt = _as_utc(start_value)
+        end_dt = _as_utc(end_value) if isinstance(end_value, datetime) else start_dt
+    else:
+        start_dt = local_midnight(start_value)
+        last_day = end_value if isinstance(end_value, date) else start_value
+        if isinstance(last_day, datetime):  # mismatched pair from another client
+            last_day = start_value
+        end_dt = local_midnight(last_day + timedelta(days=1))
+    return start_dt, max(end_dt, start_dt)
+
+
+def events_in_window(
+    events: list[dict[str, Any]], start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Keep the parsed events overlapping [start, end), by this server's day rule.
+
+    A CalDAV time-range REPORT is the server's answer, not ours: RFC 4791 9.9
+    has it resolve all-day and floating values in the *collection's* timezone
+    (or UTC), which need not be `MCP_DEFAULT_TIMEZONE` - so its idea of which
+    day an all-day event belongs to can differ from this server's by a few
+    hours, in either direction. Applying the local-day rule here makes the
+    answer this server's own, and match the one its tasks get.
+
+    Two kinds of event are kept unconditionally, because their dict says
+    nothing about which moment matched the query: one that still carries a
+    `wiederholung` (a series master a server answered with instead of
+    expanding it - its DTSTART is the first occurrence, not the matching one),
+    and one with no usable start. Dropping either would hide a real event to
+    tidy up a boundary.
+    """
+    kept: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("wiederholung"):
+            kept.append(event)
+            continue
+        interval = _event_interval(event)
+        if interval is None:
+            kept.append(event)
+            continue
+        event_start, event_end = interval
+        if event_end == event_start:
+            # A zero-length event occupies just its start instant.
+            if start <= event_start < end:
+                kept.append(event)
+        elif event_start < end and event_end > start:
+            kept.append(event)
+    return kept
 
 
 def filter_events(
@@ -768,7 +1088,7 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
 
     Both ends are timezone-aware: a value written without a zone by another
     client is read in the server's default timezone (`_as_utc`), and an
-    all-day date is expanded from local midnight (`_local_midnight`), so the
+    all-day date is expanded from local midnight (`mapping.local_midnight`), so the
     interval lines up with the day windows the rest of the server builds.
 
     A cancelled event (STATUS=CANCELLED) or a transparent one
@@ -805,7 +1125,7 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
     def _to_instant(value: date | datetime) -> datetime:
         if isinstance(value, datetime):
             return _as_utc(value)
-        return _local_midnight(value)
+        return local_midnight(value)
 
     start_dt = _to_instant(start_value)
     end_dt = _to_instant(end_value)
@@ -848,6 +1168,12 @@ def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
     busy. Handles both wire forms icalendar produces when parsing a VFREEBUSY
     with more than one FREEBUSY property (each period keeps its own FBTYPE
     parameter, even when flattened into one list by icalendar).
+
+    A period value that arrives without its `Z` is read as UTC, *not* in the
+    server's default timezone the way a VEVENT's floating times are: RFC 5545
+    3.8.2.6 requires FREEBUSY periods to be UTC, so a missing `Z` is a sloppy
+    spelling of a UTC value rather than a local wall clock, and reading it
+    otherwise would move every busy block by the default zone's offset.
     """
     freebusy = component.get("freebusy")
     if freebusy is None:
@@ -863,5 +1189,5 @@ def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
         end = getattr(entry, "end", None)
         if start is None or end is None:
             continue
-        periods.append((_as_utc(start), _as_utc(end)))
+        periods.append((_utc_value(start), _utc_value(end)))
     return periods
