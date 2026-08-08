@@ -102,7 +102,8 @@ def test_list_notes_excludes_content_and_parses_summaries():
             "titel": "Foo",
             "kategorie": None,
             "favorit": False,
-            "geaendert": "1970-01-01T00:00:00+00:00",
+            # Output timestamps carry the server's default timezone.
+            "geaendert": "1970-01-01T01:00:00+01:00",
         }
     ]
     assert captured[0].url.params["exclude"] == "content"
@@ -156,6 +157,41 @@ def test_get_note_not_found_raises():
     service = _service(handler)
     with pytest.raises(NotizNotFoundError):
         _run(service.get_note(999))
+
+
+# --- delete_note ---
+
+
+def test_delete_note_issues_delete_request():
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(204)
+
+    service = _service(handler)
+    _run(service.delete_note(42))
+
+    assert captured[0].method == "DELETE"
+    assert captured[0].url.path.endswith("/notes/42")
+
+
+def test_delete_note_not_found_raises():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    service = _service(handler)
+    with pytest.raises(NotizNotFoundError):
+        _run(service.delete_note(999))
+
+
+def test_delete_note_401_raises_authentication_failed_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    service = _service(handler)
+    with pytest.raises(AuthenticationFailedError):
+        _run(service.delete_note(42))
 
 
 # --- create_note ---

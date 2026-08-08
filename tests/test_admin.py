@@ -70,6 +70,57 @@ def test_list_shows_access_and_refresh_tokens_from_a_real_provider(tmp_path, cap
     assert refresh_token not in out
 
 
+def _seed_expiring_token(tmp_path: Path, expires_at: int) -> Path:
+    state_dir = _state_dir(tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "oauth_tokens.json").write_text(
+        json.dumps(
+            {
+                "access_tokens": {"tok-abcdef": {"client_id": "c1", "expires_at": expires_at}},
+                "refresh_tokens": {},
+            }
+        )
+    )
+    return state_dir
+
+
+def test_list_prints_expiry_in_the_servers_default_timezone(tmp_path, capsys, monkeypatch):
+    """The operator reads this next to the server's own output and log lines.
+
+    An expiry printed in UTC while every other timestamp the server produces
+    carries `MCP_DEFAULT_TIMEZONE`'s offset invites exactly one mistake: an
+    admin comparing the two and concluding a token lives two hours longer than
+    it does.
+    """
+    monkeypatch.delenv("MCP_DEFAULT_TIMEZONE", raising=False)
+    state_dir = _seed_expiring_token(tmp_path, 1735689600)  # 2025-01-01T00:00:00Z
+
+    exit_code = admin.main(["--state-dir", str(state_dir), "list"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "expires=2025-01-01T01:00:00+01:00" in out
+
+
+def test_list_expiry_follows_a_configured_mcp_default_timezone(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("MCP_DEFAULT_TIMEZONE", "America/New_York")
+    state_dir = _seed_expiring_token(tmp_path, 1735689600)
+
+    admin.main(["--state-dir", str(state_dir), "list"])
+
+    assert "expires=2024-12-31T19:00:00-05:00" in capsys.readouterr().out
+
+
+def test_list_expiry_falls_back_to_utc_for_an_unusable_timezone(tmp_path, capsys, monkeypatch):
+    """A typo in the environment must not stop an operator from revoking a token."""
+    monkeypatch.setenv("MCP_DEFAULT_TIMEZONE", "Mars/Olympus_Mons")
+    state_dir = _seed_expiring_token(tmp_path, 1735689600)
+
+    admin.main(["--state-dir", str(state_dir), "list"])
+
+    assert "expires=2025-01-01T00:00:00+00:00" in capsys.readouterr().out
+
+
 # --- revoke ---
 
 

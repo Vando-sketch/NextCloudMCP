@@ -79,6 +79,17 @@ class NotesService:
             transport=transport,
         )
 
+    async def aclose(self) -> None:
+        """Close the underlying HTTP client and its connection pool.
+
+        The long-lived server never calls this - its client lives as long as
+        the process does. It exists for callers with a bounded lifetime (the
+        integration tests, which run each scenario in its own event loop):
+        leaving the pool to be garbage-collected after that loop is gone
+        raises `ResourceWarning` and closes sockets on a dead loop.
+        """
+        await self._client.aclose()
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
             response = await self._client.request(method, path, **kwargs)
@@ -103,6 +114,10 @@ class NotesService:
         """Return a single note, including its full content."""
         response = await self._request("GET", f"notes/{notiz_id}")
         return parse_note(response.json())
+
+    async def delete_note(self, notiz_id: int) -> None:
+        """Permanently delete a note by id."""
+        await self._request("DELETE", f"notes/{notiz_id}")
 
     async def create_note(self, fields: NoteFields) -> dict[str, Any]:
         """Create a new note and return it, parsed like `get_note`."""

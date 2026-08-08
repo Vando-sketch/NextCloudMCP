@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from dataclasses import replace
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastmcp.exceptions import ToolError
 
+from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import (
@@ -56,6 +59,7 @@ def test_all_tools_registered(tools):
         "update_task",
         "complete_task",
         "delete_task",
+        "move_task",
         "list_calendars",
         "create_calendar",
         "delete_calendar",
@@ -64,12 +68,16 @@ def test_all_tools_registered(tools):
         "get_event",
         "create_event",
         "update_event",
+        "update_events",
         "delete_event",
+        "delete_events",
+        "move_event",
         "respond_to_event",
         "link_task_to_event",
         "list_events_for_task",
         "create_event_from_task",
         "get_agenda",
+        "list_tags",
         "get_free_busy",
         "share_calendar",
         "unshare_calendar",
@@ -84,6 +92,7 @@ def test_all_tools_registered(tools):
         "update_notiz",
         "append_notiz",
         "search_notizen",
+        "delete_notiz",
     }
 
 
@@ -186,6 +195,12 @@ def test_search_notizen_delegates_to_notes_service(tools, fake_notes_service):
     fake_notes_service.search_notes.assert_called_once_with("Projekt", "Arbeit")
 
 
+def test_delete_notiz_delegates_to_notes_service(tools, fake_notes_service):
+    result = _run(tools["delete_notiz"].fn(2))
+    assert result == {"id": 2}
+    fake_notes_service.delete_note.assert_called_once_with(2)
+
+
 def test_notiz_tools_use_ascii_parameter_names(tools):
     for tool_name in (
         "list_notizen",
@@ -194,6 +209,7 @@ def test_notiz_tools_use_ascii_parameter_names(tools):
         "update_notiz",
         "append_notiz",
         "search_notizen",
+        "delete_notiz",
     ):
         schema = tools[tool_name].parameters
         for prop_name in schema.get("properties", {}):
@@ -208,6 +224,19 @@ def test_create_notiz_requires_only_titel(tools):
 def test_get_notiz_requires_notiz_id(tools):
     schema = tools["get_notiz"].parameters
     assert schema["required"] == ["notiz_id"]
+
+
+def test_delete_notiz_requires_notiz_id(tools):
+    schema = tools["delete_notiz"].parameters
+    assert schema["required"] == ["notiz_id"]
+
+
+def test_delete_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):
+    fake_notes_service.delete_note.side_effect = NotizNotFoundError(
+        "The requested note was not found."
+    )
+    with pytest.raises(ToolError, match="was not found"):
+        _run(tools["delete_notiz"].fn(999))
 
 
 def test_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):
@@ -298,7 +327,14 @@ def test_list_tasks_passes_nur_offene_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(tools["list_tasks"].fn("Personal", nur_offene=False))
     fake_service.list_tasks.assert_called_once_with(
-        "Personal", only_open=False, due_before=None, due_after=None, limit=None
+        list_names=["Personal"],
+        only_open=False,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        limit=None,
     )
 
 
@@ -306,16 +342,74 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(
         tools["list_tasks"].fn(
-            "Personal", faellig_vor="2026-08-01", faellig_nach="2026-07-01", limit=5
+            listen_namen=["Personal"],
+            faellig_vor="2026-08-01",
+            faellig_nach="2026-07-01",
+            prioritaet="hoch",
+            tag="arbeit",
+            suchtext="test",
+            limit=5,
         )
     )
     fake_service.list_tasks.assert_called_once_with(
-        "Personal",
+        list_names=["Personal"],
         only_open=True,
         due_before="2026-08-01",
         due_after="2026-07-01",
+        prioritaet="hoch",
+        tag="arbeit",
+        suchtext="test",
         limit=5,
     )
+
+
+def test_list_tasks_deprecated_list_name_alias_works(tools, fake_service):
+    fake_service.list_tasks.return_value = []
+    _run(tools["list_tasks"].fn(list_name="Personal"))
+    fake_service.list_tasks.assert_called_once_with(
+        list_names=["Personal"],
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        limit=None,
+    )
+
+
+def test_list_tasks_both_list_name_and_listen_namen_raises_error(tools, fake_service):
+    with pytest.raises(ToolError, match="list_name is the deprecated alias of listen_namen"):
+        _run(tools["list_tasks"].fn(list_name="Personal", listen_namen=["Arbeit"]))
+    # The conflict is refused, not resolved: neither argument silently wins.
+    fake_service.list_tasks.assert_not_called()
+
+
+def test_list_tasks_tool_filters_added_after_limit_are_keyword_only(tools):
+    """Same positional prefix as `CalDavService.list_tasks`, for the same reason.
+
+    A filter inserted before `limit` rebinds a positional caller's value
+    without a word; keeping everything after `limit` keyword-only makes that
+    impossible.
+    """
+    params = inspect.signature(tools["list_tasks"].fn).parameters
+    positional = [
+        name for name, p in params.items() if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+
+    assert positional == ["listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"]
+    assert all(
+        params[name].kind is inspect.Parameter.KEYWORD_ONLY
+        for name in ("prioritaet", "tag", "suchtext", "list_name")
+    )
+
+
+def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
+    """Keyword-only parameters must still reach the MCP schema clients read."""
+    properties = tools["list_tasks"].parameters["properties"]
+
+    assert {"listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"} <= set(properties)
+    assert {"prioritaet", "tag", "suchtext", "list_name"} <= set(properties)
 
 
 def test_create_task_maps_german_params_to_service_call(tools, fake_service):
@@ -337,6 +431,43 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
     assert fields.faellig_datum == "2026-07-20"
     assert fields.prioritaet == "hoch"
     assert fields.uebergeordnete_aufgabe == "parent-uid"
+
+
+def test_create_task_passes_wiederholung(tools, fake_service):
+    fake_service.create_task.return_value = "new-uid"
+    _run(
+        tools["create_task"].fn(
+            list_name="Personal",
+            titel="Muell rausbringen",
+            faellig_datum="2026-07-20",
+            wiederholung="FREQ=WEEKLY;BYDAY=MO",
+        )
+    )
+    args, _ = fake_service.create_task.call_args
+    _, fields = args
+    assert fields.wiederholung == "FREQ=WEEKLY;BYDAY=MO"
+
+
+def test_update_task_passes_wiederholung(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", wiederholung="FREQ=DAILY"))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.wiederholung == "FREQ=DAILY"
+
+
+def test_update_task_passes_status(tools, fake_service):
+    """The reopen path has to survive the tool layer, not just the mapping."""
+    _run(tools["update_task"].fn("Personal", "task-uid", status="offen"))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.status == "offen"
+
+
+def test_update_task_passes_felder_leeren_wiederholung_as_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["wiederholung"]))
+    args, _ = fake_service.update_task.call_args
+    _, _, fields = args
+    assert fields.clear == ("wiederholung",)
 
 
 def test_update_task_returns_uid(tools, fake_service):
@@ -374,6 +505,46 @@ def test_delete_task_delegates(tools, fake_service):
     result = _run(tools["delete_task"].fn("Personal", "task-uid"))
     assert result == {"uid": "task-uid"}
     fake_service.delete_task.assert_called_once_with("Personal", "task-uid")
+
+
+def test_move_task_delegates(tools, fake_service):
+    fake_service.move_task.return_value = {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+    }
+    result = _run(
+        tools["move_task"].fn(list_name="Privat", task_uid="task-uid", ziel_liste="Arbeit")
+    )
+    assert result == {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+    }
+    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit")
+
+
+def test_move_event_delegates(tools, fake_service):
+    fake_service.move_event.return_value = {
+        "uid": "event-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "kopiert",
+    }
+    result = _run(
+        tools["move_event"].fn(
+            kalender_name="Privat", event_uid="event-uid", ziel_kalender="Arbeit"
+        )
+    )
+    assert result == {
+        "uid": "event-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "kopiert",
+    }
+    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit")
 
 
 # --- Calendar/event tools ---
@@ -524,6 +695,43 @@ def test_update_event_can_clear_teilnehmer(tools, fake_service):
     )
     (_, _, fields), _ = fake_service.update_event.call_args
     assert fields.clear == ("teilnehmer",)
+
+
+def test_update_events_delegates(tools, fake_service):
+    expected_res = {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
+    }
+    fake_service.update_events.return_value = expected_res
+    res = _run(
+        tools["update_events"].fn(
+            kalender_name="Termine",
+            event_uids=["u1", "u2"],
+            ort="Büro",
+            felder_leeren=["beschreibung"],
+        )
+    )
+    assert res == expected_res
+    (cal_name, uids, fields), _ = fake_service.update_events.call_args
+    assert cal_name == "Termine"
+    assert uids == ["u1", "u2"]
+    assert fields.ort == "Büro"
+    assert fields.clear == ("beschreibung",)
+
+
+def test_delete_events_delegates(tools, fake_service):
+    expected_res = {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
+    }
+    fake_service.delete_events.return_value = expected_res
+    res = _run(tools["delete_events"].fn(kalender_name="Termine", event_uids=["u1", "u2"]))
+    assert res == expected_res
+    fake_service.delete_events.assert_called_once_with("Termine", ["u1", "u2"])
 
 
 # --- respond_to_event ---
@@ -748,9 +956,36 @@ def test_create_event_from_task_delegates(tools, fake_service):
         )
     )
     fake_service.create_event_from_task.assert_called_once_with(
-        "Privat", "task-1", "Termine", None, 30
+        "Privat", "task-1", "Termine", None, 30, None, None, None, None
     )
     assert result == {"uid": "event-uid", "task_uid": "task-1"}
+
+
+def test_create_event_from_task_passes_new_fields(tools, fake_service):
+    fake_service.create_event_from_task.return_value = "event-uid"
+    _run(
+        tools["create_event_from_task"].fn(
+            list_name="Privat",
+            task_uid="task-1",
+            kalender_name="Termine",
+            start="2026-07-20T14:00:00",
+            ende="2026-07-20T16:00:00",
+            beschreibung="",
+            erinnerungen=["-PT30M"],
+            sichtbarkeit="privat",
+        )
+    )
+    fake_service.create_event_from_task.assert_called_once_with(
+        "Privat",
+        "task-1",
+        "Termine",
+        "2026-07-20T14:00:00",
+        None,
+        "2026-07-20T16:00:00",
+        "",
+        ["-PT30M"],
+        "privat",
+    )
 
 
 def test_get_agenda_delegates(tools, fake_service):
@@ -760,6 +995,13 @@ def test_get_agenda_delegates(tools, fake_service):
         "2026-07-20", calendar_names=None, list_names=None
     )
     assert result["datum"] == "2026-07-20"
+
+
+def test_list_tags_delegates(tools, fake_service):
+    fake_service.list_tags.return_value = [{"tag": "Arbeit", "anzahl": 3}]
+    result = _run(tools["list_tags"].fn(kalender_namen=["Cal1"], listen_namen=["List1"]))
+    fake_service.list_tags.assert_called_once_with(calendar_names=["Cal1"], list_names=["List1"])
+    assert result == [{"tag": "Arbeit", "anzahl": 3}]
 
 
 def test_calendar_not_found_becomes_clean_tool_error(tools, fake_service):
@@ -797,7 +1039,20 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
     started = threading.Event()
     release = threading.Event()
 
-    def blocking_list_tasks(list_name, only_open=True, due_before=None, due_after=None, limit=None):
+    def blocking_list_tasks(
+        list_names=None,
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        limit=None,
+        *,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+    ):
+        # Spelled out rather than (*args, **kwargs) on purpose: this is the
+        # one place a test would notice the tool and the service drifting
+        # apart on how list_tasks is called.
         started.set()
         release.wait(timeout=5)
         return []
@@ -892,6 +1147,26 @@ def test_build_server_wires_access_token_expiry_seconds_through(settings, fake_s
     mcp = build_server(public_settings, service=fake_service)
     assert isinstance(mcp.auth, PersonalAuthProvider)
     assert mcp.auth.access_token_expiry_seconds == 5678
+
+
+# --- Default timezone wired through to the mapping layer ---
+#
+# `build_server` is the only place that connects the configured zone to the
+# mapping modules, and every other test runs with the shipped default - so
+# without this test, deleting that one line would leave the suite green while
+# MCP_DEFAULT_TIMEZONE silently stopped working in production.
+
+
+def test_build_server_wires_default_timezone_through(settings, fake_service):
+    public_settings = replace(settings, default_timezone="America/New_York")
+    build_server(public_settings, service=fake_service)
+    assert mapping.get_default_timezone() == ZoneInfo("America/New_York")
+
+
+def test_build_server_applies_shipped_default_timezone(settings, fake_service):
+    mapping.set_default_timezone("UTC")
+    build_server(settings, service=fake_service)
+    assert mapping.get_default_timezone() == ZoneInfo(Settings.default_timezone)
 
 
 # --- main(): access-log-disabled security control must not silently regress (E7) ---

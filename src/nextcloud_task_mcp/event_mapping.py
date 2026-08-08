@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from icalendar import vRecur
@@ -11,13 +11,34 @@ from icalendar import vRecur
 from .errors import InvalidEventDataError, InvalidTaskDataError
 from .mapping import (
     VISIBILITY_LABELS,
+    _anchored,
+    _as_utc,
+    _component_zone,
     _extract_categories,
+    _extract_exdates,
     _set,
     apply_alarms,
     extract_alarms,
+    format_datetime_output,
+    local_midnight,
+    names_timezone,
     parse_datetime_input,
+    parse_rrule_text,
     visibility_label_to_ical,
 )
+from .mapping import (
+    _check_exdates_match_occurrences as _shared_check_exdates,
+)
+from .mapping import _exdate_values as _shared_exdate_values
+
+# `_anchored`, `_as_utc`, `_component_zone`, `_extract_exdates` and the two
+# helpers wrapped further down (`_exdate_values`,
+# `_check_exdates_match_occurrences`) are shared with the VTODO side and
+# therefore live in `mapping`, the lower layer - see the "Shared
+# component/recurrence helpers" block there. `event_mapping` imports `mapping`,
+# so defining them here and importing them from the task side would be an
+# import cycle. The non-raising ones are imported under their own names, so
+# every existing reference in this module keeps reading the same.
 
 STATUS_LABELS: dict[str, str] = {
     "bestätigt": "CONFIRMED",
@@ -127,9 +148,14 @@ class EventFields:
 
     Date semantics: `start`/`ende` follow `mapping.parse_datetime_input` - a
     string of exactly the form "YYYY-MM-DD" makes the event all-day
-    (VALUE=DATE), a naive datetime is interpreted as UTC. For all-day events
-    `ende` is the *inclusive* last day; RFC 5545 DTEND is exclusive, so one
-    day is added when writing and subtracted again when parsing.
+    (VALUE=DATE), a naive datetime is interpreted in the server's default
+    timezone and, since events pass `keep_zone=True`, keeps that zone
+    (DTSTART;TZID=...) instead of collapsing to UTC. A value that carries only
+    a numeric offset (the form `parse_vevent` returns) is re-expressed in the
+    zone the event is already anchored to, same instant - see `_anchored`. For
+    all-day events `ende` is the *inclusive* last day; RFC 5545 DTEND is
+    exclusive, so one day is added when writing and subtracted again when
+    parsing.
 
     `teilnehmer`, when set, *replaces* the event's full ATTENDEE set (not an
     append). Each entry is {"email": str (required), "name": str (optional),
@@ -246,33 +272,64 @@ def _parse_datetime(value: str) -> date | datetime:
         raise InvalidEventDataError(str(exc)) from None
 
 
-def _as_utc(value: datetime) -> datetime:
-    """Make a datetime comparable: a naive value is treated as UTC.
+def _utc_value(value: datetime) -> datetime:
+    """Read a value the format itself defines as UTC (a naive one included).
 
-    Same rule as `mapping.parse_datetime_input` (B2); our own writes always
-    produce aware datetimes, but components written by other clients may not.
+    The counterpart to `_as_utc` for properties RFC 5545 requires to be UTC -
+    FREEBUSY periods - where a missing `Z` is a spelling mistake rather than a
+    floating local time.
     """
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
-def _parse_rrule(text: str) -> vRecur:
-    """Validate and parse raw RFC 5545 RRULE text (e.g. "FREQ=WEEKLY;BYDAY=MO").
+def _parse_rrule(text: str, anchor: date | datetime | None = None) -> vRecur:
+    """`mapping.parse_rrule_text`, re-raised as the event-side error class.
 
-    `vRecur.from_ical` silently *skips* parts without '=' instead of raising,
-    so completely unparseable input yields an empty rule - treated as invalid
-    here as well, since an empty RRULE is never what the caller meant.
+    The shared parser lives in `mapping.py` (tasks and events use the exact
+    same RFC 5545 RRULE grammar); callers of the event tools should only ever
+    see `InvalidEventDataError`, so the task-side error is translated here
+    with the same message - same pattern as `_parse_datetime` above.
     """
-    stripped = text.strip()
     try:
-        recur = vRecur.from_ical(stripped)
-    except Exception:
-        recur = None
-    if not recur:
-        raise InvalidEventDataError(
-            f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
-            "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
+        return parse_rrule_text(text, anchor=anchor)
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
+
+
+def _exdate_values(event, entries: list[str]) -> list[date | datetime]:
+    """`mapping._exdate_values` for a VEVENT, re-raised as the event-side error.
+
+    Same pattern as `_parse_datetime`/`_parse_rrule` above; `noun` only selects
+    the word the rejection message uses ("the event's start" here, "the task's
+    start" on the VTODO side).
+    """
+    try:
+        return _shared_exdate_values(event, entries, noun="event")
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
+
+
+def _check_exdates_match_occurrences(
+    event, entries: list[str], values: list[date | datetime]
+) -> None:
+    """`mapping._check_exdates_match_occurrences` for a VEVENT, re-raised.
+
+    See the shared implementation for what it does and why it is deliberately
+    best-effort.
+    """
+    try:
+        _shared_check_exdates(
+            event,
+            entries,
+            values,
+            noun="event",
+            reader="list_events/get_event",
+            field_name="start",
         )
-    return recur
+    except InvalidTaskDataError as exc:
+        raise InvalidEventDataError(str(exc)) from None
 
 
 def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:
@@ -336,6 +393,13 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     field (including "titel" and "start", which cannot be cleared), raises
     `InvalidEventDataError`.
 
+    Timestamps are anchored to the zone the event already carries: a `start`,
+    `ende` or `ausnahme_daten` entry that names no zone of its own (only a
+    numeric offset, which is what `parse_vevent` hands back) is written in the
+    event's own DTSTART zone rather than as a bare UTC instant, so reading an
+    event and writing it back leaves it exactly as anchored as it was. See
+    `_anchored` and `_exdate_values`.
+
     `own_organizer` is the caller's own "mailto:..." address (discovered by
     `CalDavService` via a CalDAV principal lookup - this module makes no
     network calls itself, so the value has to be handed in). It is only used
@@ -363,12 +427,25 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         elif ical_name is not None and ical_name in event:
             del event[ical_name]
 
+    # The zone the event is already anchored to (read before its DTSTART is
+    # replaced), so every value written below goes on the wire in that one zone
+    # instead of each keeping whichever zone it happened to parse in.
+    zone = _component_zone(event)
+
     if fields.titel is not None:
         _set(event, "summary", fields.titel)
     if fields.start is not None:
-        _set(event, "dtstart", _parse_datetime(fields.start))
+        start_value = _parse_datetime(fields.start)
+        if not names_timezone(fields.start):
+            # A start that names no zone means "this instant", not "this event
+            # now lives in that zone" - so it is written in the event's own.
+            # Naming a zone explicitly is how an event is *moved* to one, and
+            # then everything below follows the new anchor.
+            start_value = _anchored(start_value, zone)
+        _set(event, "dtstart", start_value)
+        zone = _component_zone(event)
     if fields.ende is not None:
-        end_value = _parse_datetime(fields.ende)
+        end_value = _anchored(_parse_datetime(fields.ende), zone)
         if not isinstance(end_value, datetime):
             # `ende` is the inclusive last day; RFC 5545 DTEND is exclusive,
             # so the stored all-day end is one day later.
@@ -389,7 +466,11 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
             raise InvalidEventDataError(str(exc)) from None
         _set(event, "class", ical_class)
     if fields.wiederholung is not None:
-        _set(event, "rrule", _parse_rrule(fields.wiederholung))
+        anchor_val = None
+        dtstart_prop = event.get("dtstart")
+        if dtstart_prop is not None:
+            anchor_val = getattr(dtstart_prop, "dt", None)
+        _set(event, "rrule", _parse_rrule(fields.wiederholung, anchor=anchor_val))
     if fields.ausnahme_daten is not None:
         # Replace, not append: drop every existing EXDATE, then write all
         # entries as one EXDATE property with a comma-separated value list.
@@ -398,7 +479,10 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         if "exdate" in event:
             del event["exdate"]
         if fields.ausnahme_daten:
-            event.add("exdate", [_parse_datetime(entry) for entry in fields.ausnahme_daten])
+            exdate_entries = list(fields.ausnahme_daten)
+            exdate_values = _exdate_values(event, exdate_entries)
+            _check_exdates_match_occurrences(event, exdate_entries, exdate_values)
+            event.add("exdate", exdate_values)
     if fields.url is not None:
         _set(event, "url", fields.url)
     if fields.verknuepfte_aufgabe is not None:
@@ -530,41 +614,15 @@ def _format_end(component, start_value: date | datetime | None) -> str | None:
         value = dtend.dt
         if not isinstance(value, datetime):
             value = value - timedelta(days=1)
-        return value.isoformat()
+        return format_datetime_output(value)
     duration = component.get("duration")
     if duration is not None and start_value is not None:
         end_value = start_value + duration.dt
         if not isinstance(end_value, datetime):
             # date + duration is again the exclusive end day.
             end_value = end_value - timedelta(days=1)
-        return end_value.isoformat()
+        return format_datetime_output(end_value)
     return None
-
-
-def _extract_exdates(component) -> list[str]:
-    """Read all EXDATE values as ISO strings, whatever wire form they use.
-
-    icalendar exposes a single EXDATE property as one vDDDLists (which may
-    itself hold several comma-separated values) and repeated EXDATE
-    properties as a list of vDDDLists - both forms occur in the wild, and
-    `apply_event_fields` only ever writes the single-property form.
-    """
-    exdate = component.get("exdate")
-    if exdate is None:
-        return []
-    entries = exdate if isinstance(exdate, list) else [exdate]
-    result: list[str] = []
-    for entry in entries:
-        dts = getattr(entry, "dts", None)
-        if dts is not None:
-            result.extend(item.dt.isoformat() for item in dts)
-        else:
-            value: Any = getattr(entry, "dt", None)
-            if value is not None and hasattr(value, "isoformat"):
-                result.append(value.isoformat())
-            else:
-                result.append(str(entry))
-    return result
 
 
 def _extract_related(component) -> list[dict[str, str]]:
@@ -593,7 +651,7 @@ def _format_recurrence_id(component) -> str | None:
     if prop is None:
         return None
     value = getattr(prop, "dt", prop)
-    return value.isoformat()
+    return format_datetime_output(value)
 
 
 def _parse_organizer(component) -> dict[str, Any] | None:
@@ -648,7 +706,7 @@ def parse_vevent(component) -> dict[str, Any]:
     return {
         "uid": str(component.get("uid")),
         "titel": str(component.get("summary", "")),
-        "start": start_value.isoformat() if start_value is not None else None,
+        "start": format_datetime_output(start_value),
         "ende": _format_end(component, start_value),
         "ganztaegig": start_value is not None and not isinstance(start_value, datetime),
         "ort": _text(component, "location"),
@@ -673,9 +731,9 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     """Chronological sort key over parsed event dicts.
 
     Events without a start sort last. All-day starts (bare dates) are
-    normalized to start-of-day UTC so they compare cleanly against datetime
-    starts; naive datetimes are treated as UTC (same rule as everywhere
-    else), aware ones compare by instant.
+    normalized to local start-of-day so they compare cleanly against datetime
+    starts; naive datetimes are read in the default zone (same rule as
+    everywhere else), aware ones compare by instant.
     """
     start = event.get("start")
     if start is None:
@@ -683,7 +741,88 @@ def _start_sort_key(event: dict[str, Any]) -> tuple[int, datetime]:
     parsed = _parse_datetime(start)
     if isinstance(parsed, datetime):
         return (0, _as_utc(parsed))
-    return (0, datetime.combine(parsed, time.min, tzinfo=timezone.utc))
+    return (0, local_midnight(parsed))
+
+
+def local_day_window(day: date) -> tuple[datetime, datetime]:
+    """The [start, end) instants one local day covers in the default timezone.
+
+    The single definition of "a day" for the parts of the server that decide
+    what belongs to one - `get_agenda`'s events, and (via the same local
+    midnights in `mapping._to_comparable_datetime`) its tasks. The end is the
+    *next* day's midnight rather than start + 24h, so a day with a
+    daylight-saving change is the 23 or 25 hours it really has.
+    """
+    return local_midnight(day), local_midnight(day + timedelta(days=1))
+
+
+def _event_interval(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """The instants a parsed event dict covers, or None if that can't be told.
+
+    All-day values are expanded from local midnight to the local midnight
+    after the (inclusive) last day, matching `event_busy_interval`'s treatment
+    of the same components; the returned end is exclusive. None means the
+    event has no usable start, or a start this module can't parse back - a
+    caller must then not draw conclusions from it.
+    """
+    start_text = event.get("start")
+    if not isinstance(start_text, str):
+        return None
+    try:
+        start_value = _parse_datetime(start_text)
+        end_text = event.get("ende")
+        end_value = _parse_datetime(end_text) if isinstance(end_text, str) else None
+    except InvalidEventDataError:
+        return None
+
+    if isinstance(start_value, datetime):
+        start_dt = _as_utc(start_value)
+        end_dt = _as_utc(end_value) if isinstance(end_value, datetime) else start_dt
+    else:
+        start_dt = local_midnight(start_value)
+        last_day = end_value if isinstance(end_value, date) else start_value
+        if isinstance(last_day, datetime):  # mismatched pair from another client
+            last_day = start_value
+        end_dt = local_midnight(last_day + timedelta(days=1))
+    return start_dt, max(end_dt, start_dt)
+
+
+def events_in_window(
+    events: list[dict[str, Any]], start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Keep the parsed events overlapping [start, end), by this server's day rule.
+
+    A CalDAV time-range REPORT is the server's answer, not ours: RFC 4791 9.9
+    has it resolve all-day and floating values in the *collection's* timezone
+    (or UTC), which need not be `MCP_DEFAULT_TIMEZONE` - so its idea of which
+    day an all-day event belongs to can differ from this server's by a few
+    hours, in either direction. Applying the local-day rule here makes the
+    answer this server's own, and match the one its tasks get.
+
+    Two kinds of event are kept unconditionally, because their dict says
+    nothing about which moment matched the query: one that still carries a
+    `wiederholung` (a series master a server answered with instead of
+    expanding it - its DTSTART is the first occurrence, not the matching one),
+    and one with no usable start. Dropping either would hide a real event to
+    tidy up a boundary.
+    """
+    kept: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("wiederholung"):
+            kept.append(event)
+            continue
+        interval = _event_interval(event)
+        if interval is None:
+            kept.append(event)
+            continue
+        event_start, event_end = interval
+        if event_end == event_start:
+            # A zero-length event occupies just its start instant.
+            if start <= event_start < end:
+                kept.append(event)
+        elif event_start < end and event_end > start:
+            kept.append(event)
+    return kept
 
 
 def filter_events(
@@ -734,13 +873,19 @@ def filter_events(
 
 
 def event_busy_interval(component) -> tuple[datetime, datetime] | None:
-    """Return the (start, end) UTC interval a VEVENT occupies, or None if it
-    doesn't count as busy time.
+    """Return the (start, end) instant interval a VEVENT occupies, or None if
+    it doesn't count as busy time.
+
+    Both ends are timezone-aware: a value written without a zone by another
+    client is read in the server's default timezone (`_as_utc`), and an
+    all-day date is expanded from local midnight (`mapping.local_midnight`), so the
+    interval lines up with the day windows the rest of the server builds.
 
     A cancelled event (STATUS=CANCELLED) or a transparent one
     (TRANSP=TRANSPARENT, e.g. Nextcloud's "does not block time" option) is
     not busy time; neither is an event without a DTSTART. All-day dates are
-    expanded to the full UTC day(s) they cover, using the same DTEND/DURATION
+    expanded to the full *local* day(s) they cover (the server's default
+    timezone, matching every other day window), using the same DTEND/DURATION
     fallback as `_format_end` - but returning the *exclusive* end datetime
     (unlike the German `ende` field, which is inclusive), since that's the
     natural representation for an interval to be merged with others in
@@ -767,13 +912,13 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
         duration = component.get("duration")
         end_value = start_value + duration.dt if duration is not None else start_value
 
-    def _to_utc_instant(value: date | datetime) -> datetime:
+    def _to_instant(value: date | datetime) -> datetime:
         if isinstance(value, datetime):
             return _as_utc(value)
-        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+        return local_midnight(value)
 
-    start_dt = _to_utc_instant(start_value)
-    end_dt = _to_utc_instant(end_value)
+    start_dt = _to_instant(start_value)
+    end_dt = _to_instant(end_value)
     if end_dt < start_dt:
         end_dt = start_dt
     return (start_dt, end_dt)
@@ -789,8 +934,8 @@ def merge_busy_intervals(
     (one ends exactly when the next starts, as with back-to-back meetings)
     are merged into one, the same as overlapping ones - a caller asking "is
     this person busy" gets one contiguous block rather than an artificial
-    seam. Input order doesn't matter; naive datetimes are treated as UTC,
-    same rule as everywhere else in this module.
+    seam. Input order doesn't matter; naive datetimes are read in the
+    server's default timezone, same rule as everywhere else in this module.
     """
     normalized = sorted((_as_utc(start), _as_utc(end)) for start, end in intervals if end > start)
     merged: list[list[datetime]] = []
@@ -813,6 +958,12 @@ def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
     busy. Handles both wire forms icalendar produces when parsing a VFREEBUSY
     with more than one FREEBUSY property (each period keeps its own FBTYPE
     parameter, even when flattened into one list by icalendar).
+
+    A period value that arrives without its `Z` is read as UTC, *not* in the
+    server's default timezone the way a VEVENT's floating times are: RFC 5545
+    3.8.2.6 requires FREEBUSY periods to be UTC, so a missing `Z` is a sloppy
+    spelling of a UTC value rather than a local wall clock, and reading it
+    otherwise would move every busy block by the default zone's offset.
     """
     freebusy = component.get("freebusy")
     if freebusy is None:
@@ -828,5 +979,5 @@ def extract_freebusy_periods(component) -> list[tuple[datetime, datetime]]:
         end = getattr(entry, "end", None)
         if start is None or end is None:
             continue
-        periods.append((_as_utc(start), _as_utc(end)))
+        periods.append((_utc_value(start), _utc_value(end)))
     return periods
