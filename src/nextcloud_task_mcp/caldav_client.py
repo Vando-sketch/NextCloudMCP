@@ -7,7 +7,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable, Iterator
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, TypeVar
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -67,6 +67,10 @@ _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?$")
 # a range that comfortably covers any real-world calendar instead.
 _RANGE_MIN = datetime(1901, 1, 1, tzinfo=timezone.utc)
 _RANGE_MAX = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+# How far the daylight-saving transitions written into an attached VTIMEZONE
+# reach (see `_sync_vtimezones`). Matches `_RANGE_MAX`.
+_VTIMEZONE_HORIZON = _RANGE_MAX.date()
 
 # The two supported task<->event link semantics, mapped to the RELATED-TO
 # RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
@@ -414,6 +418,12 @@ def _parse_deleted_at(raw: str | None) -> str | None:
     (`DateTimeInterface::ATOM`, e.g. from newer server versions) - both are
     accepted; anything else parses to None rather than raising, since this is
     a display-only field.
+
+    This is the server's own record of when it deleted something, always
+    UTC-based, so an ISO value that arrives *without* an offset is read as UTC
+    rather than as a local wall clock - unlike caller input, and unlike the
+    floating times foreign clients put in calendar components. It is then
+    rendered in the default timezone like every other timestamp.
     """
     if raw is None:
         return None
@@ -421,13 +431,17 @@ def _parse_deleted_at(raw: str | None) -> str | None:
     if not text:
         return None
     try:
-        return datetime.fromtimestamp(int(text), tz=timezone.utc).isoformat()
+        dt = datetime.fromtimestamp(int(text), tz=timezone.utc)
+        return mapping.format_datetime_output(dt)
     except (ValueError, OverflowError, OSError):
         pass
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).isoformat()
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return mapping.format_datetime_output(dt)
 
 
 def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None]:
@@ -453,6 +467,22 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
     return None, None
 
 
+def _zone_preserving_isoformat(value: datetime) -> str:
+    """Render a datetime so that parsing it back keeps its zone, not just its offset.
+
+    `EventFields` takes strings, so anything handed to it internally
+    (`create_event_from_task`) has to survive a second trip through
+    `mapping.parse_datetime_input`. `isoformat()` writes a numeric offset,
+    which names an instant but no zone - the event would end up pinned to a UTC
+    instant instead of anchored to the zone its start was resolved in. The
+    "<naive datetime> <IANA name>" form that same parser accepts keeps it.
+    """
+    zone = value.tzinfo
+    if isinstance(zone, ZoneInfo):
+        return f"{value.replace(tzinfo=None).isoformat()} {zone.key}"
+    return value.isoformat()
+
+
 def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     """Ensure `vcal` has a VTIMEZONE for every IANA zone `component` uses.
 
@@ -465,6 +495,14 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
     one (via `icalendar.Timezone.from_tzinfo`) for each such zone and adds
     it to `vcal`, skipping any TZID `vcal` already has (mirroring
     `export_calendar`'s `seen_tzids` de-dup pattern).
+
+    `icalendar` writes the zone's transitions as an explicit RDATE list rather
+    than as a recurrence rule, and stops at 2038-01-01 unless told otherwise;
+    a client reading such a component applies the last observance it finds to
+    every later date, so a weekly event's summer occurrences would come out an
+    hour off from 2038 on. The list is therefore generated up to
+    `_VTIMEZONE_HORIZON` instead, at a cost of about 2 KB per written event -
+    the same horizon `_RANGE_MAX` already treats as "far enough".
     """
     seen_tzids = {str(c.get("TZID", "")) for c in vcal.subcomponents if c.name == "VTIMEZONE"}
     zones: dict[str, ZoneInfo] = {}
@@ -490,7 +528,9 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
         # any VEVENT/VTODO already in `vcal` - required by RFC 5545 3.6.5,
         # and `update_event` syncs onto a component already carrying its
         # VEVENT, unlike `create_event`'s empty `vcal`.
-        vcal.subcomponents.insert(0, Timezone.from_tzinfo(zone, tzid=tzid))
+        vcal.subcomponents.insert(
+            0, Timezone.from_tzinfo(zone, tzid=tzid, last_date=_VTIMEZONE_HORIZON)
+        )
         seen_tzids.add(tzid)
 
 
@@ -1264,15 +1304,15 @@ class CalDavService:
         start of the *next* day (for `bis`, making a date-only upper bound
         inclusive of the whole day - the resulting datetime is used as the
         exclusive end of a CalDAV time-range filter). Naive datetimes are
-        interpreted as UTC, matching `parse_datetime_input` everywhere else.
+        interpreted in the server's default timezone, matching
+        `parse_datetime_input` everywhere else.
         """
         if value is None:
             return None
         parsed = mapping.parse_datetime_input(value)
         if isinstance(parsed, datetime):
             return parsed
-        day_start = datetime.combine(parsed, time.min, tzinfo=timezone.utc)
-        return day_start + timedelta(days=1) if exclusive_end else day_start
+        return mapping.local_midnight(parsed + timedelta(days=1) if exclusive_end else parsed)
 
     def _event_calendars(self, calendar_names: list[str] | None) -> list[tuple[str, DAVCalendar]]:
         """Return (display name, calendar) pairs for the VEVENT calendars to query.
@@ -1847,10 +1887,26 @@ class CalDavService:
                     "for the event instead."
                 )
 
-            parsed_start = mapping.parse_datetime_input(start_spec)
+            parsed_start = mapping.parse_datetime_input(start_spec, keep_zone=True)
+            if isinstance(parsed_start, datetime) and start is None:
+                # A task's due date is stored as a bare UTC instant (VTODOs
+                # keep no zone) and read back with a numeric offset, so there
+                # is no zone left to carry over - but the wall clock the caller
+                # originally typed was in the server's default zone, and a
+                # timebox should look like the event that same value would
+                # produce through `create_event`. An explicit `start` argument
+                # keeps `create_event`'s own rules instead: a named zone is
+                # preserved below, a numeric offset stays UTC.
+                parsed_start = parsed_start.astimezone(mapping.get_default_timezone())
             if isinstance(parsed_start, datetime):
-                ende = (parsed_start + timedelta(minutes=dauer_minuten)).isoformat()
-                start_value = parsed_start.isoformat()
+                # `dauer_minuten` is a real duration: adding it to a zone-aware
+                # datetime would do wall-clock arithmetic, stretching a block
+                # that spans a DST change by the transition's own hour.
+                parsed_end = (
+                    parsed_start.astimezone(timezone.utc) + timedelta(minutes=dauer_minuten)
+                ).astimezone(parsed_start.tzinfo)
+                start_value = _zone_preserving_isoformat(parsed_start)
+                ende = _zone_preserving_isoformat(parsed_end)
             else:
                 # All-day due date -> one-day all-day event (inclusive end).
                 start_value = parsed_start.isoformat()
@@ -1879,8 +1935,18 @@ class CalDavService:
         plain server-side composition: a time-range event query (recurring
         events expanded to that day's occurrences) plus a due-date-filtered
         task listing per VTODO list. `datum` must be a date-only "YYYY-MM-DD"
-        string; day boundaries are UTC, consistent with the naive-input-is-UTC
-        rule used everywhere else in this server.
+        string; day boundaries are local days in the server's default timezone
+        (`MCP_DEFAULT_TIMEZONE`), consistent with the rule used everywhere else
+        in this server, and applied identically to the events and the tasks.
+
+        Because a CalDAV time-range REPORT resolves all-day and floating values
+        in the *calendar collection's* timezone (RFC 4791 9.9) - the Nextcloud
+        account's setting, which need not be `MCP_DEFAULT_TIMEZONE` - the event
+        query covers the neighbouring days as well and the local day is cut out
+        of the result here (`event_mapping.events_in_window`). Otherwise a
+        neighbouring day's all-day event can appear in the agenda, or a
+        floating one an hour before midnight go missing, purely from the two
+        zones disagreeing.
         """
         parsed = mapping.parse_datetime_input(datum)
         if isinstance(parsed, datetime):
@@ -1888,9 +1954,18 @@ class CalDavService:
                 f"datum must be a date-only 'YYYY-MM-DD' string, got '{datum}'."
             )
 
+        day_start, day_end = event_mapping.local_day_window(parsed)
+
         with self._lock:
-            termine = self.list_events(
-                calendar_names=calendar_names, von=datum, bis=datum, expand=True
+            termine = event_mapping.events_in_window(
+                self.list_events(
+                    calendar_names=calendar_names,
+                    von=(parsed - timedelta(days=1)).isoformat(),
+                    bis=(parsed + timedelta(days=1)).isoformat(),
+                    expand=True,
+                ),
+                day_start,
+                day_end,
             )
 
             if list_names is None:
@@ -1937,10 +2012,16 @@ class CalDavService:
                 merged = self._free_busy_for_user(benutzer, start_bound, end_bound)
 
         return {
-            "von": start_bound.isoformat(),
-            "bis": end_bound.isoformat(),
+            "von": mapping.format_datetime_output(start_bound),
+            "bis": mapping.format_datetime_output(end_bound),
             "benutzer": benutzer,
-            "belegt": [{"von": start.isoformat(), "bis": end.isoformat()} for start, end in merged],
+            "belegt": [
+                {
+                    "von": mapping.format_datetime_output(start),
+                    "bis": mapping.format_datetime_output(end),
+                }
+                for start, end in merged
+            ],
         }
 
     def _own_free_busy(self, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
@@ -1974,8 +2055,15 @@ class CalDavService:
         address = benutzer if is_mailto else f"mailto:{benutzer}"
         bare = address[len("mailto:") :]
 
+        # RFC 5545 3.6.4 (and RFC 6638's scheduling profile of it): a
+        # VFREEBUSY's DTSTART/DTEND are UTC. caldav puts these datetimes
+        # straight into the VFREEBUSY it POSTs, where `icalendar` would write a
+        # zone-aware bound as `DTSTART;TZID=Europe/Berlin:...` - a TZID
+        # reference in a request that carries no VTIMEZONE to resolve it with.
         try:
-            response = principal.freebusy_request(start, end, [address])
+            response = principal.freebusy_request(
+                start.astimezone(timezone.utc), end.astimezone(timezone.utc), [address]
+            )
         except TaskMcpError:
             raise
         except Exception as exc:

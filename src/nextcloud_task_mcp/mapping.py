@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -87,6 +88,152 @@ class TaskFields:
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
+#: The zone this server falls back to before `set_default_timezone` runs, kept
+#: in sync with `config.Settings.default_timezone` (the value the server
+#: actually applies at startup).
+_SHIPPED_DEFAULT_TIMEZONE = "Europe/Berlin"
+
+# IANA names that denote UTC itself. A zone from this set is stored as
+# `datetime.timezone.utc` rather than as a `ZoneInfo`, so `icalendar` writes
+# the plain `...Z` form instead of `;TZID=UTC:...` plus a VTIMEZONE holding one
+# zero-offset observance - which is what `MCP_DEFAULT_TIMEZONE=UTC` is
+# documented to do ("restores the previous UTC behavior"). Zones that merely
+# *happen* to sit at +00:00 (Europe/London in winter, Africa/Abidjan) are real,
+# distinct zones and deliberately not listed.
+_UTC_ZONE_KEYS = frozenset(
+    {
+        "UTC",
+        "Etc/UTC",
+        "Etc/GMT",
+        "Etc/GMT+0",
+        "Etc/GMT-0",
+        "Etc/GMT0",
+        "Etc/Greenwich",
+        "Etc/Universal",
+        "Etc/Zulu",
+        "GMT",
+        "GMT+0",
+        "GMT-0",
+        "GMT0",
+        "Greenwich",
+        "Universal",
+        "Zulu",
+    }
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def _initial_default_timezone() -> tzinfo:
+    """Resolve the shipped default zone, falling back to UTC if tzdata is absent.
+
+    A Python installation without the IANA database (a slim container image,
+    Windows without the `tzdata` package) cannot resolve any zone name at all.
+    Raising from a module-level statement would take the whole server down with
+    an unhandled `ZoneInfoNotFoundError` traceback before the config layer -
+    which reports missing/invalid zones properly - even gets to run.
+    """
+    try:
+        return ZoneInfo(_SHIPPED_DEFAULT_TIMEZONE)
+    except (ZoneInfoNotFoundError, ValueError):
+        _logger.warning(
+            "Timezone database unavailable: %r could not be resolved, falling back to "
+            "UTC. Install the 'tzdata' package to use MCP_DEFAULT_TIMEZONE.",
+            _SHIPPED_DEFAULT_TIMEZONE,
+        )
+        return timezone.utc
+
+
+_DEFAULT_TIMEZONE: tzinfo = _initial_default_timezone()
+
+
+def set_default_timezone(zone: str | tzinfo) -> None:
+    """Set the server-wide default timezone."""
+    global _DEFAULT_TIMEZONE
+    if isinstance(zone, str):
+        _DEFAULT_TIMEZONE = ZoneInfo(zone)
+    else:
+        _DEFAULT_TIMEZONE = zone
+
+
+def get_default_timezone() -> tzinfo:
+    """Return the server-wide default timezone (defaults to Europe/Berlin)."""
+    return _DEFAULT_TIMEZONE
+
+
+def _resolve_in_zone(value: datetime) -> datetime:
+    """Settle a zone-anchored wall-clock datetime into the form it is written in.
+
+    Two adjustments, both of which only matter once the zone is *kept* (the
+    `keep_zone=True` path, i.e. events) instead of collapsed to a UTC instant:
+
+    - A zone that *is* UTC collapses to `datetime.timezone.utc`, so the value
+      is serialized as `...Z` instead of as a TZID reference (`_UTC_ZONE_KEYS`).
+    - A wall clock reading that the zone's spring-forward gap skips (02:30 on a
+      day that jumps 02:00 -> 03:00) is respelled as the real local time of the
+      same instant (03:30). `zoneinfo` resolves such a reading with the
+      pre-transition offset (`fold=0`), which is a well-defined *instant* - but
+      writing it out as `DTSTART;TZID=Europe/Berlin:...T023000` hands every
+      other client a reading that never happens, to resolve its own way.
+      Ambiguous readings (the autumn overlap) are left exactly as they are:
+      they do happen, twice, and `fold=0` picks the earlier one.
+    """
+    zone = value.tzinfo
+    if not isinstance(zone, ZoneInfo):
+        return value
+    if zone.key in _UTC_ZONE_KEYS:
+        return value.replace(tzinfo=timezone.utc)
+    settled = value.astimezone(timezone.utc).astimezone(zone)
+    if settled.replace(tzinfo=None) != value.replace(tzinfo=None):
+        return settled
+    return value
+
+
+def format_datetime_output(value: date | datetime | None) -> str | None:
+    """Format a date or datetime object for output in the server's default timezone.
+
+    - `None` returns `None`.
+    - A bare `date` (and not `datetime`) returns "YYYY-MM-DD".
+    - A `datetime` is converted to `get_default_timezone()` (a naive datetime is
+      treated as already in `get_default_timezone()`) and formatted as ISO 8601
+      with offset (e.g. "2026-08-07T14:00:00+02:00").
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=get_default_timezone())
+        else:
+            value = value.astimezone(get_default_timezone())
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
+
+
+def _local_wall_time(day: date, wall: time) -> datetime:
+    """A wall clock reading of a local day, as an instant in the default timezone."""
+    return _resolve_in_zone(datetime.combine(day, wall, tzinfo=get_default_timezone()))
+
+
+def local_midnight(day: date) -> datetime:
+    """The first instant of a local day, in the server's default timezone.
+
+    The one definition of where a day starts, shared by every part of the
+    server that has to decide which day something falls in: `get_agenda`'s
+    events and tasks, `von`/`bis` and `faellig_vor`/`faellig_nach` bounds, and
+    the instant an all-day value is compared at.
+
+    Not every day has a midnight: America/Santiago, Asia/Beirut and others move
+    their clocks *at* 00:00, so on a transition day the reading 00:00 never
+    happens. `zoneinfo` still maps it to the correct instant - the transition
+    itself is that day's first moment - but a bound like this is also printed
+    back to callers (`get_free_busy` reports the window it used), so it is
+    respelled as the day's first real reading. Same instant either way.
+    """
+    return _local_wall_time(day, time.min)
+
+
 def priority_label_to_ical(label: str) -> int:
     """Map a German priority label to an RFC 5545 PRIORITY value (1-9)."""
     try:
@@ -124,6 +271,36 @@ def visibility_label_to_ical(label: str) -> str:
         ) from None
 
 
+def _split_timezone_name(text: str) -> tuple[str, ZoneInfo | None]:
+    """Split "<datetime> <IANA name>" into its two parts.
+
+    The zone is None (and the text returned unchanged) when the value names no
+    zone this machine knows - a plain datetime, or a trailing word that is not
+    a zone name, both of which the datetime parser then rejects or accepts on
+    its own terms.
+    """
+    if " " not in text:
+        return text, None
+    candidate_text, _, candidate_zone = text.rpartition(" ")
+    try:
+        return candidate_text, ZoneInfo(candidate_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return text, None
+
+
+def names_timezone(value: str) -> bool:
+    """Whether this input names an IANA timezone itself (e.g. "... Europe/Berlin").
+
+    The difference between a zone the *caller* chose and the default one this
+    server attached to a naive value. Both come back from
+    `parse_datetime_input(keep_zone=True)` as an ordinary `ZoneInfo`, but only
+    the first is a statement about which zone the value belongs in - which is
+    what lets `event_mapping` move an event to another zone on request while
+    still writing everything else in the zone the event already has.
+    """
+    return _split_timezone_name(value.strip())[1] is not None
+
+
 def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datetime:
     """Parse an ISO 8601 date or datetime string, accepting a trailing 'Z'.
 
@@ -137,11 +314,9 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       Python 3.11+ (basic format, week dates, ...) are deliberately NOT
       treated as all-day here - only the canonical extended form is.
     - Anything else is parsed as a `datetime`. A *naive* datetime (no UTC
-      offset) is interpreted as UTC (B2) - the same rule already used for
-      absolute VALARM triggers, so the same-looking input is no longer
-      interpreted two different ways depending on which property it ends up
-      in. An *explicit* UTC offset (e.g. "+02:00") is converted to UTC rather
-      than kept as-is: `icalendar` serializes a fixed-offset `tzinfo` as
+      offset) is interpreted in the server's default timezone (`MCP_DEFAULT_TIMEZONE`,
+      default Europe/Berlin). An *explicit* UTC offset (e.g. "+02:00") is converted to
+      UTC rather than kept as-is: `icalendar` serializes a fixed-offset `tzinfo` as
       `DTSTART;TZID="UTC+02:00":...` without ever emitting the matching
       VTIMEZONE component the TZID reference requires, so CalDAV clients that
       don't recognize the (nonstandard) TZID fall back to interpreting the
@@ -157,16 +332,26 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
       CET vs. CEST) applies on a given day - a fixed numeric offset picked
       once and reused year-round is wrong for half the year in any zone
       that observes DST.
-    - `keep_zone=True` changes that last case only: instead of converting
-      to UTC, the returned datetime keeps its `zoneinfo.ZoneInfo` tzinfo.
-      Collapsing to a fixed UTC instant is correct for a one-off value, but
+    - `keep_zone=True` changes how naive input and IANA timezone input are returned:
+      instead of converting to UTC, naive input gets the server's default
+      `ZoneInfo` attached and explicit IANA timezone input keeps its `zoneinfo.ZoneInfo`
+      tzinfo. Collapsing to a fixed UTC instant is correct for a one-off value, but
       wrong for anything that repeats on wall-clock time (an RRULE) - a
       recurring "09:00 Europe/Berlin" stored as a fixed UTC instant keeps
       that UTC instant across a DST transition, so it displays as 08:00 or
       10:00 local for half the year. Keeping the zone lets the RRULE be
-      evaluated in local time, the way RFC 5545 intends. Naive input and
-      explicit numeric offsets are unaffected by this flag - they carry no
-      IANA zone to preserve, so they still normalize to UTC as before.
+      evaluated in local time, the way RFC 5545 intends. Explicit numeric offsets
+      are unaffected by this flag - they carry no IANA zone to preserve, so they still
+      normalize to UTC as before.
+    - A local wall-clock time that a DST change makes nonexistent (the spring
+      gap) or ambiguous (the autumn overlap) is resolved by `zoneinfo`'s
+      default `fold=0`, i.e. with the pre-transition offset, rather than
+      rejected: refusing a timestamp for one hour twice a year would be a
+      worse failure mode than picking the earlier of two plausible instants.
+      With `keep_zone=True` a nonexistent reading is additionally respelled as
+      the real local time of that same instant (02:30 -> 03:30), so what goes
+      on the wire is a wall clock reading that actually happens - see
+      `_resolve_in_zone`.
     """
     text = value.strip()
     if _DATE_ONLY_RE.match(text):
@@ -175,16 +360,7 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
         except ValueError:
             pass  # fall through to the datetime/error path below
 
-    dt_text = text
-    zone: ZoneInfo | None = None
-    if " " in text:
-        candidate_text, _, candidate_zone = text.rpartition(" ")
-        try:
-            zone = ZoneInfo(candidate_zone)
-        except (ZoneInfoNotFoundError, ValueError):
-            zone = None
-        else:
-            dt_text = candidate_text
+    dt_text, zone = _split_timezone_name(text)
 
     normalized = dt_text[:-1] + "+00:00" if dt_text.endswith("Z") else dt_text
     try:
@@ -199,9 +375,10 @@ def parse_datetime_input(value: str, *, keep_zone: bool = False) -> date | datet
                     "timezone name cannot both be given - use one or the other."
                 )
             dt = dt.replace(tzinfo=zone)
-            return dt if keep_zone else dt.astimezone(timezone.utc)
+            return _resolve_in_zone(dt) if keep_zone else dt.astimezone(timezone.utc)
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=get_default_timezone())
+            return _resolve_in_zone(dt) if keep_zone else dt.astimezone(timezone.utc)
         return dt.astimezone(timezone.utc)
 
     raise InvalidTaskDataError(f"Could not parse '{value}' as an ISO 8601 date or datetime.")
@@ -227,10 +404,9 @@ def _parse_absolute_trigger(spec: str) -> datetime | None:
     except ValueError:
         return None
     # RFC 5545 requires absolute VALARM triggers to be expressed in UTC;
-    # a naive input is assumed to already be UTC (same rule as
-    # `parse_datetime_input`, B2).
+    # a naive input is interpreted in the default timezone then converted to UTC.
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=get_default_timezone())
     return dt.astimezone(timezone.utc)
 
 
@@ -353,7 +529,10 @@ def _read_alarm(alarm, component) -> tuple[str, _TriggerKey] | None:
             if zone is None:
                 return None
             value = value.replace(tzinfo=zone)
-        return value.isoformat(), _trigger_key(value)
+        formatted = format_datetime_output(value)
+        if formatted is None:
+            return None
+        return formatted, _trigger_key(value)
     if isinstance(value, timedelta):
         expected_related = _expected_related(component)
         if expected_related is None:
@@ -505,7 +684,7 @@ def _format_date_property(component, name: str) -> str | None:
     if prop is None:
         return None
     value = getattr(prop, "dt", prop)
-    return value.isoformat()
+    return format_datetime_output(value)
 
 
 def _extract_categories(component) -> list[str]:
@@ -561,14 +740,20 @@ def extract_alarms(component) -> list[str]:
       canonical one ("-P1W" reads back as "-P7D", "-PT90M" as "-PT1H30M") -
       the same trigger, a different string.
     - Absolute trigger (datetime): ISO 8601 string with offset, e.g.
-      "2026-08-07T09:00:00+00:00". RFC 5545 requires absolute triggers to be
+      "2026-08-07T09:00:00+02:00". RFC 5545 requires absolute triggers to be
       UTC, and this server only ever writes them that way - but other clients
       do emit `TRIGGER;VALUE=DATE-TIME;TZID=Europe/Berlin:...`, which
       `icalendar` hands back as a *naive* datetime with the zone left in the
       property's parameters. Reading that as UTC would silently shift the
       reminder by the zone's offset, so the TZID parameter is resolved via
-      `_trigger_zone` and the value rendered in *that* zone - the same rule
-      DTSTART/DUE follow, which keep whatever zone they were stored in.
+      `_trigger_zone` (which understands plain IANA names, Windows/Outlook
+      names, and the prefixed forms Evolution and older clients emit - see
+      `_resolve_tzid`); a naive value without any TZID is taken at its word as
+      UTC (B2), and a TZID this server cannot resolve is *not* silently read
+      as UTC - the alarm is skipped instead (see `_read_alarm`), because
+      guessing a zone could shift the reminder by hours. Output is formatted
+      in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), the same
+      convention DTSTART/DUE follow.
 
     Alarms appear in the returned list in the order they are defined in the
     component, and only alarms whose trigger this format can express are
@@ -688,14 +873,13 @@ def parse_vtodo(component) -> dict[str, Any]:
 
 
 def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
-    """Parse a `list_tasks` due-filter value/stored due value into a comparable UTC datetime.
+    """Parse a `list_tasks` due-filter/stored due value into a comparable datetime.
 
-    Reuses `parse_datetime_input`, so a naive datetime is already normalized to
-    UTC per the same rule used everywhere else (B2). A bare `date` result (an
+    Reuses `parse_datetime_input`. A bare `date` result (an
     all-day due date, or an all-day filter bound) has no time component to
-    compare directly, so it's expanded to a single instant within that day:
-    start-of-day (00:00:00 UTC) when `end_of_day` is False, end-of-day
-    (23:59:59 UTC) when True. Callers use `end_of_day=True` only for the
+    compare directly, so it's expanded to a single instant within that day in
+    the default timezone: start-of-day (00:00:00) when `end_of_day` is False,
+    end-of-day (23:59:59) when True. Callers use `end_of_day=True` only for the
     `faellig_vor` (due-before) bound, so a date-only bound like "2026-07-20"
     still includes tasks due at any time on the 20th; `faellig_nach`
     (due-after) bounds and the tasks' own stored due values use
@@ -706,8 +890,9 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     parsed = parse_datetime_input(value)
     if isinstance(parsed, datetime):
         return parsed
-    time_of_day = time(23, 59, 59) if end_of_day else time.min
-    return datetime.combine(parsed, time_of_day, tzinfo=timezone.utc)
+    if end_of_day:
+        return _local_wall_time(parsed, time(23, 59, 59))
+    return local_midnight(parsed)
 
 
 def filter_tasks(

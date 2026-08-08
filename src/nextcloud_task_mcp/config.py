@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
@@ -57,8 +58,19 @@ class Settings:
     # (D5) - PersonalAuthProvider previously minted refresh tokens with
     # expires_at=None (never expire); see personal_auth.py LOCAL PATCH 4.
     oauth_refresh_token_expiry_seconds: int = 180 * 24 * 60 * 60
+    default_timezone: str = "Europe/Berlin"
 
     def __post_init__(self) -> None:
+        # Validated here rather than where a datetime is first parsed: an
+        # unusable zone name must stop the server at startup, not surface as a
+        # failing tool call hours later.
+        try:
+            ZoneInfo(self.default_timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ConfigError(
+                f"MCP_DEFAULT_TIMEZONE is not a known IANA timezone name: "
+                f"{self.default_timezone!r} (e.g. 'Europe/Berlin', or 'UTC')."
+            ) from exc
         if self.oauth_password == _PLACEHOLDER_OAUTH_PASSWORD:
             raise ConfigError(
                 "MCP_OAUTH_PASSWORD is set to the placeholder value from "
@@ -176,6 +188,8 @@ class Settings:
                 f"NEXTCLOUD_HTTP_TIMEOUT_SECONDS must be an integer, got: {timeout_raw!r}"
             ) from exc
 
+        default_timezone = default_timezone_from_env()
+
         return cls(
             caldav_url=require("NEXTCLOUD_CALDAV_URL"),
             caldav_username=require("NEXTCLOUD_USERNAME"),
@@ -191,4 +205,16 @@ class Settings:
             port=port,
             allow_insecure_http=allow_insecure_http,
             caldav_timeout_seconds=caldav_timeout_seconds,
+            default_timezone=default_timezone,
         )
+
+
+def default_timezone_from_env() -> str:
+    """`MCP_DEFAULT_TIMEZONE`, or the shipped default when it is unset/empty.
+
+    Split out of `Settings.from_env` so the admin CLI - which has no reason to
+    require a full server configuration just to print a token expiry - can
+    format its timestamps in the same zone the server uses.
+    """
+    configured = os.environ.get("MCP_DEFAULT_TIMEZONE", "").strip()
+    return configured or Settings.default_timezone
