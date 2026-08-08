@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
-from icalendar import Event, FreeBusy
+from icalendar import Calendar, Event, FreeBusy
 from icalendar.prop import vDDDTypes
 
 from nextcloud_task_mcp import event_mapping
@@ -17,6 +17,21 @@ from nextcloud_task_mcp.event_mapping import EventFields
 def _new_event(uid: str = "event-1") -> Event:
     event = Event()
     event.add("uid", uid)
+    return event
+
+
+def _event_from_ics(body: str) -> Event:
+    """Parse a VEVENT out of real ICS text.
+
+    Foreign-client alarms are only ever seen through the parser, so the tests
+    for them build the component the same way instead of hand-assembling
+    `icalendar` objects into states parsing can never produce.
+    """
+    calendar = Calendar.from_ical(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//test//EN\n" + body + "END:VCALENDAR\n"
+    )
+    event = calendar.walk("VEVENT")[0]
+    assert isinstance(event, Event)
     return event
 
 
@@ -56,6 +71,7 @@ def test_apply_and_parse_round_trip():
     assert parsed["ort"] == "Konferenzraum"
     assert parsed["beschreibung"] == "Sprint-Planung"
     assert set(parsed["tags"]) == {"Arbeit", "Wichtig"}
+    assert parsed["erinnerungen"] == []
     assert parsed["status"] == "bestätigt"
     assert parsed["sichtbarkeit"] == "privat"
     assert parsed["url"] == "https://example.com/meeting"
@@ -260,6 +276,127 @@ def test_invalid_reminder_raises_event_error():
     event = _new_event()
     with pytest.raises(InvalidEventDataError):
         _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["quatsch"])
+
+
+def test_parse_vevent_erinnerungen_relative_round_trip():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["-PT30M"])
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+def test_parse_vevent_erinnerungen_absolute_round_trip():
+    event = _new_event()
+    _apply(
+        event,
+        titel="T",
+        start="2026-07-20T14:00:00",
+        erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
+    )
+    parsed = event_mapping.parse_vevent(event)
+    # Note: "...Z" input reads back as "+00:00", and both spellings name the
+    # same instant, so they collapse into one alarm.
+    assert parsed["erinnerungen"] == ["2026-08-07T09:00:00+00:00"]
+
+
+def test_parse_vevent_erinnerungen_preserves_order():
+    event = _new_event()
+    reminders = ["-P1D", "-PT30M", "2026-08-07T09:00:00+00:00"]
+    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=reminders)
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == reminders
+
+
+def test_parse_vevent_erinnerungen_no_valarm_returns_empty():
+    event = _new_event()
+    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == []
+
+
+def test_parse_vevent_erinnerungen_skips_valarm_without_trigger_or_invalid_trigger():
+    event = _event_from_ics(
+        """BEGIN:VEVENT
+UID:event-1
+SUMMARY:T
+DTSTART:20260720T140000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:ours
+TRIGGER;RELATED=START:-PT30M
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:no trigger at all
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:date-valued trigger
+TRIGGER;VALUE=DATE:20260719
+END:VALARM
+END:VEVENT
+"""
+    )
+    parsed = event_mapping.parse_vevent(event)
+    assert parsed["erinnerungen"] == ["-PT30M"]
+
+
+_END_ANCHORED_EVENT_ICS = """BEGIN:VEVENT
+UID:event-1
+SUMMARY:T
+DTSTART:20260720T140000Z
+DTEND:20260720T160000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:before the meeting ends
+TRIGGER;RELATED=END:-PT30M
+END:VALARM
+END:VEVENT
+"""
+
+
+def test_parse_vevent_erinnerungen_skips_end_anchored_alarm():
+    """An alarm anchored to DTEND has no `erinnerungen` spelling.
+
+    Reporting it as "-PT30M" would claim it fires 30 minutes before the event
+    *starts* - here that is a two-hour lie, the length of the event.
+    """
+    event = _event_from_ics(_END_ANCHORED_EVENT_ICS)
+    assert event_mapping.parse_vevent(event)["erinnerungen"] == []
+
+
+def test_parse_vevent_erinnerungen_lists_end_anchored_alarm_on_event_without_an_end():
+    """Without DTEND/DURATION the event has no end distinct from its start.
+
+    `RELATED=END` then names the same moment as `RELATED=START`, so "-PT30M"
+    is an honest spelling for it - unlike on the event above, where DTEND puts
+    the two anchors two hours apart.
+    """
+    event = _event_from_ics(
+        """BEGIN:VEVENT
+UID:event-1
+SUMMARY:T
+DTSTART:20260720T140000Z
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:end anchored, but there is no end
+TRIGGER;RELATED=END:-PT30M
+END:VALARM
+END:VEVENT
+"""
+    )
+    assert event_mapping.parse_vevent(event)["erinnerungen"] == ["-PT30M"]
+
+
+def test_apply_event_fields_preserves_end_anchored_alarm():
+    event = _event_from_ics(_END_ANCHORED_EVENT_ICS)
+    end_anchored = next(c for c in event.subcomponents if c.name == "VALARM").to_ical()
+
+    _apply(event, erinnerungen=["-PT15M"])
+
+    alarms = [c.to_ical() for c in event.subcomponents if c.name == "VALARM"]
+    assert end_anchored in alarms
+    assert event_mapping.parse_vevent(event)["erinnerungen"] == ["-PT15M"]
 
 
 # --- status / visibility labels ---
