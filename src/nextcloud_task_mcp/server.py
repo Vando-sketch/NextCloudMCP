@@ -205,8 +205,10 @@ def build_server(
                 Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
                 is an error.
 
-        An empty string is "no filter" for prioritaet, tag and suchtext; an
-        empty `listen_namen` list is an empty scope and returns nothing.
+        An empty string is "no filter" for every filter that takes one -
+        prioritaet, tag, suchtext, faellig_vor and faellig_nach alike. (`limit`
+        still rejects 0: omit it rather than ask for zero results.) An empty
+        `listen_namen` list is an empty scope and returns nothing.
 
         If `faellig_vor` and/or `faellig_nach` is given, tasks with no readable
         faellig_datum (due date) are excluded - they can't be judged "before"/"after"

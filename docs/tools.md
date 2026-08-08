@@ -177,7 +177,10 @@ Fields not set on the task are `null` (`tags` is `[]`, `fortschritt_prozent` is 
 - `tag` and `suchtext` compare case-insensitively *and* independently of Unicode
   spelling: either encoding of `"ü"` matches the other, and `"STRASSE"` matches
   `"Straße"`.
-- An empty string means "no filter" for `prioritaet`, `tag` and `suchtext` alike.
+- An empty string means "no filter" for every filter that takes one — `prioritaet`,
+  `tag`, `suchtext`, `faellig_vor` and `faellig_nach` alike. `limit` is the one
+  exception and still rejects `0`: `null` is how an integer parameter says "no
+  limit", so `0` reads as a caller asking for zero results, which is an error.
 - If either `faellig_vor` or `faellig_nach` is given, tasks with **no** readable `faellig_datum`
   are excluded from the result — a task without a due date can't be judged "before" or
   "after" anything, and neither can one whose stored due value this server cannot

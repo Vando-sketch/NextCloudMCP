@@ -1420,10 +1420,10 @@ def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
 
 
 def test_filter_tasks_empty_filter_value_means_no_filter():
-    """ "" is how a client spells "unset"; all three text filters read it that way.
+    """ "" is how a client spells "unset"; every string filter reads it that way.
 
     They used to disagree: `prioritaet=""` raised, `tag=""` matched nothing,
-    `suchtext=""` matched everything.
+    `suchtext=""` matched everything, and an empty due bound raised too.
     """
     tasks = [
         dict(_task("1", "2026-07-01"), prioritaet="hoch", tags=["work"], titel="Bericht"),
@@ -1433,3 +1433,23 @@ def test_filter_tasks_empty_filter_value_means_no_filter():
     assert [t["uid"] for t in mapping.filter_tasks(tasks, prioritaet="")] == ["1", "2"]
     assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="")] == ["1", "2"]
     assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="", due_after="")] == [
+        "1",
+        "2",
+    ]
+
+
+def test_filter_tasks_empty_due_bound_does_not_exclude_tasks_without_a_due_date():
+    """An empty bound is no bound, so it must not drag in the "has to have a due date" rule."""
+    tasks = [
+        dict(_task("mit", "2026-07-01")),
+        dict(_task("ohne", None)),
+    ]
+
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["mit", "ohne"]
+
+
+def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
+    """0 is not how an integer parameter spells "unset" - None is - so it stays an error."""
+    with pytest.raises(InvalidTaskDataError):
+        mapping.filter_tasks([], limit=0)
