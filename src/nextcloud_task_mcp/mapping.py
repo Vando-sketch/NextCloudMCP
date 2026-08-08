@@ -963,17 +963,19 @@ def filter_tasks(
 ) -> list[dict[str, Any]]:
     """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
-    `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is given,
-    tasks with no readable `faellig_datum` (due date) are excluded.
+    `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is
+    actually given, tasks with no readable `faellig_datum` (due date) are excluded.
     `prioritaet`: "hoch"/"mittel"/"niedrig", validated against `PRIORITY_LABELS`
     (unknown value raises `InvalidTaskDataError`).
     `tag`: exact match against one `tags` entry, `suchtext`: substring match over
     `titel` and `notizen` (skipping None values); both compare case- and
     spelling-insensitively (see `_fold`).
 
-    An empty string means "no filter" for `prioritaet`, `tag` and `suchtext`
-    alike - clients spell an unset argument that way, and the three used to
-    disagree about it (an error, an empty result, and a no-op respectively).
+    An empty string means "no filter" for every one of them, due bounds included -
+    clients spell an unset argument that way, and these used to disagree about it
+    (an error, an empty result, a no-op, and an error again). `limit` keeps
+    rejecting 0: an integer parameter spells "unset" as None, so 0 is a caller
+    asking for zero results, which is a mistake worth reporting.
 
     Results are sorted by `faellig_datum` ascending (tasks without a readable due
     date last), then by `titel` (see `_collation_key`). `limit`, if given, must be a
@@ -989,13 +991,9 @@ def filter_tasks(
             )
         tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
 
-    if due_before is not None or due_after is not None:
-        before_bound = (
-            _to_comparable_datetime(due_before, end_of_day=True) if due_before is not None else None
-        )
-        after_bound = (
-            _to_comparable_datetime(due_after, end_of_day=False) if due_after is not None else None
-        )
+    if due_before or due_after:
+        before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
+        after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
         filtered: list[dict[str, Any]] = []
         for task in tasks:
             due_dt = _task_due_instant(task.get("faellig_datum"))

@@ -16,7 +16,9 @@ This project does not yet follow Semantic Versioning releases.
   used to cost one call per list. New `prioritaet`, `tag` and `suchtext`
   filters mirror the event side; `tag`/`suchtext` compare case-insensitively
   and independently of Unicode spelling (either encoding of "ü", and "STRASSE"
-  against "Straße"), and an empty string means "no filter" for all three.
+  against "Straße"), and an empty string means "no filter" for every filter
+  that takes one - `prioritaet`, `tag`, `suchtext`, `faellig_vor`, and
+  `faellig_nach` alike. `limit` still rejects `0`.
   `get_agenda` takes its tasks through the same path.
   **Breaking**, in three ways:
   - Results are **sorted** by `faellig_datum` ascending (tasks without a
