@@ -740,18 +740,33 @@ def _extract_exdates(component) -> list[str]:
     return result
 
 
+def _day_zone(component) -> tzinfo:
+    """The zone this component's days are reckoned in.
+
+    Deliberately not `_wire_zone`, which answers a different question - how a
+    value is *written*. It sends anything but an IANA zone to UTC, and for a
+    floating component that would put a 01:00 occurrence on the previous day,
+    disagreeing with `_occurrence_key`, which reads a floating value in the
+    server's default zone like everything else here. So: the zone DTSTART
+    names when it names one, the default zone otherwise.
+    """
+    zone = _component_zone(component)
+    return zone if zone is not None else get_default_timezone()
+
+
 def _local_date(value: date | datetime, zone: tzinfo) -> date:
     """The calendar day `value` falls on, seen from the component's own zone.
 
-    A date-only value already is a day; an aware datetime is re-expressed in
-    `zone` first, so "the 9th" means the 9th where the series runs, not
-    wherever the value happens to be spelled.
+    A date-only value already is a day; a datetime is re-expressed in `zone`
+    first, so "the 9th" means the 9th where the series runs, not wherever the
+    value happens to be spelled. A floating value is read in the server's
+    default zone on the way (`_as_utc`), the same reading `_occurrence_key`
+    gives it - the two must agree, or an occurrence is indexed under one day
+    and looked up under another.
     """
     if not isinstance(value, datetime):
         return value
-    if value.tzinfo is None:
-        return value.date()
-    return value.astimezone(zone).date()
+    return _as_utc(value).astimezone(zone).date()
 
 
 def _exdate_component_values(component) -> list[date | datetime]:
@@ -814,18 +829,22 @@ def _occurrence_index(component, *, until: date | None) -> _OccurrenceIndex:
     if dtstart_value is None:
         return _OccurrenceIndex({}, {}, False, False)
     all_day = not isinstance(dtstart_value, datetime)
-    zone = _wire_zone(_component_zone(component))
+    zone = _day_zone(component)
 
     by_key: dict[Any, date | datetime] = {}
     by_day: dict[date, list[date | datetime]] = {}
 
-    def record(value: date | datetime) -> None:
+    def _own_kind(value: date | datetime) -> date | datetime:
+        """`dateutil` expands an all-day series into naive midnights, and an
+        RDATE may be written either way. The set is kept in the component's
+        own kind, so an occurrence taken from it can be written straight back
+        as an EXDATE."""
         if all_day and isinstance(value, datetime):
-            # `dateutil` expands an all-day series into naive midnights, and
-            # an RDATE may be written either way. The set is the component's
-            # own kind, so that an occurrence taken from here can be written
-            # straight back as an EXDATE.
-            value = value.date()
+            return value.date()
+        return value
+
+    def record(value: date | datetime) -> None:
+        value = _own_kind(value)
         key = _occurrence_key(value, all_day=all_day)
         if key in by_key:
             return
@@ -849,7 +868,7 @@ def _occurrence_index(component, *, until: date | None) -> _OccurrenceIndex:
             if position >= _RECURRENCE_SCAN_LIMIT:
                 complete = False
                 break
-            if until is not None and _local_date(occurrence, zone) > until:
+            if until is not None and _local_date(_own_kind(occurrence), zone) > until:
                 break
             record(occurrence)
     except (ValueError, TypeError, OverflowError):
@@ -911,8 +930,9 @@ def resolve_exdate_specs(component, specs: list[str], *, noun: str = "event") ->
 
     all_day = not isinstance(start_value, datetime)
     zone = _wire_zone(_component_zone(component))
+    day_zone = _day_zone(component)
     parsed = [(spec, parse_datetime_input(spec, keep_zone=True)) for spec in specs]
-    index = _occurrence_index(component, until=max(_local_date(v, zone) for _, v in parsed))
+    index = _occurrence_index(component, until=max(_local_date(v, day_zone) for _, v in parsed))
 
     chosen: dict[Any, date | datetime] = {}
     skipped: list[tuple[str, str]] = []
@@ -960,6 +980,7 @@ def match_existing_exdates(
     start_value = _component_start(component)
     all_day = start_value is not None and not isinstance(start_value, datetime)
     zone = _wire_zone(_component_zone(component))
+    day_zone = _day_zone(component)
 
     by_key: dict[Any, date | datetime] = {}
     by_day: dict[date, list[Any]] = {}
@@ -968,7 +989,7 @@ def match_existing_exdates(
         if key in by_key:
             continue
         by_key[key] = value
-        by_day.setdefault(_local_date(value, zone), []).append(key)
+        by_day.setdefault(_local_date(value, day_zone), []).append(key)
 
     drop: set[Any] = set()
     skipped: list[tuple[str, str]] = []
@@ -1034,8 +1055,8 @@ def _check_exdates_match_occurrences(
     if not wanted:
         return
 
-    zone = _wire_zone(_component_zone(component))
-    index = _occurrence_index(component, until=max(_local_date(v, zone) for v in values))
+    day_zone = _day_zone(component)
+    index = _occurrence_index(component, until=max(_local_date(v, day_zone) for v in values))
     if not index.known or not index.complete:
         return  # a set we could not expand in full proves nothing
     for key in index.by_key:
