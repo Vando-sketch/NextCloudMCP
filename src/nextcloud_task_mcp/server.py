@@ -1547,8 +1547,10 @@ def build_server(
             notiz_id: The note's id.
             titel: New title, or None to leave unchanged.
             kategorie: New category, or None to leave unchanged.
-            inhalt: New full content - this REPLACES the existing content (use
-                append_notiz to add to it instead), or None to leave unchanged.
+            inhalt: New full content - this REPLACES the existing content
+                (use append_notiz to add to it, replace_in_notiz to change
+                one passage, or update_notiz_abschnitt to change one Markdown
+                section instead), or None to leave unchanged.
             favorit: New favorite flag, or None to leave unchanged.
 
         At least one field must be given.
@@ -1560,6 +1562,63 @@ def build_server(
             titel=titel, kategorie=kategorie, inhalt=inhalt, favorit=favorit
         )
         return await _call_notes(notes_svc.update_note(notiz_id, fields))
+
+    @mcp.tool(annotations=_MODIFY)
+    async def replace_in_notiz(notiz_id: int, alt: str, neu: str) -> dict[str, Any]:
+        """Replace exactly one occurrence of a text passage in a note's content.
+
+        The targeted alternative to update_notiz's whole-content `inhalt`:
+        instead of re-sending the full content to change one passage, send
+        only the passage. `alt` must match the current content exactly
+        (character for character, including whitespace and newlines; may
+        span multiple lines) and exactly once - zero matches or more than
+        one match is an error and nothing is changed. On an "occurs N
+        times" error, retry with more surrounding context in `alt` (and the
+        same context repeated in `neu`) so it matches exactly once.
+
+        Read-then-write like append_notiz, so not atomic - a concurrent
+        edit between the read and the write may be lost.
+
+        Args:
+            notiz_id: The note's id.
+            alt: Existing text to replace, exactly as it appears in the content.
+            neu: Replacement text (may be empty to delete the passage).
+
+        Returns:
+            The updated note, same shape as get_notiz's return value.
+        """
+        return await _call_notes(notes_svc.replace_in_note(notiz_id, alt, neu))
+
+    @mcp.tool(annotations=_MODIFY)
+    async def update_notiz_abschnitt(notiz_id: int, abschnitt: str, inhalt: str) -> dict[str, Any]:
+        """Replace one Markdown section of a note - heading line plus body.
+
+        `abschnitt` is an ATX heading prefix like "## 7." that must select
+        exactly one heading line of the same level (same number of '#')
+        starting with it; the match stops at a word boundary, so "## 7"
+        does not select "## 75. History". The section runs from that
+        heading up to the next heading of the same or a higher level (or
+        the end of the note). Heading-shaped lines inside fenced code
+        blocks or a leading YAML front matter block are ignored; setext
+        (underlined) headings are not recognized.
+
+        `inhalt` replaces the whole section INCLUDING its heading line, so
+        start it with the (possibly renamed) heading. An empty `inhalt`
+        removes the section entirely.
+
+        Read-then-write like append_notiz, so not atomic - a concurrent
+        edit between the read and the write may be lost.
+
+        Args:
+            notiz_id: The note's id.
+            abschnitt: Heading prefix selecting the section, e.g. "## 7."
+                or "### Offene Punkte".
+            inhalt: The section's new text, starting with its heading line.
+
+        Returns:
+            The updated note, same shape as get_notiz's return value.
+        """
+        return await _call_notes(notes_svc.replace_note_section(notiz_id, abschnitt, inhalt))
 
     @mcp.tool(annotations=_CREATE)
     async def append_notiz(notiz_id: int, text: str) -> dict[str, Any]:
