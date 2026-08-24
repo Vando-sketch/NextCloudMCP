@@ -958,6 +958,80 @@ def build_server(
         return res
 
     @mcp.tool(annotations=_MODIFY)
+    async def update_exdates(
+        calendar_name: str,
+        event_uids: list[str],
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+        ignore_non_occurrences: bool = True,
+    ) -> dict[str, Any]:
+        """Add or remove single exception dates on recurring events, without rewriting the rest.
+
+        Use this - not update_event's ausnahme_daten - whenever the goal is
+        "also skip these dates" or "no longer skip these dates". ausnahme_daten
+        REPLACES an event's whole exception list, so it has to be handed every
+        date the series already skips, which means reading each event first and
+        writing dozens of dates back. This tool merges server-side: one call
+        carries only the dates that change, across as many series as needed.
+
+        Cancelling a day on several series at once (sick leave, holiday, a
+        block of school days) is the case it is built for: pass every affected
+        UID and the days themselves.
+
+        Args:
+            calendar_name: Display name of the calendar holding the events.
+            event_uids: UIDs of the events to change. Max 200 per call; an
+                empty list is rejected, duplicates are ignored.
+            add: Exception dates to add. A plain "YYYY-MM-DD" means the whole
+                day: on a timed series it cancels every occurrence that day,
+                whatever time the series starts - so the same list of days
+                works across series with different start times. An exact
+                ISO 8601 datetime cancels that one occurrence. Dates the event
+                already skips are left as they are.
+            remove: Exception dates to remove, so the occurrence happens again.
+                Same forms as `add`; a plain "YYYY-MM-DD" removes every
+                exception date the event has on that day.
+            ignore_non_occurrences: When true (the default), an entry that
+                changes nothing on a given event - a day that series does not
+                run on, a removal it never had - is reported under "skipped"
+                for that event and the rest are still applied. Set false to
+                have such an entry fail that event instead, leaving it
+                untouched; useful when a date is expected to exist everywhere
+                and a typo should not pass unnoticed.
+
+        Returns:
+            {"calendar_name", "succeeded", "failed", "results"}, where each
+            result is {"uid", "status": "ok"|"error"} plus, for "ok",
+            {"added", "removed", "total", "skipped": [{"value", "reason"}]} -
+            "total" being how many exception dates the event has afterwards.
+            The full list itself is deliberately not returned; read it with
+            get_event if it is really needed.
+        """
+        res: dict[str, Any] = await _call(
+            caldav_service.change_exdates,
+            calendar_name,
+            event_uids,
+            add,
+            remove,
+            ignore_non_occurrences,
+        )
+        # `_batch_over_events` reports in the German shape the other batch
+        # tools return; this tool's surface is English throughout, so the
+        # three envelope keys and the per-event failure entry are renamed.
+        results: list[dict[str, Any]] = []
+        for entry in res["ergebnisse"]:
+            if entry["status"] == "fehler":
+                results.append({"uid": entry["uid"], "status": "error", "error": entry["fehler"]})
+            else:
+                results.append(entry)
+        return {
+            "calendar_name": res["kalender_name"],
+            "succeeded": res["erfolgreich"],
+            "failed": res["fehlgeschlagen"],
+            "results": results,
+        }
+
+    @mcp.tool(annotations=_MODIFY)
     async def delete_events(kalender_name: str, event_uids: list[str]) -> dict[str, Any]:
         """Permanently delete multiple events from a calendar.
 

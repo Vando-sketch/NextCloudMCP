@@ -1498,3 +1498,334 @@ def test_extract_freebusy_periods_reads_a_value_without_z_as_utc():
 def test_extract_freebusy_periods_no_freebusy_property_is_empty():
     vfb = FreeBusy()
     assert event_mapping.extract_freebusy_periods(vfb) == []
+
+
+# --- apply_exdate_changes: additive/subtractive EXDATE edits ------------------
+#
+# The counterpart of the `ausnahme_daten` tests above, which cover the
+# replacing path. What matters here is that an existing set survives, that a
+# whole day resolves against the series' own start time, and that a spec
+# naming nothing is reported instead of raised.
+
+
+def _recurring(start: str = "2026-07-20T09:00:00", rule: str = "FREQ=WEEKLY;BYDAY=MO") -> Event:
+    event = _new_event()
+    _apply(event, titel="Standup", start=start, wiederholung=rule)
+    return event
+
+
+def test_exdate_add_keeps_the_existing_entries():
+    event = _recurring()
+    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-08-03T09:00:00"])
+
+    assert report["added"] == 1
+    assert report["removed"] == 0
+    assert report["total"] == 2
+    assert report["skipped"] == []
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == [
+        "2026-07-27T09:00:00+02:00",
+        "2026-08-03T09:00:00+02:00",
+    ]
+
+
+def test_exdate_add_accepts_a_whole_day_for_a_timed_series():
+    # The point of the tool: the caller cancels "the 27th" without knowing
+    # that this particular series starts at 09:00.
+    event = _recurring()
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+
+
+def test_exdate_add_of_a_whole_day_cancels_every_occurrence_on_it():
+    event = _new_event()
+    _apply(
+        event,
+        titel="Zwei am Tag",
+        start="2026-07-20T09:00:00",
+        wiederholung="FREQ=HOURLY;INTERVAL=4;BYHOUR=9,13",
+    )
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-21"])
+
+    assert report["added"] == 2
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == [
+        "2026-07-21T09:00:00+02:00",
+        "2026-07-21T13:00:00+02:00",
+    ]
+
+
+def test_exdate_add_reports_a_day_the_series_does_not_run_on():
+    event = _recurring()  # Mondays only
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-22", "2026-07-27"])
+
+    assert report["added"] == 1
+    assert [entry["value"] for entry in report["skipped"]] == ["2026-07-22"]
+    assert "no occurrence on that day" in report["skipped"][0]["reason"]
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+
+
+def test_exdate_add_can_refuse_to_skip_instead():
+    event = _recurring()
+
+    with pytest.raises(InvalidEventDataError, match="2026-07-22"):
+        event_mapping.apply_exdate_changes(event, add=["2026-07-22"], ignore_non_occurrences=False)
+    # Nothing was written, not even the entries that did resolve.
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+
+
+def test_exdate_add_is_idempotent():
+    event = _recurring()
+    event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T09:00:00"])
+
+    assert report["added"] == 0
+    assert report["total"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+
+
+def test_exdate_remove_drops_only_what_it_names():
+    event = _recurring()
+    _apply(event, ausnahme_daten=["2026-07-27T09:00:00", "2026-08-03T09:00:00"])
+
+    report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27"])
+
+    assert report["removed"] == 1
+    assert report["total"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-03T09:00:00+02:00"]
+
+
+def test_exdate_remove_reports_one_the_event_never_had():
+    event = _recurring()
+    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+
+    report = event_mapping.apply_exdate_changes(event, remove=["2026-08-03"])
+
+    assert report["removed"] == 0
+    assert report["skipped"] == [
+        {"value": "2026-08-03", "reason": "this event has no exception date on that day"}
+    ]
+
+
+def test_exdate_remove_works_on_a_leftover_of_a_moved_series():
+    # The series moved to Tuesdays; the old Monday exception is no longer an
+    # occurrence of anything, and still has to be removable.
+    event = _recurring()
+    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+    _apply(event, wiederholung="FREQ=WEEKLY;BYDAY=TU")
+
+    report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27T09:00:00"])
+
+    assert report["removed"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+
+
+def test_exdate_remove_is_applied_before_add():
+    event = _recurring()
+    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"], remove=["2026-07-27"])
+
+    assert (report["added"], report["removed"], report["total"]) == (1, 1, 1)
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+
+
+def test_exdate_add_on_an_all_day_series_takes_days():
+    event = _new_event()
+    _apply(event, titel="Urlaubstag", start="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27"]
+
+
+def test_exdate_add_of_a_datetime_to_an_all_day_series_is_reported():
+    event = _new_event()
+    _apply(event, titel="Urlaubstag", start="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T09:00:00"])
+
+    assert report["added"] == 0
+    assert "all-day" in report["skipped"][0]["reason"]
+
+
+def test_exdate_add_keeps_one_property_and_one_zone():
+    # Same invariant the replacing path holds: one EXDATE property, one TZID,
+    # no value carrying its own 'Z' next to it (RFC 5545 3.2.19).
+    event = _new_event()
+    _apply(
+        event,
+        titel="Standup",
+        start="2026-07-20T09:00:00 Europe/Berlin",
+        wiederholung="FREQ=WEEKLY;BYDAY=MO",
+        ausnahme_daten=["2026-07-27T09:00:00"],
+    )
+
+    event_mapping.apply_exdate_changes(event, add=["2026-08-03T07:00:00+00:00"])
+
+    lines = event.to_ical().decode().splitlines()
+    exdate_lines = [line for line in lines if line.startswith("EXDATE")]
+    assert len(exdate_lines) == 1
+    assert exdate_lines[0] == "EXDATE;TZID=Europe/Berlin:20260727T090000,20260803T090000"
+
+
+def test_exdate_add_on_a_series_with_no_recurrence_keeps_an_exact_datetime():
+    # No rule to expand, so nothing can be proven either way - an exact
+    # datetime is taken at face value, as the replacing path also does.
+    event = _new_event()
+    _apply(event, titel="Einzeltermin", start="2026-07-20T09:00:00")
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T09:00:00"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+
+
+def test_exdate_add_of_a_whole_day_needs_a_recurrence_to_expand():
+    event = _new_event()
+    _apply(event, titel="Einzeltermin", start="2026-07-20T09:00:00")
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
+
+    assert report["added"] == 0
+    assert "no recurrence to expand" in report["skipped"][0]["reason"]
+
+
+def test_exdate_add_counts_an_rdate_as_an_occurrence():
+    event = _recurring()
+    event.add("rdate", datetime(2026, 7, 22, 9, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-22"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-22T09:00:00+02:00"]
+
+
+def test_exdate_add_across_a_dst_boundary_matches_the_local_time():
+    # The series runs at 09:00 Berlin time all year; the November occurrence
+    # is an hour off in UTC terms, and naming its day still has to find it.
+    event = _recurring(start="2026-07-20T09:00:00 Europe/Berlin")
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-11-02"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-11-02T09:00:00+01:00"]
+
+
+def test_exdate_garbage_still_raises():
+    event = _recurring()
+
+    with pytest.raises(InvalidEventDataError):
+        event_mapping.apply_exdate_changes(event, add=["kein datum"])
+
+
+def test_exdate_add_reads_a_foreign_floating_exdate_in_the_default_zone():
+    """A floating EXDATE means the server's default zone, not the host's.
+
+    The default zone is deliberately set to one the test host does not run
+    in: reading the value with `astimezone` alone would silently use the
+    machine's own zone, which on a Berlin host looks identical to the correct
+    answer and differs everywhere else.
+    """
+    mapping.set_default_timezone("America/New_York")
+    event = _event_from_ics(
+        "BEGIN:VEVENT\n"
+        "UID:floating-1\n"
+        "SUMMARY:Standup\n"
+        "DTSTART;TZID=Europe/Berlin:20260720T090000\n"
+        "RRULE:FREQ=WEEKLY;BYDAY=MO\n"
+        "EXDATE:20260727T090000\n"
+        "END:VEVENT\n"
+    )
+
+    event_mapping.apply_exdate_changes(event, add=["2026-08-03T09:00:00 Europe/Berlin"])
+
+    # 09:00 New York is 15:00 Berlin: the stored exception keeps that instant
+    # when it is rewritten in the event's own zone alongside the new one.
+    exdate_line = [
+        line for line in event.to_ical().decode().splitlines() if line.startswith("EXDATE")
+    ][0]
+    assert exdate_line == "EXDATE;TZID=Europe/Berlin:20260727T150000,20260803T090000"
+
+
+def test_exdate_remove_works_on_an_event_without_a_start():
+    # Malformed, but reachable through import_ics: the stored values must
+    # still be keyed the same way on both sides of the operation.
+    event = _new_event()
+    event.add("exdate", datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc))
+
+    report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27T09:00:00Z"])
+
+    assert report["removed"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+
+
+def _floating_series() -> Event:
+    """A series another client left floating: DTSTART with no zone at all.
+
+    Its 01:00 start is what makes the day it falls on ambiguous - read in UTC
+    it belongs to the previous day, read in the server's default zone (which
+    is how every other part of the server reads a floating value) it does not.
+    """
+    return _event_from_ics(
+        "BEGIN:VEVENT\n"
+        "UID:float-1\n"
+        "SUMMARY:Nachtschicht\n"
+        "DTSTART:20260720T010000\n"
+        "RRULE:FREQ=WEEKLY;BYDAY=MO\n"
+        "END:VEVENT\n"
+    )
+
+
+def test_ausnahme_daten_still_accepts_an_occurrence_of_a_floating_series():
+    # The replacing path, which the shared occurrence index is also used by:
+    # this occurrence is real and must not be rejected as naming nothing.
+    event = _floating_series()
+
+    _apply(event, ausnahme_daten=["2026-07-27T01:00:00"])
+
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T01:00:00+02:00"]
+
+
+def test_exdate_add_of_a_whole_day_finds_a_floating_small_hours_occurrence():
+    event = _floating_series()
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T01:00:00+02:00"]
+
+
+def test_exdate_add_of_an_exact_occurrence_of_a_floating_series():
+    event = _floating_series()
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T01:00:00"])
+
+    assert (report["added"], report["skipped"]) == (1, [])
+
+
+def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
+    # Another client left a timed series carrying one date-only and one timed
+    # EXDATE. Those cannot go under one property, and sorting them by
+    # occurrence would compare a date with a datetime - a TypeError naming
+    # neither the event nor the problem.
+    event = _event_from_ics(
+        "BEGIN:VEVENT\n"
+        "UID:mixed-1\n"
+        "SUMMARY:Standup\n"
+        "DTSTART;TZID=Europe/Berlin:20260720T090000\n"
+        "RRULE:FREQ=WEEKLY;BYDAY=MO\n"
+        "EXDATE;TZID=Europe/Berlin:20260727T090000\n"
+        "EXDATE;VALUE=DATE:20260803\n"
+        "END:VEVENT\n"
+    )
+
+    with pytest.raises(InvalidEventDataError, match="mix date-only and datetime"):
+        event_mapping.apply_exdate_changes(event, add=["2026-08-10"])

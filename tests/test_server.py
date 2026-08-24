@@ -69,6 +69,7 @@ def test_all_tools_registered(tools):
         "create_event",
         "update_event",
         "update_events",
+        "update_exdates",
         "delete_event",
         "delete_events",
         "move_event",
@@ -747,6 +748,68 @@ def test_update_events_delegates(tools, fake_service):
     assert fields.clear == ("beschreibung",)
 
 
+def test_update_exdates_delegates(tools, fake_service):
+    fake_service.change_exdates.return_value = {
+        "kalender_name": "Termine",
+        "erfolgreich": 2,
+        "fehlgeschlagen": 0,
+        "ergebnisse": [
+            {"uid": "u1", "status": "ok", "added": 1, "removed": 0, "total": 7, "skipped": []},
+            {
+                "uid": "u2",
+                "status": "ok",
+                "added": 0,
+                "removed": 0,
+                "total": 3,
+                "skipped": [{"value": "2026-07-27", "reason": "no occurrence"}],
+            },
+        ],
+    }
+
+    res = _run(
+        tools["update_exdates"].fn(
+            calendar_name="Termine",
+            event_uids=["u1", "u2"],
+            add=["2026-07-27"],
+        )
+    )
+
+    # The tool's surface is English end to end, unlike the German batch shape
+    # `_batch_over_events` returns underneath it.
+    assert res["calendar_name"] == "Termine"
+    assert (res["succeeded"], res["failed"]) == (2, 0)
+    assert res["results"][0] == {
+        "uid": "u1",
+        "status": "ok",
+        "added": 1,
+        "removed": 0,
+        "total": 7,
+        "skipped": [],
+    }
+    assert res["results"][1]["skipped"] == [{"value": "2026-07-27", "reason": "no occurrence"}]
+    args, _ = fake_service.change_exdates.call_args
+    assert args == ("Termine", ["u1", "u2"], ["2026-07-27"], None, True)
+
+
+def test_update_exdates_renames_failed_entries(tools, fake_service):
+    fake_service.change_exdates.return_value = {
+        "kalender_name": "Termine",
+        "erfolgreich": 0,
+        "fehlgeschlagen": 1,
+        "ergebnisse": [{"uid": "u1", "status": "fehler", "fehler": "Event 'u1' was not found."}],
+    }
+
+    res = _run(
+        tools["update_exdates"].fn(
+            calendar_name="Termine", event_uids=["u1"], remove=["2026-07-27"]
+        )
+    )
+
+    assert res["results"] == [
+        {"uid": "u1", "status": "error", "error": "Event 'u1' was not found."}
+    ]
+
+
 def test_delete_events_delegates(tools, fake_service):
     expected_res = {
         "kalender_name": "Termine",
@@ -1263,6 +1326,7 @@ DESTRUCTIVE_TOOLS = {
     "update_event",
     "delete_event",
     "update_events",
+    "update_exdates",
     "delete_events",
     "move_event",
     "respond_to_event",

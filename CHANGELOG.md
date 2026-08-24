@@ -9,6 +9,25 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Exception dates can be changed one at a time.** The new `update_exdates`
+  tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
+  merging them into what each event already has. `update_event`'s
+  `ausnahme_daten` replaces an event's whole exception set, so cancelling one
+  more day on a series that already skips sixty occurrences meant reading all
+  sixty back and writing sixty-one - per series. This merges server-side, so
+  the call carries only what changes.
+  An entry given as a plain `"YYYY-MM-DD"` means the whole day: on a timed
+  series it cancels every occurrence that day, whatever time that series
+  starts, so one list of days covers several series with different start
+  times - a sick day, a holiday, a block of school days. An entry that changes
+  nothing on a given event (a day that series does not run on, a removal of an
+  exception it never had) is reported under that event's `skipped` and the
+  rest are still applied, unless `ignore_non_occurrences=false` asks for it to
+  fail that event instead. The reply reports counts, not the resulting list -
+  not moving that list across the wire is the point.
+  This tool's parameters and result keys are English, deliberately unlike the
+  German-named tools around it, which are unchanged.
+
 - **Tasks can recur, and can skip single occurrences.** `create_task` and
   `update_task` take `wiederholung` (raw RFC 5545 `RRULE`, the same form the
   event tools use) and `ausnahme_daten` (`EXDATE`), and `list_tasks`/`get_task`
