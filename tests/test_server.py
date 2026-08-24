@@ -714,6 +714,25 @@ def test_list_events_delegates_with_filters(tools, fake_service):
     )
 
 
+def test_list_events_cleanup_filters_stay_positional_or_keyword(tools):
+    """`list_events` deliberately does NOT copy `list_tasks`' keyword-only rule.
+
+    FastMCP lists a keyword-only parameter in the schema's `required` array
+    even when it has a default (that is why `list_tasks`' own filters show up
+    there). `list_events` has always advertised `required: []`, so a client
+    can call it with no arguments at all; marking the new filters keyword-only
+    would put four booleans into `required` and take that away. Appending them
+    to the positional list instead rebinds nothing, since they come last.
+    """
+    params = inspect.signature(tools["list_events"].fn).parameters
+
+    assert all(
+        params[name].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        for name in ("ohne_erinnerung", "ohne_sichtbarkeit", "ohne_tags", "uid_regex")
+    )
+    assert tools["list_events"].parameters.get("required", []) == []
+
+
 def test_list_events_passes_cleanup_filters_through(tools, fake_service):
     fake_service.list_events.return_value = []
     _run(
