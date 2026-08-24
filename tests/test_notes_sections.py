@@ -90,6 +90,25 @@ def test_prefix_must_end_at_word_boundary():
     assert "neu" in result
 
 
+def test_prefix_does_not_select_deeper_subnumbering():
+    doc = "## 7.1 Uebersicht\n\na\n\n## 7.1.1 Details\n\nb\n"
+    result = replace_section(doc, "## 7.1", "## 7.1 Uebersicht\n\nneu")
+    assert "## 7.1.1 Details" in result
+    assert "b\n" in result
+    assert "neu" in result
+
+
+def test_prefix_selecting_only_deeper_subnumbering_finds_nothing():
+    doc = "## 7.1.1 Details\n\nb\n"
+    with pytest.raises(InvalidNotizDataError, match="No heading matching"):
+        replace_section(doc, "## 7.1", "## 7.1 Neu")
+
+
+def test_multiline_abschnitt_is_rejected_as_invalid_prefix():
+    with pytest.raises(InvalidNotizDataError, match="heading prefix"):
+        replace_section(DOC, "## 7. Deployment\n\nNeuer Text.", "## 7.")
+
+
 def test_heading_level_must_match_exactly():
     doc = "# 7. Oben\n\na\n\n## 7. Unten\n\nb\n"
     result = replace_section(doc, "## 7.", "## 7. Unten\n\nneu")
@@ -107,6 +126,14 @@ def test_fence_only_closes_on_matching_marker():
     # The ~~~ inside a ``` block does not close it (CommonMark).
     doc = "## A\n\n```\n~~~\n## B\n```\n\n## C\n\nx\n"
     result = replace_section(doc, "## C", "## C\n\nneu\n")
+    assert "## B" in result
+    assert "neu" in result
+
+
+def test_fence_with_info_string_does_not_close_a_block():
+    # ```python inside a ``` block is content, not a closing fence.
+    doc = "## A\n\n```\n```python\n## B\n```\n\n## C\n\nx\n"
+    result = replace_section(doc, "## C", "## C\n\nneu")
     assert "## B" in result
     assert "neu" in result
 
