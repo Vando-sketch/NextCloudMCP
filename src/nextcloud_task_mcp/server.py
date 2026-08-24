@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -22,6 +23,114 @@ from .personal_auth import PersonalAuthProvider
 logger = logging.getLogger(__name__)
 
 _EXDATE_COMPACT_THRESHOLD = 10
+
+#: `kompakt=True` truncates free text (beschreibung/notizen) to this many chars.
+_COMPACT_TEXT_LIMIT = 200
+
+#: Window applied when list_events is called with neither calendars nor bounds.
+_DEFAULT_EVENT_WINDOW_DAYS = 90
+
+#: Every key a list_events entry can carry - the vocabulary `felder` validates
+#: against. Must track `event_mapping.parse_vevent` plus the "kalender" key the
+#: client layer adds.
+_EVENT_RESULT_KEYS = frozenset(
+    {
+        "uid",
+        "titel",
+        "start",
+        "ende",
+        "ganztaegig",
+        "ort",
+        "beschreibung",
+        "tags",
+        "erinnerungen",
+        "status",
+        "sichtbarkeit",
+        "wiederholung",
+        "ausnahme_daten",
+        "url",
+        "verknuepfte_aufgaben",
+        "wiederholung_von",
+        "kalender",
+        "organisator",
+        "teilnehmer",
+    }
+)
+
+#: Every key a list_tasks entry can carry - tracks `mapping.parse_vtodo` plus
+#: the "liste"/"liste_url" keys the client layer adds.
+_TASK_RESULT_KEYS = frozenset(
+    {
+        "uid",
+        "titel",
+        "start_datum",
+        "faellig_datum",
+        "prioritaet",
+        "fortschritt_prozent",
+        "status",
+        "ort",
+        "url",
+        "tags",
+        "erinnerungen",
+        "notizen",
+        "uebergeordnete_uid",
+        "wiederholung",
+        "ausnahme_daten",
+        "wiederholung_von",
+        "serie_uid",
+        "liste",
+        "liste_url",
+    }
+)
+
+
+def _slim_rows(
+    rows: list[dict[str, Any]],
+    *,
+    felder: list[str] | None,
+    kompakt: bool,
+    valid_keys: frozenset[str],
+    text_key: str,
+    detail_tool: str,
+    kompakt_drop: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Apply the `felder` whitelist and/or `kompakt` mode to listing results.
+
+    `felder` keeps only the named keys (validated against `valid_keys`, so a
+    typo errors instead of silently returning nothing). `kompakt` then drops
+    keys whose value is None/[]/"" plus everything in `kompakt_drop`, and
+    truncates `text_key` to `_COMPACT_TEXT_LIMIT` characters. A key the caller
+    whitelisted explicitly is exempt from `kompakt_drop` - asking for it wins.
+    """
+    if felder:
+        unknown = sorted(set(felder) - valid_keys)
+        if unknown:
+            raise ToolError(
+                f"Unbekannte felder-Einträge: {', '.join(unknown)}. "
+                f"Gültige Feldnamen: {', '.join(sorted(valid_keys))}"
+            )
+        wanted = set(felder)
+        rows = [{key: value for key, value in row.items() if key in wanted} for row in rows]
+        kompakt_drop = kompakt_drop - wanted
+    if not kompakt:
+        return rows
+    slimmed: list[dict[str, Any]] = []
+    for row in rows:
+        out: dict[str, Any] = {}
+        for key, value in row.items():
+            if key in kompakt_drop:
+                continue
+            if value is None or value == [] or value == "":
+                continue
+            if key == text_key and isinstance(value, str) and len(value) > _COMPACT_TEXT_LIMIT:
+                value = (
+                    value[:_COMPACT_TEXT_LIMIT]
+                    + f"… [gekürzt von {len(value)} Zeichen - Volltext über {detail_tool}]"
+                )
+            out[key] = value
+        slimmed.append(out)
+    return slimmed
+
 
 # MCP tool annotations (spec: ToolAnnotations). These are behaviour *hints* for
 # clients, not enforcement, but they are the only signal a client has for
@@ -222,6 +331,8 @@ def build_server(
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
+        felder: list[str] | None = None,
+        kompakt: bool = False,
         list_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """List tasks across one, several, or all Nextcloud task lists.
@@ -252,6 +363,16 @@ def build_server(
             suchtext: Optional substring filter over title (titel) and notes
                 (notizen). Both it and `tag` ignore case and Unicode spelling
                 ("STRASSE" matches "Straße").
+            felder: Optional whitelist of result keys (see Returns for the
+                vocabulary); every other key is omitted from each task dict.
+                Unknown names error. Use this to keep payloads small when you
+                only need a few fields.
+            kompakt: If True, omit keys whose value is None, [] or "" plus the
+                rarely useful liste_url (unless whitelisted via `felder`), and
+                truncate notizen to 200 characters (marked with "… [gekürzt
+                ...]"; get_task returns the full text). Values are otherwise
+                unchanged - an absent key just means empty/None. Combines with
+                `felder` (whitelist first, then compaction).
             list_name: Deprecated alias for `listen_namen` (takes a single list display name).
                 Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
                 is an error.
@@ -316,7 +437,7 @@ def build_server(
         else:
             target_list_names = listen_namen
 
-        return await _call(
+        tasks: list[dict[str, Any]] = await _call(
             caldav_service.list_tasks,
             list_names=target_list_names,
             only_open=nur_offene,
@@ -326,6 +447,15 @@ def build_server(
             tag=tag,
             suchtext=suchtext,
             limit=limit,
+        )
+        return _slim_rows(
+            tasks,
+            felder=felder,
+            kompakt=kompakt,
+            valid_keys=_TASK_RESULT_KEYS,
+            text_key="notizen",
+            detail_tool="get_task",
+            kompakt_drop=frozenset({"liste_url"}),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -641,6 +771,8 @@ def build_server(
         tag: str | None = None,
         limit: int | None = None,
         wiederholungen_aufloesen: bool = False,
+        felder: list[str] | None = None,
+        kompakt: bool = False,
     ) -> list[dict[str, Any]]:
         """List calendar events, across one, several, or all event calendars.
 
@@ -659,6 +791,21 @@ def build_server(
             wiederholungen_aufloesen: If True, expand recurring events into
                 their individual occurrences within [von, bis] (both bounds
                 required); each occurrence carries wiederholung_von.
+            felder: Optional whitelist of result keys (see Returns for the
+                vocabulary); every other key is omitted from each event dict.
+                Unknown names error. Use this to keep payloads small when you
+                only need a few fields.
+            kompakt: If True, omit keys whose value is None, [] or "" (e.g.
+                teilnehmer, organisator, wiederholung on most events) and
+                truncate beschreibung to 200 characters (marked with
+                "… [gekürzt ...]"; get_event returns the full text). Values
+                are otherwise unchanged - an absent key just means empty/None.
+                Combines with `felder` (whitelist first, then compaction).
+
+        Called with neither `kalender_namen` nor a time bound, this would scan
+        every event in the account; instead a default window of today ±90 days
+        (in the server's default timezone) is applied. Pass `von` and/or `bis`
+        explicitly - or name a calendar - to query outside that window.
 
         Naive datetimes (no UTC offset) are interpreted in the server's default
         timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin), like everywhere else
@@ -685,6 +832,10 @@ def build_server(
             (list of {"email", "name", "status", "rolle", "rsvp"}; "status" is
             "ausstehend"/"zugesagt"/"abgesagt"/"vorläufig"/"delegiert").
         """
+        if kalender_namen is None and not von and not bis:
+            today = datetime.now(mapping.get_default_timezone()).date()
+            von = (today - timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
+            bis = (today + timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
         events: list[dict[str, Any]] = await _call(
             caldav_service.list_events,
             calendar_names=kalender_namen,
@@ -706,7 +857,14 @@ def build_server(
                     "hinweis": "gekürzt - vollständige Liste über get_event abrufen",
                 }
             processed_events.append(event)
-        return processed_events
+        return _slim_rows(
+            processed_events,
+            felder=felder,
+            kompakt=kompakt,
+            valid_keys=_EVENT_RESULT_KEYS,
+            text_key="beschreibung",
+            detail_tool="get_event",
+        )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_event(kalender_name: str, event_uid: str) -> dict[str, Any]:

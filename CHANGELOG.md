@@ -9,6 +9,24 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Slimmer listing payloads on request.** `list_events` and `list_tasks`
+  accept two new optional parameters: `felder`, a whitelist of result keys
+  (unknown names error, listing the valid vocabulary), and `kompakt`, which
+  drops keys whose value is `null`/`[]`/`""` (e.g. `teilnehmer`,
+  `organisator`, `wiederholung` on most entries), drops `liste_url` from
+  tasks unless whitelisted, and truncates `beschreibung`/`notizen` to 200
+  characters with a visible `… [gekürzt …]` marker (`get_event`/`get_task`
+  return the full text). Both combine: whitelist first, then compaction.
+  Defaults leave the previous full output unchanged.
+
+### Changed
+
+- **`list_events` no longer scans the whole account by default.** Called with
+  neither `kalender_namen` nor `von`/`bis`, it now applies a default window of
+  today ±90 days in the server's default timezone instead of returning every
+  event ever stored. Passing any calendar name or either bound restores the
+  previous unbounded behaviour.
+
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
   merging them into what each event already has. `update_event`'s

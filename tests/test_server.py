@@ -589,6 +589,8 @@ def test_list_events_schema(tools):
         "tag",
         "limit",
         "wiederholungen_aufloesen",
+        "felder",
+        "kompakt",
     }
     assert schema.get("required", []) == []
 
@@ -672,6 +674,165 @@ def test_list_events_compacts_large_exdate_list(tools, fake_service):
     assert results[1]["ausnahme_daten"] == ["2026-08-01", "2026-08-02", "2026-08-03"]
     assert results[2]["ausnahme_daten"] == []
     assert results[3]["ausnahme_daten"] is None
+
+
+# --- Payload slimming (felder whitelist / kompakt mode) and default window ---
+
+
+def _sample_event() -> dict:
+    return {
+        "uid": "e1",
+        "titel": "Meeting",
+        "start": "2026-07-20T14:00:00+02:00",
+        "ende": "2026-07-20T15:00:00+02:00",
+        "ganztaegig": False,
+        "ort": None,
+        "beschreibung": "x" * 250,
+        "tags": [],
+        "erinnerungen": [],
+        "status": None,
+        "sichtbarkeit": None,
+        "wiederholung": None,
+        "ausnahme_daten": [],
+        "url": None,
+        "verknuepfte_aufgaben": [],
+        "wiederholung_von": None,
+        "kalender": "Termine",
+        "organisator": None,
+        "teilnehmer": [],
+    }
+
+
+def test_list_events_kompakt_drops_empty_fields_and_truncates_description(tools, fake_service):
+    fake_service.list_events.return_value = [_sample_event()]
+    (event,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], kompakt=True))
+    assert set(event) == {"uid", "titel", "start", "ende", "ganztaegig", "beschreibung", "kalender"}
+    assert event["ganztaegig"] is False  # False is a value, not "empty"
+    assert event["beschreibung"].startswith("x" * 200 + "…")
+    assert "gekürzt von 250 Zeichen" in event["beschreibung"]
+    assert "get_event" in event["beschreibung"]
+
+
+def test_list_events_kompakt_keeps_short_description_untouched(tools, fake_service):
+    event = _sample_event()
+    event["beschreibung"] = "kurz"
+    fake_service.list_events.return_value = [event]
+    (result,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], kompakt=True))
+    assert result["beschreibung"] == "kurz"
+
+
+def test_list_events_felder_whitelist_filters_keys(tools, fake_service):
+    fake_service.list_events.return_value = [_sample_event()]
+    (event,) = _run(
+        tools["list_events"].fn(kalender_namen=["Termine"], felder=["uid", "titel", "start"])
+    )
+    assert event == {"uid": "e1", "titel": "Meeting", "start": "2026-07-20T14:00:00+02:00"}
+
+
+def test_list_events_unknown_felder_entry_raises(tools, fake_service):
+    fake_service.list_events.return_value = [_sample_event()]
+    with pytest.raises(ToolError, match="Unbekannte felder-Einträge: summary"):
+        _run(tools["list_events"].fn(kalender_namen=["Termine"], felder=["uid", "summary"]))
+
+
+def test_list_events_felder_combines_with_kompakt(tools, fake_service):
+    fake_service.list_events.return_value = [_sample_event()]
+    (event,) = _run(
+        tools["list_events"].fn(
+            kalender_namen=["Termine"], felder=["uid", "titel", "ort"], kompakt=True
+        )
+    )
+    # `ort` is whitelisted but None, so kompakt still drops it.
+    assert event == {"uid": "e1", "titel": "Meeting"}
+
+
+def test_list_events_without_calendars_and_window_defaults_to_90_days(tools, fake_service):
+    from datetime import date, datetime, timedelta
+
+    fake_service.list_events.return_value = []
+    _run(tools["list_events"].fn())
+    _, kwargs = fake_service.list_events.call_args
+    today = datetime.now(mapping.get_default_timezone()).date()
+    assert date.fromisoformat(kwargs["von"]) == today - timedelta(days=90)
+    assert date.fromisoformat(kwargs["bis"]) == today + timedelta(days=90)
+
+
+def test_list_events_default_window_not_applied_when_scoped(tools, fake_service):
+    fake_service.list_events.return_value = []
+    _run(tools["list_events"].fn(kalender_namen=["Termine"]))
+    _, kwargs = fake_service.list_events.call_args
+    assert kwargs["von"] is None and kwargs["bis"] is None
+
+    fake_service.list_events.reset_mock()
+    _run(tools["list_events"].fn(von="2026-07-01"))
+    _, kwargs = fake_service.list_events.call_args
+    assert kwargs["von"] == "2026-07-01" and kwargs["bis"] is None
+
+    fake_service.list_events.reset_mock()
+    _run(tools["list_events"].fn(bis="2026-07-31"))
+    _, kwargs = fake_service.list_events.call_args
+    assert kwargs["von"] is None and kwargs["bis"] == "2026-07-31"
+
+
+def _sample_task() -> dict:
+    return {
+        "uid": "t1",
+        "titel": "Aufgabe",
+        "start_datum": None,
+        "faellig_datum": "2026-07-20",
+        "prioritaet": None,
+        "fortschritt_prozent": 0,
+        "status": "offen",
+        "ort": None,
+        "url": None,
+        "tags": [],
+        "erinnerungen": [],
+        "notizen": "n" * 300,
+        "uebergeordnete_uid": None,
+        "wiederholung": None,
+        "ausnahme_daten": [],
+        "wiederholung_von": None,
+        "serie_uid": None,
+        "liste": "Personal",
+        "liste_url": "https://cloud.example.com/remote.php/dav/calendars/demo/personal/",
+    }
+
+
+def test_list_tasks_kompakt_drops_empty_fields_and_liste_url(tools, fake_service):
+    fake_service.list_tasks.return_value = [_sample_task()]
+    (task,) = _run(tools["list_tasks"].fn(listen_namen=["Personal"], kompakt=True))
+    assert set(task) == {
+        "uid",
+        "titel",
+        "faellig_datum",
+        "fortschritt_prozent",
+        "status",
+        "notizen",
+        "liste",
+    }
+    assert task["fortschritt_prozent"] == 0  # 0 is a value, not "empty"
+    assert task["notizen"].startswith("n" * 200 + "…")
+    assert "gekürzt von 300 Zeichen" in task["notizen"]
+    assert "get_task" in task["notizen"]
+
+
+def test_list_tasks_felder_whitelist_filters_keys_and_validates(tools, fake_service):
+    fake_service.list_tasks.return_value = [_sample_task()]
+    (task,) = _run(
+        tools["list_tasks"].fn(listen_namen=["Personal"], felder=["uid", "titel", "faellig_datum"])
+    )
+    assert task == {"uid": "t1", "titel": "Aufgabe", "faellig_datum": "2026-07-20"}
+
+    with pytest.raises(ToolError, match="Unbekannte felder-Einträge: beschreibung"):
+        _run(tools["list_tasks"].fn(listen_namen=["Personal"], felder=["beschreibung"]))
+
+
+def test_list_tasks_kompakt_keeps_liste_url_when_whitelisted(tools, fake_service):
+    fake_service.list_tasks.return_value = [_sample_task()]
+    (task,) = _run(
+        tools["list_tasks"].fn(listen_namen=["Personal"], felder=["uid", "liste_url"], kompakt=True)
+    )
+    assert task == {"uid": "t1", "liste_url": _sample_task()["liste_url"]}
 
 
 # --- Attendees (teilnehmer) ---
