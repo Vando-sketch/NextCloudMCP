@@ -270,10 +270,10 @@ def _birthday_month_day(datum: str) -> tuple[int | None, int, int]:
     return (int(year_text) if year_text else None, month, day)
 
 
-def _resolve_birth_year(sources: dict[str, int | None], *, heute: date) -> int | None:
+def _resolve_birth_year(sources: dict[str, int | None]) -> int | None:
     """Reconcile the birth year given via `jahr`, `datum` and/or `name`.
 
-    Each source may name it; naming it twice is fine as long as both agree,
+    Each source may name it; naming it twice is fine as long as they agree,
     and disagreeing is an error rather than a silent pick. Returns None when
     no source names a year at all (an unknown birth year is allowed - the
     title then carries no year).
@@ -283,13 +283,12 @@ def _resolve_birth_year(sources: dict[str, int | None], *, heute: date) -> int |
     if len(distinct) > 1:
         spelled = ", ".join(f"{label}={value}" for label, value in sorted(named.items()))
         raise InvalidEventDataError(
-            f"Conflicting birth years ({spelled}). Give the birth year only once."
+            f"Conflicting birth years ({spelled}). Naming the birth year more than "
+            "once is fine, but the values have to agree."
         )
     if not distinct:
         return None
     year = distinct.pop()
-    if year > heute.year:
-        raise InvalidEventDataError(f"Birth year {year} is in the future.")
     if year < 1000:
         raise InvalidEventDataError(f"Birth year {year} is not a four-digit year.")
     return year
@@ -332,7 +331,9 @@ def birthday_fields(
       the day and one day before.
 
     The birth year may come from `jahr`, from a "YYYY-MM-DD" `datum`, or from
-    a trailing "(1975)" in `name`; sources that disagree are an error. A 02-29
+    a trailing "(1975)" in `name`; sources that disagree are an error, and a
+    birth date that hasn't happened yet is one too - the year names the year
+    of *birth*, never the year of the next celebration. A 02-29
     birthday is kept as 02-29 (a yearly rule then only fires in leap years -
     that is what the date says; give 03-01 or 02-28 instead if the celebration
     should be annual).
@@ -343,9 +344,7 @@ def birthday_fields(
     heute = heute or _today_local()
     clean_name, name_year = _birthday_name_and_year(name)
     datum_year, month, day = _birthday_month_day(datum)
-    birth_year = _resolve_birth_year(
-        {"jahr": jahr, "datum": datum_year, "name": name_year}, heute=heute
-    )
+    birth_year = _resolve_birth_year({"jahr": jahr, "datum": datum_year, "name": name_year})
 
     if birth_year is None:
         start = _next_occurrence(month, day, heute)
@@ -357,6 +356,15 @@ def birthday_fields(
             raise InvalidEventDataError(
                 f"{birth_year} is not a leap year, so {birth_year}-02-29 does not exist."
             ) from None
+        if start > heute:
+            # The whole *date*, not just the year: "2026-10-10" passed as a
+            # birth date two months before it happens is the shape an LLM
+            # produces when it reads "birthday on October 10th" as this
+            # year's celebration, and it would claim an age of 0 next year.
+            raise InvalidEventDataError(
+                f"Birth date {start.isoformat()} is in the future. Pass the date of "
+                "birth (or leave the year out), not the date of the next celebration."
+            )
         titel = f"{BIRTHDAY_TITLE_PREFIX} {clean_name} ({birth_year})"
 
     iso = start.isoformat()
