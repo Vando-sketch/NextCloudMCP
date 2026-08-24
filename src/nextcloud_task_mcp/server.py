@@ -287,8 +287,8 @@ def build_server(
         Returns:
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
             prioritaet, fortschritt_prozent, status ("offen"/"in-arbeit"/
-            "erledigt"/"abgesagt" - see update_task's status parameter to set
-            it), ort, url, tags, erinnerungen
+            "erledigt"/"abgesagt" - see create_task/update_task's status
+            parameter to set it), ort, url, tags, erinnerungen
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
@@ -362,6 +362,7 @@ def build_server(
         uebergeordnete_aufgabe: str | None = None,
         wiederholung: str | None = None,
         ausnahme_daten: list[str] | None = None,
+        status: str | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -380,7 +381,10 @@ def build_server(
                 back to start_datum) or an absolute ISO 8601 datetime -> VALARM.
                 The leading "-" is what makes a relative reminder fire *before*
                 that date; a positive duration ("PT30M") is valid and means 30
-                minutes *after* it.
+                minutes *after* it. Reading a task back normalizes equivalent
+                spellings of the same trigger to one form ("-P1W" reads back as
+                "-P7D", and "P0D"/"PT0S"/"-PT0M" - a reminder firing exactly at
+                that date - all read back as "-PT0M").
             notizen: Optional notes -> DESCRIPTION.
             sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
             uebergeordnete_aufgabe: Optional UID of an existing task to link this
@@ -395,6 +399,16 @@ def build_server(
                 all-day task, a full datetime otherwise) and must name an
                 occurrence the wiederholung actually produces; an entry that
                 would cancel nothing is rejected rather than stored.
+            status: Optional "offen" / "in-arbeit" / "erledigt" / "abgesagt" ->
+                STATUS, for creating a task that is not simply open - importing
+                an already-finished task, say, which otherwise took a
+                create_task plus a complete_task. Omitted (the default) creates
+                an open task. "erledigt" behaves like complete_task (also sets
+                PERCENT-COMPLETE=100 and a COMPLETED timestamp of *now*, since
+                the real completion time is not recorded anywhere to recover);
+                "in-arbeit" and "abgesagt" only set STATUS. An explicit
+                fortschritt_prozent in the same call wins over the percentage
+                status would otherwise derive.
 
         Date/time semantics for start_datum and faellig_datum: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
@@ -426,6 +440,7 @@ def build_server(
             uebergeordnete_aufgabe=uebergeordnete_aufgabe,
             wiederholung=wiederholung,
             ausnahme_daten=ausnahme_daten,
+            status=status,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -551,8 +566,18 @@ def build_server(
         return {"uid": task_uid}
 
     @mcp.tool(annotations=_MODIFY)
-    async def move_task(list_name: str, task_uid: str, ziel_liste: str) -> dict[str, str]:
+    async def move_task(list_name: str, task_uid: str, ziel_liste: str) -> dict[str, Any]:
         """Verschiebt eine Aufgabe in eine andere Aufgabenliste.
+
+        Nextcloud Tasks löst die Unteraufgaben-Hierarchie (RELATED-TO) nur
+        innerhalb *einer* Liste auf. Wird nur eine Hälfte eines
+        Eltern/Kind-Paares verschoben, bleibt die Verknüpfung als Eigenschaft
+        erhalten, zeigt in ihrer Liste aber ins Leere - ohne dass irgendwo ein
+        Fehler entsteht. Genau diese Fälle meldet `verwaiste_verknuepfungen`
+        (siehe Returns); um sie zu reparieren, entweder die Gegenstelle
+        ebenfalls verschieben oder die Verknüpfung per update_task setzen
+        (`uebergeordnete_aufgabe`) bzw. per `felder_leeren`
+        ("uebergeordnete_aufgabe") entfernen.
 
         Args:
             list_name: Anzeige-Name der Quell-Aufgabenliste.
@@ -561,10 +586,19 @@ def build_server(
 
         Returns:
             {"uid": ..., "von": Quell-Liste, "nach": Ziel-Liste,
-            "methode": "MOVE" | "kopiert"}
+            "methode": "MOVE" | "kopiert",
+            "verwaiste_verknuepfungen": Liste der Unteraufgaben-Verknüpfungen,
+            die durch den Verschiebevorgang ins Leere zeigen - je Eintrag
+            {"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}, wobei
+            "uid"/"liste" die Aufgabe benennen, die die Verknüpfung trägt, und
+            "fehlende_uebergeordnete_uid" die übergeordnete Aufgabe, die in
+            dieser Liste nicht (mehr) liegt. [] heißt "keine verwaisten
+            Verknüpfungen", None heißt "konnte nach dem Verschieben nicht
+            geprüft werden" - das Verschieben selbst war in beiden Fällen
+            erfolgreich}
         """
 
-        res: dict[str, str] = await _call(caldav_service.move_task, list_name, task_uid, ziel_liste)
+        res: dict[str, Any] = await _call(caldav_service.move_task, list_name, task_uid, ziel_liste)
         return res
 
     @mcp.tool(annotations=_READ_ONLY)

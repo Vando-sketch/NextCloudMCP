@@ -11,7 +11,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
@@ -58,6 +58,19 @@ from .errors import (
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+class _TaskLink(NamedTuple):
+    """One task's place in its list's hierarchy, as `_subtask_links` reads it.
+
+    `parent` is the UID its `RELATED-TO;RELTYPE=PARENT` names (None for a
+    top-level task); `titel` is its SUMMARY, carried along so that reporting a
+    dangling link doesn't cost a second fetch per task.
+    """
+
+    parent: str | None
+    titel: str
+
 
 # Nextcloud stores the calendar color as "#RRGGBB" or "#RRGGBBAA" (the Apple
 # calendar-color extension property). Anything else is rejected up front so a
@@ -1717,7 +1730,7 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
-    def move_task(self, list_name: str, task_uid: str, target_list: str) -> dict[str, str]:
+    def move_task(self, list_name: str, task_uid: str, target_list: str) -> dict[str, Any]:
         """Move a task from one task list to another.
 
         Prefers a CalDAV MOVE request (preserving server-side URL identity and
@@ -1730,9 +1743,113 @@ class CalDavService:
             target_list: Display name of the target task list.
 
         Returns:
-            {"uid": task_uid, "von": source, "nach": target, "methode": "MOVE" | "kopiert"}
+            {"uid": task_uid, "von": source, "nach": target,
+            "methode": "MOVE" | "kopiert",
+            "verwaiste_verknuepfungen": see `_orphaned_subtask_links`}
         """
-        return self._move_object(list_name, task_uid, target_list, "VTODO")
+        result: dict[str, Any] = dict(self._move_object(list_name, task_uid, target_list, "VTODO"))
+        result["verwaiste_verknuepfungen"] = self._orphaned_subtask_links(
+            list_name, target_list, task_uid
+        )
+        return result
+
+    def _subtask_links(self, calendar: DAVCalendar) -> dict[str, _TaskLink]:
+        """{UID: (parent UID or None, title)} for every task in a collection.
+
+        Only the three properties the hierarchy is made of are read - not a
+        full `parse_vtodo` - because this runs over two entire task lists to
+        answer one warning, and because a VTODO another client wrote oddly
+        must not turn that warning into a failed move. Completed tasks are
+        included: a done subtask is still nested under its parent. A task
+        whose UID cannot be read is skipped - nothing can point at it either.
+        """
+        links: dict[str, _TaskLink] = {}
+        for todo in calendar.todos(include_completed=True):
+            try:
+                component = todo.icalendar_component
+                uid = component.get("uid")
+                if uid is None:
+                    continue
+                links[str(uid)] = _TaskLink(
+                    parent=mapping.extract_parent_uid(component),
+                    titel=str(component.get("summary", "")),
+                )
+            except Exception:  # noqa: BLE001 - one odd task must not break the scan
+                continue
+        return links
+
+    def _orphaned_subtask_links(
+        self, source_name: str, target_name: str, task_uid: str
+    ) -> list[dict[str, str]] | None:
+        """Subtask links left pointing at a UID that is no longer in the same list.
+
+        Nextcloud Tasks resolves `RELATED-TO;RELTYPE=PARENT` within one task
+        list, so moving one half of a parent/child pair across lists breaks the
+        hierarchy without breaking anything the move itself can see: the moved
+        task keeps a RELATED-TO its new list has no parent for, and any subtask
+        left behind keeps one pointing at the parent that just left. Neither is
+        an error anywhere, and neither list shows the task as nested any more -
+        so the move reports them instead of leaving them to be discovered.
+
+        Returns one entry per dangling link, from the perspective of the task
+        that carries it (RELATED-TO always sits on the *child*):
+        `{"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}`. An empty
+        list means the move left the hierarchy intact.
+
+        Returns `None` - not `[]` - when the check itself could not be run.
+        The move has already succeeded by then, so its failure must not fail
+        the call; but "could not tell" must not read as "all clear" either.
+        """
+        try:
+            with self._lock:
+                source_col = self._resolve_collection(source_name, "VTODO")
+                target_col = self._resolve_collection(target_name, "VTODO")
+                if _normalize_collection_href(str(source_col.url)) == (
+                    _normalize_collection_href(str(target_col.url))
+                ):
+                    # A move into the same list rearranges no hierarchy at all.
+                    return []
+                source_display = source_col.get_display_name() or source_name
+                target_display = target_col.get_display_name() or target_name
+                source_links = self._subtask_links(source_col)
+                target_links = self._subtask_links(target_col)
+        except Exception:  # noqa: BLE001 - a warning is never worth failing a done move
+            logger.warning(
+                "Could not check task '%s' for orphaned subtask links after moving it "
+                "from '%s' to '%s'.",
+                task_uid,
+                source_name,
+                target_name,
+                exc_info=True,
+            )
+            return None
+
+        orphans: list[dict[str, str]] = []
+
+        # The moved task itself, now separated from a parent left behind.
+        moved = target_links.get(task_uid)
+        if moved is not None and moved.parent is not None and moved.parent not in target_links:
+            orphans.append(
+                {
+                    "uid": task_uid,
+                    "titel": moved.titel,
+                    "liste": target_display,
+                    "fehlende_uebergeordnete_uid": moved.parent,
+                }
+            )
+
+        # Its subtasks, left behind in the source list still pointing at it.
+        for uid, link in source_links.items():
+            if link.parent == task_uid:
+                orphans.append(
+                    {
+                        "uid": uid,
+                        "titel": link.titel,
+                        "liste": source_display,
+                        "fehlende_uebergeordnete_uid": task_uid,
+                    }
+                )
+        return orphans
 
     # ------------------------------------------------------------------
     # Event calendars (VEVENT)
