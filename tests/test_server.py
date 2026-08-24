@@ -524,7 +524,48 @@ def test_move_task_delegates(tools, fake_service):
         "nach": "Arbeit",
         "methode": "MOVE",
     }
-    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit")
+    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit", None, ())
+
+
+def test_move_task_passes_new_parent_through(tools, fake_service):
+    fake_service.move_task.return_value = {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+        "hierarchie": "gesetzt",
+    }
+    result = _run(
+        tools["move_task"].fn(
+            list_name="Privat",
+            task_uid="task-uid",
+            ziel_liste="Arbeit",
+            uebergeordnete_aufgabe="parent-uid",
+        )
+    )
+    assert result["hierarchie"] == "gesetzt"
+    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit", "parent-uid", ())
+
+
+def test_move_task_passes_felder_leeren_through_as_tuple(tools, fake_service):
+    fake_service.move_task.return_value = {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+        "hierarchie": "geleert",
+    }
+    _run(
+        tools["move_task"].fn(
+            list_name="Privat",
+            task_uid="task-uid",
+            ziel_liste="Arbeit",
+            felder_leeren=["uebergeordnete_aufgabe"],
+        )
+    )
+    fake_service.move_task.assert_called_once_with(
+        "Privat", "task-uid", "Arbeit", None, ("uebergeordnete_aufgabe",)
+    )
 
 
 def test_move_event_delegates(tools, fake_service):
@@ -545,7 +586,48 @@ def test_move_event_delegates(tools, fake_service):
         "nach": "Arbeit",
         "methode": "kopiert",
     }
-    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit")
+    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit", None, ())
+
+
+def test_move_event_passes_linked_task_through(tools, fake_service):
+    fake_service.move_event.return_value = {
+        "uid": "event-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+        "hierarchie": "gesetzt",
+    }
+    result = _run(
+        tools["move_event"].fn(
+            kalender_name="Privat",
+            event_uid="event-uid",
+            ziel_kalender="Arbeit",
+            verknuepfte_aufgabe="task-uid",
+        )
+    )
+    assert result["hierarchie"] == "gesetzt"
+    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit", "task-uid", ())
+
+
+def test_move_event_passes_felder_leeren_through_as_tuple(tools, fake_service):
+    fake_service.move_event.return_value = {
+        "uid": "event-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "MOVE",
+        "hierarchie": "geleert",
+    }
+    _run(
+        tools["move_event"].fn(
+            kalender_name="Privat",
+            event_uid="event-uid",
+            ziel_kalender="Arbeit",
+            felder_leeren=["verknuepfte_aufgabe"],
+        )
+    )
+    fake_service.move_event.assert_called_once_with(
+        "Privat", "event-uid", "Arbeit", None, ("verknuepfte_aufgabe",)
+    )
 
 
 # --- Calendar/event tools ---
