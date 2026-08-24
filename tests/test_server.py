@@ -67,6 +67,7 @@ def test_all_tools_registered(tools):
         "list_events",
         "get_event",
         "create_event",
+        "create_birthday",
         "update_event",
         "update_events",
         "update_exdates",
@@ -637,6 +638,50 @@ def test_create_event_builds_event_fields(tools, fake_service):
     assert fields.status == "bestätigt"
     assert fields.clear == ()
     fake_service.get_event.assert_called_once_with("Termine", "new-uid")
+
+
+# --- Birthdays (create_birthday) ---
+
+
+def test_create_birthday_schema(tools):
+    schema = tools["create_birthday"].parameters
+    assert set(schema["properties"]) == {"name", "datum", "jahr", "kalender"}
+    assert schema["required"] == ["name", "datum"]
+    assert schema["properties"]["kalender"]["default"] == "Geburtstage"
+
+
+def test_create_birthday_builds_the_convention_and_returns_the_event(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+    expected_event = {"uid": "new-uid", "titel": "🎂 Papa (1975)"}
+    fake_service.get_event.return_value = expected_event
+
+    result = _run(tools["create_birthday"].fn(name="Papa", datum="07-04", jahr=1975))
+
+    assert result == expected_event
+    (cal_name, fields), _ = fake_service.create_event.call_args
+    assert cal_name == "Geburtstage"
+    assert fields.titel == "🎂 Papa (1975)"
+    assert (fields.start, fields.ende) == ("1975-07-04", "1975-07-04")
+    assert fields.wiederholung == "FREQ=YEARLY"
+    assert fields.tags == ["Geburtstag"]
+    assert fields.sichtbarkeit == "privat"
+    assert fields.erinnerungen == ["-PT0M", "-P1D"]
+    fake_service.get_event.assert_called_once_with("Geburtstage", "new-uid")
+
+
+def test_create_birthday_writes_to_the_given_calendar(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+
+    _run(tools["create_birthday"].fn(name="Papa", datum="07-04", kalender="Familie"))
+
+    (cal_name, _), _ = fake_service.create_event.call_args
+    assert cal_name == "Familie"
+
+
+def test_create_birthday_invalid_datum_becomes_clean_tool_error(tools, fake_service):
+    with pytest.raises(ToolError, match="Could not parse datum"):
+        _run(tools["create_birthday"].fn(name="Papa", datum="4.7."))
+    fake_service.create_event.assert_not_called()
 
 
 def test_update_event_passes_clear_fields(tools, fake_service):

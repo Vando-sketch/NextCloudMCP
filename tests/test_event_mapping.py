@@ -1829,3 +1829,146 @@ def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
 
     with pytest.raises(InvalidEventDataError, match="mix date-only and datetime"):
         event_mapping.apply_exdate_changes(event, add=["2026-08-10"])
+
+
+# --- Birthday convention (birthday_fields) ---
+
+
+_HEUTE = date(2026, 8, 24)
+
+
+def _birthday(name: str = "Papa", datum: str = "07-04", jahr: int | None = None) -> EventFields:
+    return event_mapping.birthday_fields(name, datum, jahr, heute=_HEUTE)
+
+
+def test_birthday_fields_writes_the_full_convention():
+    fields = _birthday("Papa", "07-04", 1975)
+
+    assert fields.titel == "🎂 Papa (1975)"
+    assert (fields.start, fields.ende) == ("1975-07-04", "1975-07-04")
+    assert fields.tags == ["Geburtstag"]
+    assert fields.sichtbarkeit == "privat"
+    assert fields.wiederholung == "FREQ=YEARLY"
+    assert fields.erinnerungen == ["-PT0M", "-P1D"]
+    assert fields.clear == ()
+
+
+def test_birthday_fields_starts_in_the_birth_year_so_the_age_is_readable():
+    # The whole point of the birth year as DTSTART: occurrence year - start
+    # year is the age. Starting "this year" would silently throw that away.
+    assert _birthday("Julia Beck", "02-02", 1996).start == "1996-02-02"
+
+
+def test_birthday_fields_takes_the_year_from_a_full_datum():
+    fields = _birthday("Mama", "1981-02-05")
+
+    assert (fields.titel, fields.start) == ("🎂 Mama (1981)", "1981-02-05")
+
+
+def test_birthday_fields_takes_the_year_from_a_title_read_back():
+    fields = _birthday("🎂 Papa (1975)", "07-04")
+
+    assert (fields.titel, fields.start) == ("🎂 Papa (1975)", "1975-07-04")
+
+
+def test_birthday_fields_does_not_double_the_cake():
+    assert _birthday("🎂 Marlene", "09-03", 2008).titel == "🎂 Marlene (2008)"
+
+
+def test_birthday_fields_accepts_the_same_year_from_several_sources():
+    fields = _birthday("Papa (1975)", "1975-07-04", 1975)
+
+    assert fields.titel == "🎂 Papa (1975)"
+
+
+def test_birthday_fields_rejects_conflicting_years():
+    with pytest.raises(InvalidEventDataError, match="Conflicting birth years"):
+        _birthday("Papa (1975)", "1976-07-04")
+
+
+def test_birthday_fields_without_a_year_omits_it_and_starts_at_the_next_occurrence():
+    # 07-02 already passed in 2026 (today is 2026-08-24), so the series starts
+    # next year rather than in the past.
+    fields = _birthday("Oma Walli", "07-02")
+
+    assert (fields.titel, fields.start, fields.ende) == (
+        "🎂 Oma Walli",
+        "2027-07-02",
+        "2027-07-02",
+    )
+
+
+def test_birthday_fields_without_a_year_uses_this_year_when_still_ahead():
+    assert _birthday("Marlene", "09-03").start == "2026-09-03"
+
+
+def test_birthday_fields_without_a_year_counts_today_as_upcoming():
+    assert _birthday("Heute", "08-24").start == "2026-08-24"
+
+
+def test_birthday_fields_without_a_year_finds_the_next_real_leap_day():
+    assert _birthday("Schaltjahr", "02-29").start == "2028-02-29"
+
+
+def test_birthday_fields_rejects_a_leap_day_in_a_non_leap_birth_year():
+    with pytest.raises(InvalidEventDataError, match="1997 is not a leap year"):
+        _birthday("Schaltjahr", "02-29", 1997)
+
+
+def test_birthday_fields_keeps_a_leap_day_birth_year():
+    assert _birthday("Schaltjahr", "02-29", 1996).start == "1996-02-29"
+
+
+@pytest.mark.parametrize("datum", ["4.7.", "07/04", "2026-07", "07-04-1975", "Juli"])
+def test_birthday_fields_rejects_unparseable_datum(datum):
+    with pytest.raises(InvalidEventDataError, match="Could not parse datum"):
+        _birthday("Papa", datum)
+
+
+def test_birthday_fields_rejects_an_impossible_month_day():
+    with pytest.raises(InvalidEventDataError, match="not a valid month/day"):
+        _birthday("Papa", "13-04")
+
+
+def test_birthday_fields_rejects_a_future_birth_year():
+    with pytest.raises(InvalidEventDataError, match="is in the future"):
+        _birthday("Baby", "07-04", 2027)
+
+
+def test_birthday_fields_rejects_a_two_digit_birth_year():
+    with pytest.raises(InvalidEventDataError, match="not a four-digit year"):
+        _birthday("Papa", "07-04", 75)
+
+
+@pytest.mark.parametrize("name", ["", "   ", "🎂", "🎂 (1975)"])
+def test_birthday_fields_rejects_an_empty_name(name):
+    with pytest.raises(InvalidEventDataError, match="name must not be empty"):
+        _birthday(name, "07-04")
+
+
+def test_birthday_fields_defaults_today_to_the_server_timezone():
+    # No `heute` given: the fallback start must be a real upcoming date, not
+    # whatever a naive utcnow would make of it.
+    fields = event_mapping.birthday_fields("Ohne Jahr", "07-02")
+
+    heute = datetime.now(mapping.get_default_timezone()).date()
+    assert date.fromisoformat(str(fields.start)) >= heute
+
+
+def test_birthday_fields_round_trip_through_a_vevent():
+    # The convention has to survive being written and read back the way the
+    # existing entries in the birthday calendar look.
+    event = _new_event("birthday-1")
+    event_mapping.apply_event_fields(event, _birthday("Papa", "07-04", 1975))
+
+    parsed = event_mapping.parse_vevent(event)
+
+    assert parsed["titel"] == "🎂 Papa (1975)"
+    assert (parsed["start"], parsed["ende"]) == ("1975-07-04", "1975-07-04")
+    assert parsed["ganztaegig"] is True
+    assert parsed["wiederholung"] == "FREQ=YEARLY"
+    assert parsed["tags"] == ["Geburtstag"]
+    assert parsed["sichtbarkeit"] == "privat"
+    # "-PT0M" is a zero-length trigger; icalendar spells that "P0D" on the way
+    # back out, which is the same moment and what the calendar already holds.
+    assert sorted(parsed["erinnerungen"]) == ["-P1D", "P0D"]
