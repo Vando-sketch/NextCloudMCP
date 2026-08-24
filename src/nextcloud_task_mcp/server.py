@@ -811,6 +811,58 @@ def build_server(
         event: dict[str, Any] = await _call(caldav_service.get_event, kalender_name, new_uid)
         return event
 
+    @mcp.tool(annotations=_CREATE)
+    async def create_birthday(
+        name: str,
+        datum: str,
+        jahr: int | None = None,
+        kalender: str = event_mapping.BIRTHDAY_CALENDAR,
+    ) -> dict[str, Any]:
+        """Create a birthday entry, with the whole birthday convention filled in.
+
+        One call instead of create_event plus an update_event per person: the
+        title, recurrence, tag, visibility and reminders are not parameters
+        here, they are the convention every entry in the birthday calendar
+        follows. What gets written:
+
+        - Title "🎂 <name> (<Geburtsjahr>)" - without the parentheses when no
+          birth year is known.
+        - An all-day, one-day event starting on the *birth* date, so each
+          occurrence's year minus the start year is the age being celebrated.
+          Without a birth year it starts on the next upcoming occurrence.
+        - wiederholung "FREQ=YEARLY", tags ["Geburtstag"], sichtbarkeit
+          "privat", erinnerungen ["-PT0M", "-P1D"] (on the day itself and the
+          day before).
+
+        Args:
+            name: The person's name, without the cake and without the year
+                (both are added). Passing a title read back from an existing
+                entry ("🎂 Papa (1975)") works too - the cake is not doubled
+                and the year in parentheses is read as the birth year.
+            datum: The birthday as "MM-DD" (e.g. "07-04"), or as a full
+                "YYYY-MM-DD" with the birth year already in it. A 02-29
+                birthday stays 02-29, and a yearly rule then only fires in
+                leap years - pass 02-28 or 03-01 instead if the entry should
+                show up every year.
+            jahr: Optional birth year. May instead come from `datum` or from
+                a trailing "(1975)" in `name`; giving it twice is fine as long
+                as the values agree, and conflicting values are an error. An
+                unknown birth year is fine - the title then carries no year.
+            kalender: Display name of the target calendar, "Geburtstage" by
+                default.
+
+        Returns:
+            The created event dict, same shape as get_event's return value
+            (see get_event's docstring for the full key list).
+        """
+        try:
+            fields = event_mapping.birthday_fields(name, datum, jahr)
+        except TaskMcpError as exc:
+            raise ToolError(str(exc)) from exc
+        new_uid = await _call(caldav_service.create_event, kalender, fields)
+        event: dict[str, Any] = await _call(caldav_service.get_event, kalender, new_uid)
+        return event
+
     @mcp.tool(annotations=_MODIFY)
     async def update_event(
         kalender_name: str,

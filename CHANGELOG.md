@@ -9,6 +9,21 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Birthdays are one call, not two.** The new `create_birthday(name, datum,
+  jahr=None, kalender="Geburtstage")` writes the whole birthday convention
+  itself: title `"🎂 <Name> (<Geburtsjahr>)"`, an all-day one-day event
+  starting on the *birth* date (so occurrence year minus start year is the age
+  being celebrated), `FREQ=YEARLY`, tag `Geburtstag`, `sichtbarkeit` `privat`,
+  and reminders on the day and one day before. Entering eight birthdays used to
+  mean sixteen calls - a `create_event` plus an `update_event` each - with four
+  fields per person that are easy to get subtly wrong.
+  `datum` is `"MM-DD"` or a full `"YYYY-MM-DD"`; the birth year may come from
+  `jahr`, from `datum`, or from a trailing `"(1975)"` in `name` (so a title read
+  back from an existing entry can be passed straight in - the cake is not
+  doubled either), and sources that disagree are rejected rather than
+  silently resolved. With no birth year known the title carries none and the
+  series starts on the next upcoming occurrence.
+
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
   merging them into what each event already has. `update_event`'s

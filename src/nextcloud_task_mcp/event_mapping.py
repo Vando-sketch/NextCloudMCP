@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -24,6 +25,7 @@ from .mapping import (
     apply_alarms,
     extract_alarms,
     format_datetime_output,
+    get_default_timezone,
     local_midnight,
     match_existing_exdates,
     names_timezone,
@@ -185,6 +187,188 @@ class EventFields:
     verknuepfte_aufgabe: str | None = None  # VTODO UID -> RELATED-TO;RELTYPE=PARENT (timeboxing)
     teilnehmer: list[dict] | None = None  # ATTENDEEs; see apply_event_fields for entry shape
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
+
+
+# --- Birthday convention (create_birthday) -----------------------------------
+#
+# Birthdays are plain VEVENTs, but every one of them is written the same way:
+# an all-day event on the birth date, repeating yearly, titled with a cake and
+# the birth year in parentheses. Writing that by hand is a create_event plus an
+# update_event per person and four fields that are easy to get subtly wrong
+# (a missing tag, a public birthday, a start in the current year instead of the
+# birth year - which silently loses the age the title promises). `create_birthday`
+# takes name + date and this module fills in the rest.
+
+#: Default calendar `create_birthday` writes to.
+BIRTHDAY_CALENDAR = "Geburtstage"
+
+#: Title prefix; the birth year, when known, follows the name in parentheses.
+BIRTHDAY_TITLE_PREFIX = "🎂"
+
+#: The fixed field values every birthday entry gets.
+BIRTHDAY_TAG = "Geburtstag"
+BIRTHDAY_RRULE = "FREQ=YEARLY"
+BIRTHDAY_VISIBILITY = "privat"
+#: On the day itself (00:00 of the all-day event) and one day before.
+BIRTHDAY_REMINDERS: tuple[str, ...] = ("-PT0M", "-P1D")
+
+#: `datum`: "MM-DD", or "YYYY-MM-DD" with the birth year already in it.
+_BIRTHDAY_DATE_RE = re.compile(r"^(?:(\d{4})-)?(\d{1,2})-(\d{1,2})$")
+
+#: A trailing "(1975)" in `name` - i.e. a title copied back from an existing
+#: entry - names the birth year too rather than becoming part of the name.
+_TRAILING_YEAR_RE = re.compile(r"^(?P<name>.*?)\s*\((?P<jahr>\d{4})\)$")
+
+#: Safety bound for the leap-day search in `_next_occurrence`: the longest
+#: real gap between leap years is 8 (2096 -> 2104).
+_MAX_YEAR_LOOKAHEAD = 8
+
+
+def _today_local() -> date:
+    """Today's date in the server's default timezone."""
+    return datetime.now(get_default_timezone()).date()
+
+
+def _birthday_name_and_year(name: str) -> tuple[str, int | None]:
+    """Split a birthday `name` into the bare name and a year it spells out.
+
+    Strips a leading cake and a trailing "(1975)" so that passing a title read
+    back from an existing entry ("🎂 Papa (1975)") produces the same name as
+    passing "Papa" - not "🎂 🎂 Papa (1975) (1975)".
+    """
+    cleaned = name.strip()
+    while cleaned.startswith(BIRTHDAY_TITLE_PREFIX):
+        cleaned = cleaned[len(BIRTHDAY_TITLE_PREFIX) :].strip()
+    year: int | None = None
+    match = _TRAILING_YEAR_RE.match(cleaned)
+    if match:
+        cleaned = match.group("name").strip()
+        year = int(match.group("jahr"))
+    if not cleaned:
+        raise InvalidEventDataError("name must not be empty.")
+    return cleaned, year
+
+
+def _birthday_month_day(datum: str) -> tuple[int | None, int, int]:
+    """Parse `datum` into (year or None, month, day), validating the day exists."""
+    match = _BIRTHDAY_DATE_RE.match(datum.strip())
+    if match is None:
+        raise InvalidEventDataError(
+            f"Could not parse datum '{datum}': expected 'MM-DD' (e.g. '07-04'), or "
+            "'YYYY-MM-DD' with the birth year in it."
+        )
+    year_text, month_text, day_text = match.groups()
+    month, day = int(month_text), int(day_text)
+    try:
+        # A leap year, so that 02-29 validates here and is only rejected below
+        # if an actual *birth year* without a Feb 29 is given.
+        date(2000, month, day)
+    except ValueError:
+        raise InvalidEventDataError(
+            f"Could not parse datum '{datum}': {month:02d}-{day:02d} is not a valid month/day."
+        ) from None
+    return (int(year_text) if year_text else None, month, day)
+
+
+def _resolve_birth_year(sources: dict[str, int | None], *, heute: date) -> int | None:
+    """Reconcile the birth year given via `jahr`, `datum` and/or `name`.
+
+    Each source may name it; naming it twice is fine as long as both agree,
+    and disagreeing is an error rather than a silent pick. Returns None when
+    no source names a year at all (an unknown birth year is allowed - the
+    title then carries no year).
+    """
+    named = {label: value for label, value in sources.items() if value is not None}
+    distinct = set(named.values())
+    if len(distinct) > 1:
+        spelled = ", ".join(f"{label}={value}" for label, value in sorted(named.items()))
+        raise InvalidEventDataError(
+            f"Conflicting birth years ({spelled}). Give the birth year only once."
+        )
+    if not distinct:
+        return None
+    year = distinct.pop()
+    if year > heute.year:
+        raise InvalidEventDataError(f"Birth year {year} is in the future.")
+    if year < 1000:
+        raise InvalidEventDataError(f"Birth year {year} is not a four-digit year.")
+    return year
+
+
+def _next_occurrence(month: int, day: int, heute: date) -> date:
+    """The next month/day on or after `heute` - the start for an unknown birth year.
+
+    Skips years the date doesn't exist in, so a 02-29 birthday without a birth
+    year starts on a real leap day instead of being rejected.
+    """
+    for year in range(heute.year, heute.year + _MAX_YEAR_LOOKAHEAD + 1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        if candidate >= heute:
+            return candidate
+    raise InvalidEventDataError(  # pragma: no cover - unreachable for a valid month/day
+        f"Could not find an upcoming {month:02d}-{day:02d}."
+    )
+
+
+def birthday_fields(
+    name: str,
+    datum: str,
+    jahr: int | None = None,
+    *,
+    heute: date | None = None,
+) -> EventFields:
+    """Build the `EventFields` for one birthday entry, per the fixed convention.
+
+    - Title `"🎂 <name> (<birth year>)"`, without the parentheses when the
+      birth year is unknown.
+    - All-day, one day long, starting on the *birth* date - so the year of
+      each occurrence minus the DTSTART year is the age being celebrated.
+      With no birth year known, it starts on the next upcoming occurrence
+      instead (the series is the same either way).
+    - `FREQ=YEARLY`, tag "Geburtstag", `sichtbarkeit` "privat", reminders on
+      the day and one day before.
+
+    The birth year may come from `jahr`, from a "YYYY-MM-DD" `datum`, or from
+    a trailing "(1975)" in `name`; sources that disagree are an error. A 02-29
+    birthday is kept as 02-29 (a yearly rule then only fires in leap years -
+    that is what the date says; give 03-01 or 02-28 instead if the celebration
+    should be annual).
+
+    `heute` is injectable for tests; it defaults to today in the server's
+    default timezone.
+    """
+    heute = heute or _today_local()
+    clean_name, name_year = _birthday_name_and_year(name)
+    datum_year, month, day = _birthday_month_day(datum)
+    birth_year = _resolve_birth_year(
+        {"jahr": jahr, "datum": datum_year, "name": name_year}, heute=heute
+    )
+
+    if birth_year is None:
+        start = _next_occurrence(month, day, heute)
+        titel = f"{BIRTHDAY_TITLE_PREFIX} {clean_name}"
+    else:
+        try:
+            start = date(birth_year, month, day)
+        except ValueError:
+            raise InvalidEventDataError(
+                f"{birth_year} is not a leap year, so {birth_year}-02-29 does not exist."
+            ) from None
+        titel = f"{BIRTHDAY_TITLE_PREFIX} {clean_name} ({birth_year})"
+
+    iso = start.isoformat()
+    return EventFields(
+        titel=titel,
+        start=iso,
+        ende=iso,  # all-day `ende` is the inclusive last day: a one-day event
+        tags=[BIRTHDAY_TAG],
+        sichtbarkeit=BIRTHDAY_VISIBILITY,
+        wiederholung=BIRTHDAY_RRULE,
+        erinnerungen=list(BIRTHDAY_REMINDERS),
+    )
 
 
 def status_label_to_ical(label: str) -> str:
