@@ -19,6 +19,21 @@ This project does not yet follow Semantic Versioning releases.
   return the full text). Both combine: whitelist first, then compaction.
   Defaults leave the previous full output unchanged.
 
+- **Cleanup filters on `list_tasks` and `list_events`.** Items created by hand
+  on a phone are recognizable by all-uppercase UUIDs and missing
+  reminders/visibility/tags; four new filters turn the manual pass over sixty
+  events into one call: `ohne_erinnerung`, `ohne_sichtbarkeit` and `ohne_tags`
+  keep only items with an empty `erinnerungen` list / no readable `CLASS` /
+  no tags, and `uid_regex` keeps only items whose uid contains a match for a
+  regular expression (case-sensitive `re.search`; anchor with `^...$` for a
+  full match, e.g. `"^[A-F0-9-]+$"`). An unparsable pattern is an error, an
+  empty one is no filter. On tasks the filters describe the *stored* task and
+  run before recurrence expansion, so `uid_regex` matches the series uid,
+  never the synthetic `<uid>#<occurrence>` of an expanded row.
+  In support of this, task dicts returned by `list_tasks`/`get_task` now also
+  carry a `sichtbarkeit` key (`"öffentlich"`/`"privat"`/`"vertraulich"` or
+  `null`), which events already had.
+
 ### Changed
 
 - **`list_events` no longer scans the whole account by default.** Called with

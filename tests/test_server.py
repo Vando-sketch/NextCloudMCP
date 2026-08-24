@@ -353,6 +353,10 @@ def test_list_tasks_passes_nur_offene_through(tools, fake_service):
         prioritaet=None,
         tag=None,
         suchtext=None,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
         limit=None,
     )
 
@@ -378,6 +382,10 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
         prioritaet="hoch",
         tag="arbeit",
         suchtext="test",
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
         limit=5,
     )
 
@@ -393,6 +401,37 @@ def test_list_tasks_deprecated_list_name_alias_works(tools, fake_service):
         prioritaet=None,
         tag=None,
         suchtext=None,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
+        limit=None,
+    )
+
+
+def test_list_tasks_passes_cleanup_filters_through(tools, fake_service):
+    fake_service.list_tasks.return_value = []
+    _run(
+        tools["list_tasks"].fn(
+            listen_namen=["Personal"],
+            ohne_erinnerung=True,
+            ohne_sichtbarkeit=True,
+            ohne_tags=True,
+            uid_regex="^[A-F0-9-]+$",
+        )
+    )
+    fake_service.list_tasks.assert_called_once_with(
+        list_names=["Personal"],
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        ohne_erinnerung=True,
+        ohne_sichtbarkeit=True,
+        ohne_tags=True,
+        uid_regex="^[A-F0-9-]+$",
         limit=None,
     )
 
@@ -419,7 +458,16 @@ def test_list_tasks_tool_filters_added_after_limit_are_keyword_only(tools):
     assert positional == ["listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"]
     assert all(
         params[name].kind is inspect.Parameter.KEYWORD_ONLY
-        for name in ("prioritaet", "tag", "suchtext", "list_name")
+        for name in (
+            "prioritaet",
+            "tag",
+            "suchtext",
+            "ohne_erinnerung",
+            "ohne_sichtbarkeit",
+            "ohne_tags",
+            "uid_regex",
+            "list_name",
+        )
     )
 
 
@@ -429,6 +477,7 @@ def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
 
     assert {"listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"} <= set(properties)
     assert {"prioritaet", "tag", "suchtext", "list_name"} <= set(properties)
+    assert {"ohne_erinnerung", "ohne_sichtbarkeit", "ohne_tags", "uid_regex"} <= set(properties)
 
 
 def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
@@ -627,6 +676,10 @@ def test_list_events_schema(tools):
         "tag",
         "limit",
         "wiederholungen_aufloesen",
+        "ohne_erinnerung",
+        "ohne_sichtbarkeit",
+        "ohne_tags",
+        "uid_regex",
         "felder",
         "kompakt",
     }
@@ -654,6 +707,36 @@ def test_list_events_delegates_with_filters(tools, fake_service):
         tag="Privat",
         limit=10,
         expand=True,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
+    )
+
+
+def test_list_events_passes_cleanup_filters_through(tools, fake_service):
+    fake_service.list_events.return_value = []
+    _run(
+        tools["list_events"].fn(
+            kalender_namen=["Termine"],
+            ohne_erinnerung=True,
+            ohne_sichtbarkeit=True,
+            ohne_tags=True,
+            uid_regex="^[A-F0-9-]+$",
+        )
+    )
+    fake_service.list_events.assert_called_once_with(
+        calendar_names=["Termine"],
+        von=None,
+        bis=None,
+        suchtext=None,
+        tag=None,
+        limit=None,
+        expand=False,
+        ohne_erinnerung=True,
+        ohne_sichtbarkeit=True,
+        ohne_tags=True,
+        uid_regex="^[A-F0-9-]+$",
     )
 
 
@@ -1387,6 +1470,10 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
         prioritaet=None,
         tag=None,
         suchtext=None,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
     ):
         # Spelled out rather than (*args, **kwargs) on purpose: this is the
         # one place a test would notice the tool and the service drifting

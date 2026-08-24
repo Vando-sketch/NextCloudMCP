@@ -2256,3 +2256,112 @@ def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
     """0 is not how an integer parameter spells "unset" - None is - so it stays an error."""
     with pytest.raises(InvalidTaskDataError):
         mapping.filter_tasks([], limit=0)
+
+
+# --- Cleanup filters (ohne_erinnerung / ohne_sichtbarkeit / ohne_tags / uid_regex) ---
+
+
+def test_parse_vtodo_reads_class_as_sichtbarkeit():
+    todo = _new_todo()
+    todo.add("summary", "S")
+    todo.add("class", "PRIVATE")
+    assert mapping.parse_vtodo(todo)["sichtbarkeit"] == "privat"
+
+
+def test_parse_vtodo_missing_or_unknown_class_reads_as_none():
+    plain = _new_todo()
+    plain.add("summary", "S")
+    assert mapping.parse_vtodo(plain)["sichtbarkeit"] is None
+
+    foreign = _new_todo()
+    foreign.add("summary", "S")
+    foreign.add("class", "X-CORP-INTERNAL")  # a foreign extension must not break a listing
+    assert mapping.parse_vtodo(foreign)["sichtbarkeit"] is None
+
+
+def test_filter_tasks_ohne_erinnerung_keeps_only_tasks_without_reminders():
+    tasks = [
+        dict(_task("nackt", "2026-07-01"), erinnerungen=[]),
+        dict(_task("erinnert", "2026-07-02"), erinnerungen=["-PT30M"]),
+    ]
+    res = mapping.filter_tasks(tasks, ohne_erinnerung=True)
+    assert [t["uid"] for t in res] == ["nackt"]
+
+
+def test_filter_tasks_ohne_sichtbarkeit_keeps_only_tasks_without_class():
+    tasks = [
+        dict(_task("nackt", "2026-07-01"), sichtbarkeit=None),
+        dict(_task("privat", "2026-07-02"), sichtbarkeit="privat"),
+    ]
+    res = mapping.filter_tasks(tasks, ohne_sichtbarkeit=True)
+    assert [t["uid"] for t in res] == ["nackt"]
+
+
+def test_filter_tasks_ohne_tags_keeps_only_untagged_tasks():
+    tasks = [
+        dict(_task("nackt", "2026-07-01"), tags=[]),
+        dict(_task("getaggt", "2026-07-02"), tags=["Arbeit"]),
+    ]
+    res = mapping.filter_tasks(tasks, ohne_tags=True)
+    assert [t["uid"] for t in res] == ["nackt"]
+
+
+def test_filter_tasks_uid_regex_is_case_sensitive_search():
+    tasks = [
+        _task("5D3A2F00-90AB-4CDE-9AAF-000000000001", "2026-07-01"),
+        _task("5d3a2f00-90ab-4cde-9aaf-000000000002", "2026-07-02"),
+    ]
+    res = mapping.filter_tasks(tasks, uid_regex=r"^[A-F0-9-]+$")
+    assert [t["uid"] for t in res] == ["5D3A2F00-90AB-4CDE-9AAF-000000000001"]
+
+
+def test_filter_tasks_uid_regex_empty_string_is_no_filter():
+    tasks = [_task("a", "2026-07-01"), _task("b", "2026-07-02")]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, uid_regex="")] == ["a", "b"]
+
+
+def test_filter_tasks_invalid_uid_regex_raises():
+    with pytest.raises(InvalidTaskDataError, match="uid_regex"):
+        mapping.filter_tasks([], uid_regex="[unclosed")
+
+
+def test_filter_tasks_uid_regex_matches_the_series_uid_not_expanded_occurrence_uids():
+    """The regex runs before recurrence expansion, so an anchored pattern that
+    the synthetic "<uid>#<occurrence>" uid could never satisfy still keeps
+    every expanded row of a matching series."""
+    todo = _new_todo("AB12-SERIES")
+    todo.add("summary", "Woche")
+    todo.add("due", date(2026, 9, 1))
+    todo.add("rrule", {"FREQ": ["DAILY"]})
+
+    res = mapping.filter_tasks(
+        [mapping.parse_vtodo(todo)],
+        due_before="2026-09-02",
+        uid_regex=r"^[A-Z0-9-]+$",
+    )
+    assert [t["uid"] for t in res] == ["AB12-SERIES#2026-09-01", "AB12-SERIES#2026-09-02"]
+
+
+def test_filter_tasks_cleanup_filters_combined_shortlist_phone_created_tasks():
+    """The cleanup sweep these filters exist for: hand-created phone tasks carry
+    uppercase UUIDs and no reminders/visibility/tags."""
+    phone = dict(
+        _task("5D3A2F00-90AB-4CDE-9AAF-000000000001", "2026-07-01"),
+        erinnerungen=[],
+        sichtbarkeit=None,
+        tags=[],
+    )
+    curated = dict(
+        _task("gepflegt-1", "2026-07-02"),
+        erinnerungen=["-PT30M"],
+        sichtbarkeit="privat",
+        tags=["Arbeit"],
+    )
+    res = mapping.filter_tasks(
+        [phone, curated],
+        ohne_erinnerung=True,
+        ohne_sichtbarkeit=True,
+        ohne_tags=True,
+        uid_regex=r"^[A-F0-9-]+$",
+    )
+    assert [t["uid"] for t in res] == ["5D3A2F00-90AB-4CDE-9AAF-000000000001"]

@@ -1460,6 +1460,10 @@ class CalDavService:
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
+        ohne_erinnerung: bool = False,
+        ohne_sichtbarkeit: bool = False,
+        ohne_tags: bool = False,
+        uid_regex: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
 
@@ -1469,7 +1473,9 @@ class CalDavService:
         name queries that list once, not twice. `""` is a name like any other,
         i.e. an unknown one.
 
-        `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` filter the
+        `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` - and the
+        cleanup filters `ohne_erinnerung`/`ohne_sichtbarkeit`/`ohne_tags`/
+        `uid_regex` - filter the
         parsed results via `mapping.filter_tasks`, which also expands recurring
         tasks into their occurrences when `due_before` bounds the window (see
         `mapping._expand_recurring_tasks`). Each task dict gains a "liste"
@@ -1497,6 +1503,10 @@ class CalDavService:
                 tag=tag,
                 suchtext=suchtext,
                 limit=limit,
+                ohne_erinnerung=ohne_erinnerung,
+                ohne_sichtbarkeit=ohne_sichtbarkeit,
+                ohne_tags=ohne_tags,
+                uid_regex=uid_regex,
             )
 
         with self._lock:
@@ -1513,6 +1523,10 @@ class CalDavService:
             tag=tag,
             suchtext=suchtext,
             limit=limit,
+            ohne_erinnerung=ohne_erinnerung,
+            ohne_sichtbarkeit=ohne_sichtbarkeit,
+            ohne_tags=ohne_tags,
+            uid_regex=uid_regex,
         )
 
     def _parse_todos(
@@ -1999,6 +2013,11 @@ class CalDavService:
         tag: str | None = None,
         limit: int | None = None,
         expand: bool = False,
+        *,
+        ohne_erinnerung: bool = False,
+        ohne_sichtbarkeit: bool = False,
+        ohne_tags: bool = False,
+        uid_regex: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return events across one, several, or all VEVENT calendars, sorted by start.
 
@@ -2007,13 +2026,23 @@ class CalDavService:
         even when their master event started long before it. With
         `expand=True`, recurring events are additionally expanded into their
         individual occurrences within the window (requires both bounds).
-        `suchtext`/`tag`/`limit` filter the parsed results client-side via
-        `event_mapping.filter_events`.
+        `suchtext`/`tag`/`limit` - and the cleanup filters `ohne_erinnerung`/
+        `ohne_sichtbarkeit`/`ohne_tags`/`uid_regex` - filter the parsed
+        results client-side via `event_mapping.filter_events`.
         """
         with self._lock:
             events = self._collect_events(calendar_names, von, bis, expand)
 
-        result = event_mapping.filter_events(events, suchtext=suchtext, tag=tag, limit=limit)
+        result = event_mapping.filter_events(
+            events,
+            suchtext=suchtext,
+            tag=tag,
+            limit=limit,
+            ohne_erinnerung=ohne_erinnerung,
+            ohne_sichtbarkeit=ohne_sichtbarkeit,
+            ohne_tags=ohne_tags,
+            uid_regex=uid_regex,
+        )
         # "quelle_url" is collected alongside "kalender" for `get_agenda`'s
         # provenance (see `_collect_events`), but isn't part of this method's
         # documented return shape - only `get_agenda` keeps it.
