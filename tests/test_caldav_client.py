@@ -2190,6 +2190,135 @@ def test_update_events_all_succeed(service, principal):
     assert obj2.save.called
 
 
+def _make_series(uid: str, hour: int, byday: str = "MO") -> Event:
+    """A weekly VEVENT in Europe/Berlin, the shape change_exdates is built for."""
+    event = Event()
+    event.add("uid", uid)
+    event.add("summary", "Serie")
+    event.add("dtstart", datetime(2026, 7, 20, hour, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+    event.add("rrule", vRecur.from_ical(f"FREQ=WEEKLY;BYDAY={byday}"))
+    return event
+
+
+def test_change_exdates_cancels_one_day_across_series_with_different_times(service, principal):
+    # The workflow this exists for: one sick day, several series, none of
+    # which the caller had to read first.
+    early, late = _make_series("u1", 8), _make_series("u2", 13)
+    objs = {"u1": _make_event_obj(early), "u2": _make_event_obj(late)}
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: objs[uid]
+    principal.calendars.return_value = [event_cal]
+
+    res = service.change_exdates("Termine", ["u1", "u2"], add=["2026-07-27"])
+
+    assert res["erfolgreich"] == 2
+    assert res["ergebnisse"] == [
+        {"uid": "u1", "status": "ok", "added": 1, "removed": 0, "total": 1, "skipped": []},
+        {"uid": "u2", "status": "ok", "added": 1, "removed": 0, "total": 1, "skipped": []},
+    ]
+    assert event_mapping.parse_vevent(early)["ausnahme_daten"] == ["2026-07-27T08:00:00+02:00"]
+    assert event_mapping.parse_vevent(late)["ausnahme_daten"] == ["2026-07-27T13:00:00+02:00"]
+    assert objs["u1"].save.called and objs["u2"].save.called
+
+
+def test_change_exdates_keeps_what_a_series_already_skips(service, principal):
+    series = _make_series("u1", 8)
+    series.add("exdate", datetime(2026, 8, 3, 8, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = _make_event_obj(series)
+    principal.calendars.return_value = [event_cal]
+
+    res = service.change_exdates("Termine", ["u1"], add=["2026-07-27"])
+
+    assert res["ergebnisse"][0]["total"] == 2
+    assert event_mapping.parse_vevent(series)["ausnahme_daten"] == [
+        "2026-07-27T08:00:00+02:00",
+        "2026-08-03T08:00:00+02:00",
+    ]
+
+
+def test_change_exdates_reports_a_series_that_does_not_run_that_day(service, principal):
+    monday, tuesday = _make_series("u1", 8), _make_series("u2", 8, byday="TU")
+    objs = {"u1": _make_event_obj(monday), "u2": _make_event_obj(tuesday)}
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: objs[uid]
+    principal.calendars.return_value = [event_cal]
+
+    res = service.change_exdates("Termine", ["u1", "u2"], add=["2026-07-27"])
+
+    # Both count as successes - the Tuesday series simply has nothing that day.
+    assert res["erfolgreich"] == 2
+    assert res["ergebnisse"][0]["added"] == 1
+    assert res["ergebnisse"][1]["added"] == 0
+    assert res["ergebnisse"][1]["skipped"][0]["value"] == "2026-07-27"
+    assert not objs["u2"].save.called  # nothing changed, so nothing written
+
+
+def test_change_exdates_strict_mode_fails_only_the_mismatched_series(service, principal):
+    monday, tuesday = _make_series("u1", 8), _make_series("u2", 8, byday="TU")
+    objs = {"u1": _make_event_obj(monday), "u2": _make_event_obj(tuesday)}
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = lambda uid: objs[uid]
+    principal.calendars.return_value = [event_cal]
+
+    res = service.change_exdates(
+        "Termine", ["u1", "u2"], add=["2026-07-27"], ignore_non_occurrences=False
+    )
+
+    assert (res["erfolgreich"], res["fehlgeschlagen"]) == (1, 1)
+    assert res["ergebnisse"][1]["status"] == "fehler"
+    assert "2026-07-27" in res["ergebnisse"][1]["fehler"]
+    assert not objs["u2"].save.called
+
+
+def test_change_exdates_removes_and_leaves_the_rest(service, principal):
+    series = _make_series("u1", 8)
+    series.add(
+        "exdate",
+        [
+            datetime(2026, 7, 27, 8, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+            datetime(2026, 8, 3, 8, 0, tzinfo=ZoneInfo("Europe/Berlin")),
+        ],
+    )
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+    event_cal.event_by_uid.return_value = _make_event_obj(series)
+    principal.calendars.return_value = [event_cal]
+
+    res = service.change_exdates("Termine", ["u1"], remove=["2026-07-27"])
+
+    assert res["ergebnisse"][0]["removed"] == 1
+    assert event_mapping.parse_vevent(series)["ausnahme_daten"] == ["2026-08-03T08:00:00+02:00"]
+
+
+def test_change_exdates_without_dates_is_rejected(service, principal):
+    principal.calendars.return_value = [_make_calendar("Termine", components=["VEVENT"])]
+
+    with pytest.raises(InvalidEventDataError, match="at least one exception date"):
+        service.change_exdates("Termine", ["u1"])
+
+
+def test_change_exdates_reports_an_unknown_uid(service, principal):
+    series = _make_series("u1", 8)
+    event_cal = _make_calendar("Termine", components=["VEVENT"])
+
+    def side_effect(uid):
+        if uid == "u2":
+            raise caldav_error.NotFoundError()
+        return _make_event_obj(series)
+
+    event_cal.event_by_uid.side_effect = side_effect
+    principal.calendars.return_value = [event_cal]
+
+    res = service.change_exdates("Termine", ["u1", "u2"], add=["2026-07-27"])
+
+    assert (res["erfolgreich"], res["fehlgeschlagen"]) == (1, 1)
+    assert res["ergebnisse"][1] == {
+        "uid": "u2",
+        "status": "fehler",
+        "fehler": "Event 'u2' was not found.",
+    }
+
+
 def test_update_events_partial_failure_unknown_uid(service, principal):
     obj1 = _make_event_obj()
     obj3 = _make_event_obj()

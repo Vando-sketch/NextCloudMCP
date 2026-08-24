@@ -304,6 +304,7 @@ the full reference.
 | `create_event(kalender_name, titel, start, ...)` | Full event creation: all-day or timed, `ort`, `beschreibung`, `tags`, `status` (`"bestätigt"`/`"vorläufig"`/`"abgesagt"`), `sichtbarkeit`, recurrence (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE), reminders (`erinnerungen` → VALARM), `url`, task link (`verknuepfte_aufgabe`) |
 | `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
 | `update_events(kalender_name, event_uids, ...)` | Batch update up to 200 events with the same field patch; patch validated up front |
+| `update_exdates(calendar_name, event_uids, add=None, remove=None, ...)` | Add/remove single exception dates on up to 200 recurring events without rewriting the whole list |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
 | `delete_events(kalender_name, event_uids)` | Batch delete up to 200 events from a calendar |
 | `move_event(kalender_name, event_uid, ziel_kalender)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete |
