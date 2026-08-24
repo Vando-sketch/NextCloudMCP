@@ -9,6 +9,31 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **`create_task` takes a `status`.** Importing a task that is already done
+  took two calls - a `create_task` followed by a `complete_task` - because a
+  task could only ever be created open. `create_task` now accepts the same
+  `"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"` labels `update_task`
+  does, with the same behaviour: `"erledigt"` also writes
+  `PERCENT-COMPLETE:100` and a `COMPLETED` timestamp (of the import, since the
+  real completion time is not in the call to record), `"in-arbeit"` and
+  `"abgesagt"` write only `STATUS`, and an explicit `fortschritt_prozent` in
+  the same call still wins over the percentage `status` would derive. Omitting
+  it is unchanged: no `STATUS` property is written, which is an open task.
+
+- **`move_task` reports the subtask links its move orphaned.** Nextcloud Tasks
+  resolves the `RELATED-TO;RELTYPE=PARENT` hierarchy only within one task list,
+  so moving one half of a parent/child pair silently un-nests it: the property
+  survives the move and points at a UID its list no longer holds, and nothing
+  anywhere reports an error. The result now carries
+  `verwaiste_verknuepfungen`, listing both directions - the moved task's own
+  link to a parent left behind, and the links of subtasks left behind pointing
+  at it - as `{"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}` entries
+  naming the task that carries each dangling link. `[]` means the hierarchy
+  survived the move intact; `null` means the check itself could not be run
+  afterwards, which is deliberately not reported as "nothing orphaned". The
+  move's own outcome is unaffected either way, and `move_event`'s result shape
+  is unchanged.
+
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
   merging them into what each event already has. `update_event`'s
@@ -253,6 +278,17 @@ This project does not yet follow Semantic Versioning releases.
   still rejected.
 
 ### Fixed
+
+- **A reminder firing exactly at the due date has one spelling again.** The
+  wire form of a zero-length `VALARM` trigger depends on who wrote it - this
+  server's iCalendar library serializes it as `P0D`, the Nextcloud Tasks UI
+  writes `-PT0M` - and the read path passed that difference straight through.
+  The same reminder therefore came back as `P0D` on one task and `-PT0M` on
+  another, for no reason a caller could see. Every spelling of zero
+  (`P0D`, `PT0S`, `-PT0M`, ...) is still accepted on input and now reads back
+  as `-PT0M`, joining the normalization the other durations already had
+  (`-P1W` reads back as `-P7D`, `-PT90M` as `-PT1H30M`). Non-zero reminders
+  are untouched.
 
 - **Every tool now advertises MCP `annotations`, so read-only calls no longer
   need a human to approve them.** All 44 tools were registered without

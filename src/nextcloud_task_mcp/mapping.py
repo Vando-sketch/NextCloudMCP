@@ -48,6 +48,18 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # compare equal.
 _TriggerKey = tuple[str, datetime] | tuple[str, timedelta]
 
+# The one spelling a zero-length relative trigger is reported in. A reminder
+# that fires exactly at the due/start date has no sign and no natural unit, so
+# every writer spells it differently: Nextcloud's own UI emits "-PT0M",
+# `vDuration` renders `timedelta(0)` as "P0D", and callers pass "PT0S" too.
+# All of them parse to the same `timedelta(0)`, so which one a reader saw came
+# down to who last wrote the alarm - the same reminder reading back as "P0D"
+# here and "-PT0M" there. `_format_duration` collapses them onto this value,
+# which stays in the signed, time-based family every other relative reminder
+# uses ("-PT30M", "-PT1H30M") instead of standing out as the lone day-based,
+# unsigned one.
+_ZERO_TRIGGER_SPEC = "-PT0M"
+
 # Maps the German, LLM-facing `felder_leeren` entry name to the
 # (TaskFields attribute name, iCalendar property name) it clears. "titel" is
 # deliberately absent - clearing the title is not a supported operation.
@@ -91,10 +103,13 @@ class TaskFields:
     `ausnahme_daten`, when set, *replaces* the task's full EXDATE set (not an
     append), mirroring `EventFields.ausnahme_daten` down to the validation.
 
-    `status` (only settable via `update_task`, not `create_task` - a task is
-    always created open) is one of `TASK_STATUS_LABELS`: `"erledigt"` mirrors
-    `complete_task` (STATUS/PERCENT-COMPLETE/COMPLETED), `"offen"` is the
-    reopen path (removes COMPLETED, resets PERCENT-COMPLETE to 0), and
+    `status` defaults to "offen" when left unset (no STATUS property is
+    written, which RFC 5545 reads as NEEDS-ACTION) and is otherwise one of
+    `TASK_STATUS_LABELS`. `create_task` accepts it too, so importing an
+    already-finished task takes one call instead of a create followed by a
+    complete. `"erledigt"` mirrors `complete_task`
+    (STATUS/PERCENT-COMPLETE/COMPLETED), `"offen"` is the reopen path
+    (removes COMPLETED, resets PERCENT-COMPLETE to 0), and
     `"in-arbeit"`/`"abgesagt"` only set STATUS. If `fortschritt_prozent` is
     also given in the same call, its explicit value wins over whatever
     `status` would otherwise derive - see `apply_task_fields`'s write order.
@@ -1176,6 +1191,20 @@ def build_alarm(spec: str, description: str, *, has_due: bool, has_start: bool) 
     return alarm
 
 
+def _format_duration(value: timedelta) -> str:
+    """Render a relative trigger in the one spelling this server reports it in.
+
+    `vDuration` already folds equivalent spellings onto a canonical one
+    ("-P1W" -> "-P7D", "-PT90M" -> "-PT1H30M"). The single value it does not
+    settle usefully is zero, which it renders as "P0D" whatever the wire form
+    said - see `_ZERO_TRIGGER_SPEC` for why that one is spelled out here
+    instead.
+    """
+    if not value:
+        return _ZERO_TRIGGER_SPEC
+    return vDuration(value).to_ical().decode()
+
+
 def _trigger_key(value: datetime | timedelta) -> _TriggerKey:
     """Identity of a trigger, independent of how it was spelled.
 
@@ -1258,7 +1287,7 @@ def _read_alarm(alarm, component) -> tuple[str, _TriggerKey] | None:
         related = str(params.get("RELATED", "START")).upper()
         if related != expected_related and _has_anchor(component, related):
             return None
-        return vDuration(value).to_ical().decode(), _trigger_key(value)
+        return _format_duration(value), _trigger_key(value)
     return None
 
 
@@ -1513,7 +1542,13 @@ def _extract_categories(component) -> list[str]:
     return result
 
 
-def _extract_parent_uid(component) -> str | None:
+def extract_parent_uid(component) -> str | None:
+    """The UID of the task this component is a subtask of, or None.
+
+    A VTODO's `RELATED-TO;RELTYPE=PARENT` is what Nextcloud Tasks reads as
+    "subtask of". Public because `CalDavService` needs it to spot the links a
+    move leaves dangling, not only to parse a task for a listing.
+    """
     related = component.get("related-to")
     if related is None:
         return None
@@ -1549,9 +1584,13 @@ def extract_alarms(component) -> list[str]:
     Returns each alarm's TRIGGER in the string format accepted by create_task /
     create_event:
     - Relative trigger (timedelta): RFC 5545 duration string, e.g. "-PT30M", "-P1D",
-      serialized via `vDuration`. Equivalent spellings are normalized to the
-      canonical one ("-P1W" reads back as "-P7D", "-PT90M" as "-PT1H30M") -
-      the same trigger, a different string.
+      serialized via `_format_duration`. Equivalent spellings are normalized to
+      the canonical one ("-P1W" reads back as "-P7D", "-PT90M" as "-PT1H30M",
+      and every spelling of zero as "-PT0M") - the same trigger, a different
+      string. That last one matters because a reminder firing exactly at the
+      due date is written as "P0D" by `icalendar` and as "-PT0M" by
+      Nextcloud's own UI, so without it the same reminder read back
+      differently depending on which client last wrote the alarm.
     - Absolute trigger (datetime): ISO 8601 string with offset, e.g.
       "2026-08-07T09:00:00+02:00". RFC 5545 requires absolute triggers to be
       UTC, and this server only ever writes them that way - but other clients
@@ -1689,7 +1728,7 @@ def parse_vtodo(component) -> dict[str, Any]:
         "tags": _extract_categories(component),
         "erinnerungen": extract_alarms(component),
         "notizen": _get_text(component, "description"),
-        "uebergeordnete_uid": _extract_parent_uid(component),
+        "uebergeordnete_uid": extract_parent_uid(component),
         "wiederholung": _extract_rrule(component),
         "ausnahme_daten": _extract_exdates(component),
         # Both only ever set by `_expand_recurring_tasks`: a stored VTODO is a

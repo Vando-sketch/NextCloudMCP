@@ -214,6 +214,15 @@ Creates a task. Required: `list_name`, `titel`. Optional fields and their CalDAV
 | `uebergeordnete_aufgabe` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
 | `wiederholung` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO"`; requires the task to have a `start_datum` or `faellig_datum` (existing or set in the same call) to recur from |
 | `ausnahme_daten` | `EXDATE` | ISO 8601 occurrences the series skips; each must match `start_datum`'s value kind and name a real occurrence |
+| `status` | `STATUS` | `"offen"` (the default when omitted) / `"in-arbeit"` / `"erledigt"` / `"abgesagt"`; see below |
+
+**Status on creation (`status`):** a task is created open unless you say otherwise. Passing
+`status` creates it in that state instead, so importing an already-finished task is one call
+rather than a `create_task` followed by a `complete_task`. The values mean exactly what they
+mean in `update_task`: `"erledigt"` also sets `PERCENT-COMPLETE=100` and a `COMPLETED`
+timestamp — of *now*, since the real completion time is not recoverable from anywhere —
+while `"in-arbeit"`/`"abgesagt"` only set `STATUS`. An explicit `fortschritt_prozent` in the
+same call wins over the percentage `status` would otherwise derive.
 
 **Reminders (`erinnerungen`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
@@ -223,7 +232,11 @@ default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`) and stored as
 5545; reading them back formats the same instant in the default timezone, so the string may
 differ from what was written. Reading a reminder and writing it back is safe — the alarm is
 recognized as already present and left alone — but the strings are normalized (`"-P1W"` reads
-back as `"-P7D"`, `"...Z"` as the default timezone's offset). Alarms whose trigger this format
+back as `"-P7D"`, `"...Z"` as the default timezone's offset, and every spelling of a
+zero-length trigger — `"P0D"`, `"PT0S"`, `"-PT0M"` — as `"-PT0M"`). That last one matters
+because a reminder firing exactly at the due date is written as `P0D` by this server's
+iCalendar library and as `-PT0M` by the Nextcloud Tasks UI, so the same reminder used to read
+back differently depending on which client last wrote the alarm. Alarms whose trigger this format
 cannot express are not listed, and are never touched by a write; see `docs/tools.md`.
 
 > **BREAKING CHANGE**: Server timezone handling uses a single configurable default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC-hardcoded behavior.
@@ -239,7 +252,7 @@ a recurring event on its wall-clock time across daylight-saving changes.
 
 ### `update_task(list_name, task_uid, ...)`
 
-Same fields as `create_task`, all optional except `task_uid`, plus `status`. Only fields
+Same fields as `create_task` (`status` included), all optional except `task_uid`. Only fields
 you pass are changed; everything else on the task is left untouched. Passing `erinnerungen`
 replaces the reminders `list_tasks` shows; `felder_leeren` clears *every* alarm instead.
 
@@ -284,7 +297,19 @@ Permanently deletes the task.
 
 ### `move_task(list_name, task_uid, ziel_liste)`
 
-Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert"}`.
+Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert", "verwaiste_verknuepfungen": ...}`.
+
+**Orphaned subtask links (`verwaiste_verknuepfungen`):** Nextcloud Tasks resolves the
+subtask hierarchy (`RELATED-TO;RELTYPE=PARENT`) only *within* one task list. Moving one half
+of a parent/child pair therefore breaks the nesting without producing an error anywhere: the
+property survives the move and simply points at a UID its list no longer holds. `move_task`
+reports exactly those links — the moved task's own link to a parent left behind, and the
+links of any subtasks left behind pointing at it — as a list of
+`{"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}` entries, where `uid`/`liste` name
+the task carrying the dangling link. `[]` means the move left the hierarchy intact; `null`
+means the check could not be run afterwards (the move itself still succeeded). To repair one,
+move the other half too, or re-point/remove the link with `update_task`
+(`uebergeordnete_aufgabe`, or `felder_leeren: ["uebergeordnete_aufgabe"]`).
 
 ### Calendar & event tools (VEVENT)
 

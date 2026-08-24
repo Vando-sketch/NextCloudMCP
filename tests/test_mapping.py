@@ -227,6 +227,57 @@ def test_extract_alarms_round_trip_absolute():
     assert parsed["erinnerungen"] == ["2026-08-07T11:00:00+02:00"]
 
 
+@pytest.mark.parametrize("spec", ["-PT0M", "P0D", "PT0S", "-P0D", "PT0M"])
+def test_extract_alarms_normalizes_every_zero_spelling(spec):
+    """A reminder firing exactly at the due date has one reported spelling.
+
+    Nextcloud's own UI writes such a trigger as "-PT0M" and `icalendar`
+    renders it as "P0D", so before this the same reminder read back
+    differently depending on which client last wrote the alarm.
+    """
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=[spec])
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT0M"]
+
+
+def test_zero_reminder_read_back_is_accepted_as_input_again():
+    """The normalized form has to survive being written straight back."""
+    todo = _new_todo()
+    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["P0D"])
+    read_back = mapping.parse_vtodo(todo)["erinnerungen"]
+
+    _apply(todo, erinnerungen=read_back)
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT0M"]
+    # Rewriting an unchanged reminder must not duplicate its alarm either.
+    assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 1
+
+
+def test_zero_and_nonzero_reminders_stay_distinct():
+    todo = _new_todo()
+    _apply(
+        todo,
+        titel="Task",
+        faellig_datum="2026-07-20T10:00:00",
+        erinnerungen=["P0D", "-PT30M"],
+    )
+    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT0M", "-PT30M"]
+
+
+@pytest.mark.parametrize("wire", ["-PT0M", "P0D", "PT0S"])
+def test_extract_alarms_normalizes_a_zero_trigger_written_by_another_client(wire):
+    """The wire form a foreign client chose must not leak into the output."""
+    ics = (
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//other//EN\r\n"
+        "BEGIN:VTODO\r\nUID:t1\r\nSUMMARY:Task\r\n"
+        "DUE;TZID=Europe/Berlin:20260720T100000\r\n"
+        "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\n"
+        f"TRIGGER;RELATED=END:{wire}\r\nEND:VALARM\r\n"
+        "END:VTODO\r\nEND:VCALENDAR\r\n"
+    )
+    todo = next(c for c in Calendar.from_ical(ics).walk("VTODO"))
+    assert mapping.extract_alarms(todo) == ["-PT0M"]
+
+
 def test_extract_alarms_preserves_order():
     todo = _new_todo()
     reminders = ["-P1D", "-PT30M", "2026-08-07T11:00:00+02:00"]
