@@ -809,14 +809,21 @@ Parameters:
 | Parameter | Required | Notes |
 |---|---|---|
 | `name` | yes | The person's name, without the cake and without the year — both are added. A title read back from an existing entry (`"🎂 Papa (1975)"`) works too: the cake is not doubled and the `(1975)` is read as the birth year |
-| `datum` | yes | `"MM-DD"` (e.g. `"07-04"`), or a full `"YYYY-MM-DD"` carrying the birth year |
-| `jahr` | no | Birth year. May instead come from `datum` or from a trailing `"(1975)"` in `name` |
+| `datum` | yes | `"MM-DD"` (e.g. `"07-04"`), or a full `"YYYY-MM-DD"` whose year is the year of **birth** |
+| `jahr` | no | Year of birth. May instead come from `datum` or from a trailing `"(1975)"` in `name` |
 | `kalender` | no | Target calendar display name, `"Geburtstage"` by default |
 
 The birth year may therefore be named by `jahr`, by `datum` and by `name`.
 Naming it more than once is fine as long as the values agree; **conflicting
-values are rejected** rather than silently resolved. A birth year in the
-future, or one that isn't a four-digit year, is rejected as well.
+values are rejected** rather than silently resolved. A year that isn't a
+four-digit year is rejected as well.
+
+> **The year is always the year of birth, never the year of the next
+> celebration.** Turning "his birthday is on October 10th" into
+> `"2026-10-10"` claims the person was born this year — they would be 0 on
+> the next occurrence. A birth date that hasn't happened yet is therefore
+> rejected outright; when the birth year is unknown, pass `"MM-DD"` and the
+> entry simply carries no year.
 
 A `02-29` birthday stays `02-29` — a yearly rule then only fires in leap
 years, which is what that date means; pass `02-28` or `03-01` instead if the

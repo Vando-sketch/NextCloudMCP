@@ -21,8 +21,11 @@ This project does not yet follow Semantic Versioning releases.
   `jahr`, from `datum`, or from a trailing `"(1975)"` in `name` (so a title read
   back from an existing entry can be passed straight in - the cake is not
   doubled either), and sources that disagree are rejected rather than
-  silently resolved. With no birth year known the title carries none and the
-  series starts on the next upcoming occurrence.
+  silently resolved. The year always means the year of *birth*: a birth date
+  that hasn't happened yet is rejected rather than stored, since a date filled
+  in as "this year's celebration" would put the person at age 0 on the next
+  occurrence. With no birth year known the title carries none and the series
+  starts on the next upcoming occurrence.
 
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,

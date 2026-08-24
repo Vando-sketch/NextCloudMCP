@@ -840,14 +840,20 @@ def build_server(
                 entry ("🎂 Papa (1975)") works too - the cake is not doubled
                 and the year in parentheses is read as the birth year.
             datum: The birthday as "MM-DD" (e.g. "07-04"), or as a full
-                "YYYY-MM-DD" with the birth year already in it. A 02-29
-                birthday stays 02-29, and a yearly rule then only fires in
-                leap years - pass 02-28 or 03-01 instead if the entry should
-                show up every year.
-            jahr: Optional birth year. May instead come from `datum` or from
-                a trailing "(1975)" in `name`; giving it twice is fine as long
-                as the values agree, and conflicting values are an error. An
-                unknown birth year is fine - the title then carries no year.
+                "YYYY-MM-DD" whose year is the year of BIRTH. Never fill in
+                the current (or next) year to turn "on the 4th of July" into
+                a full date - that is the year of the next celebration, not a
+                birth year, and it would make the person 0 years old. Pass
+                "MM-DD" whenever the birth year is unknown. A 02-29 birthday
+                stays 02-29, and a yearly rule then only fires in leap years -
+                pass 02-28 or 03-01 instead if the entry should show up every
+                year.
+            jahr: Optional year of birth (e.g. 1975), only ever a year the
+                person was actually born in. May instead come from `datum` or
+                from a trailing "(1975)" in `name`; naming it twice is fine as
+                long as the values agree, and conflicting values are an error.
+                An unknown birth year is fine - leave it out and the title
+                carries no year. A birth date that is still ahead is rejected.
             kalender: Display name of the target calendar, "Geburtstage" by
                 default.
 

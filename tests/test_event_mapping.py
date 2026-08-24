@@ -1935,6 +1935,19 @@ def test_birthday_fields_rejects_a_future_birth_year():
         _birthday("Baby", "07-04", 2027)
 
 
+def test_birthday_fields_rejects_a_birth_date_still_ahead_this_year():
+    # The trap this guards: "birthday on October 10th" resolved to
+    # "2026-10-10" by a caller who meant the next celebration, not a birth
+    # year - which would put the person at age 0 next year.
+    with pytest.raises(InvalidEventDataError, match="Birth date 2026-10-10 is in the future"):
+        _birthday("Baby", "2026-10-10")
+
+
+def test_birthday_fields_accepts_a_birth_date_earlier_this_year():
+    # Same year, already past: a baby born this March is a real birthday.
+    assert _birthday("Baby", "2026-03-01").start == "2026-03-01"
+
+
 def test_birthday_fields_rejects_a_two_digit_birth_year():
     with pytest.raises(InvalidEventDataError, match="not a four-digit year"):
         _birthday("Papa", "07-04", 75)
