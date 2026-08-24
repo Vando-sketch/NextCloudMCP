@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -10,7 +11,7 @@ from icalendar import vRecur
 
 from .errors import InvalidEventDataError, InvalidTaskDataError
 from .mapping import (
-    VISIBILITY_LABELS,
+    _ICAL_CLASS_TO_LABEL,
     _anchored,
     _as_utc,
     _component_start,
@@ -72,9 +73,6 @@ RELTYPE_LABELS: dict[str, str] = {
     "CHILD": "voraussetzung",
     "SIBLING": "gleichrangig",
 }
-
-# Reverse of mapping.VISIBILITY_LABELS for parsing CLASS back to German.
-_ICAL_CLASS_TO_LABEL: dict[str, str] = {v: k for k, v in VISIBILITY_LABELS.items()}
 
 # RFC 5545 PARTSTAT -> German attendee-status label surfaced in `teilnehmer`
 # entries (parse_vevent). A missing PARTSTAT parameter means NEEDS-ACTION per
@@ -955,6 +953,10 @@ def filter_events(
     suchtext: str | None = None,
     tag: str | None = None,
     limit: int | None = None,
+    ohne_erinnerung: bool = False,
+    ohne_sichtbarkeit: bool = False,
+    ohne_tags: bool = False,
+    uid_regex: str | None = None,
 ) -> list[dict[str, Any]]:
     """Filter already-`parse_vevent`-parsed event dicts, chronologically sorted.
 
@@ -964,9 +966,32 @@ def filter_events(
     without a start last); `limit`, if given, must be a positive integer and
     caps the number of results, applied last - so it returns the *earliest*
     N matches.
+
+    `ohne_erinnerung`/`ohne_sichtbarkeit`/`ohne_tags` keep only events whose
+    `erinnerungen` list is empty / whose `sichtbarkeit` is None (no readable
+    CLASS) / whose `tags` list is empty. `uid_regex` keeps only events whose
+    `uid` contains a match for the given regular expression (`re.search`,
+    case-sensitive - anchor with ^...$ for a full match; an unparsable
+    pattern raises `InvalidEventDataError`, an empty one is no filter). An
+    expanded occurrence carries its series' uid, so it matches whenever the
+    series does.
     """
     if limit is not None and limit <= 0:
         raise InvalidEventDataError(f"limit must be greater than 0, got {limit}.")
+
+    if uid_regex:
+        try:
+            uid_pattern = re.compile(uid_regex)
+        except re.error as exc:
+            raise InvalidEventDataError(f"Invalid uid_regex '{uid_regex}': {exc}.") from exc
+        events = [event for event in events if uid_pattern.search(str(event.get("uid") or ""))]
+
+    if ohne_erinnerung:
+        events = [event for event in events if not event.get("erinnerungen")]
+    if ohne_sichtbarkeit:
+        events = [event for event in events if event.get("sichtbarkeit") is None]
+    if ohne_tags:
+        events = [event for event in events if not event.get("tags")]
 
     if suchtext is not None:
         needle = suchtext.lower()

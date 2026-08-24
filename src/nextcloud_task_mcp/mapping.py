@@ -21,6 +21,9 @@ VISIBILITY_LABELS: dict[str, str] = {
     "privat": "PRIVATE",
     "vertraulich": "CONFIDENTIAL",
 }
+# Reverse of VISIBILITY_LABELS for parsing CLASS back to German; an unknown
+# CLASS value (a foreign client's extension) reads as None, like a missing one.
+_ICAL_CLASS_TO_LABEL: dict[str, str] = {v: k for k, v in VISIBILITY_LABELS.items()}
 # RFC 5545 VTODO STATUS values <-> the German labels `update_task`'s `status`
 # parameter and `list_tasks`/`get_task`'s `status` result key use. "erledigt"
 # and "offen" existed before this map did (as the two-valued collapse
@@ -1676,6 +1679,7 @@ def parse_vtodo(component) -> dict[str, Any]:
     priority = component.get("priority")
     percent = component.get("percent-complete")
     status = str(component.get("status", "NEEDS-ACTION")).upper()
+    class_value = component.get("class")
     return {
         "uid": str(component.get("uid")),
         "titel": str(component.get("summary", "")),
@@ -1684,6 +1688,9 @@ def parse_vtodo(component) -> dict[str, Any]:
         "prioritaet": ical_priority_to_label(int(priority)) if priority is not None else None,
         "fortschritt_prozent": int(percent) if percent is not None else 0,
         "status": _ICAL_TASK_STATUS_TO_LABEL.get(status, "offen"),
+        "sichtbarkeit": (
+            _ICAL_CLASS_TO_LABEL.get(str(class_value).upper()) if class_value is not None else None
+        ),
         "ort": _get_text(component, "location"),
         "url": _get_text(component, "url"),
         "tags": _extract_categories(component),
@@ -1980,6 +1987,10 @@ def filter_tasks(
     tag: str | None = None,
     suchtext: str | None = None,
     limit: int | None = None,
+    ohne_erinnerung: bool = False,
+    ohne_sichtbarkeit: bool = False,
+    ohne_tags: bool = False,
+    uid_regex: str | None = None,
 ) -> list[dict[str, Any]]:
     """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
@@ -1990,6 +2001,16 @@ def filter_tasks(
     `tag`: exact match against one `tags` entry, `suchtext`: substring match over
     `titel` and `notizen` (skipping None values); both compare case- and
     spelling-insensitively (see `_fold`).
+
+    `ohne_erinnerung`/`ohne_sichtbarkeit`/`ohne_tags` keep only tasks whose
+    `erinnerungen` list is empty / whose `sichtbarkeit` is None (no readable
+    CLASS) / whose `tags` list is empty. `uid_regex` keeps only tasks whose
+    stored `uid` contains a match for the given regular expression
+    (`re.search`, case-sensitive - anchor with ^...$ for a full match; an
+    unparsable pattern raises `InvalidTaskDataError`). All four are properties
+    of the stored task, so they are applied *before* recurrence expansion:
+    `uid_regex` matches the series' own uid, never the synthetic
+    "<uid>#<occurrence>" uid of an expanded row.
 
     An empty string means "no filter" for every one of them, due bounds included -
     clients spell an unset argument that way, and these used to disagree about it
@@ -2010,6 +2031,20 @@ def filter_tasks(
                 f"Unknown prioritaet '{prioritaet}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
             )
         tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
+
+    if uid_regex:
+        try:
+            uid_pattern = re.compile(uid_regex)
+        except re.error as exc:
+            raise InvalidTaskDataError(f"Invalid uid_regex '{uid_regex}': {exc}.") from exc
+        tasks = [task for task in tasks if uid_pattern.search(str(task.get("uid") or ""))]
+
+    if ohne_erinnerung:
+        tasks = [task for task in tasks if not task.get("erinnerungen")]
+    if ohne_sichtbarkeit:
+        tasks = [task for task in tasks if task.get("sichtbarkeit") is None]
+    if ohne_tags:
+        tasks = [task for task in tasks if not task.get("tags")]
 
     before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
     after_bound = _to_comparable_datetime(due_after, end_of_day=False) if due_after else None
