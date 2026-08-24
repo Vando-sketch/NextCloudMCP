@@ -786,7 +786,10 @@ Example:
 ## `update_event(kalender_name, event_uid, ...)`
 
 Same fields as `create_event`, all optional. Only fields you pass are changed;
-`ausnahme_daten` replaces all existing entries, and so does `teilnehmer` —
+`ausnahme_daten` replaces all existing entries — to add or drop single
+exception dates without rewriting the rest, use
+[`update_exdates`](#update_exdatescalendar_name-event_uids-addnone-removenone-ignore_non_occurrencestrue)
+instead — and so does `teilnehmer` —
 passing it **replaces the entire attendee list**, it does not add to it.
 `erinnerungen` replaces the reminders `list_events` shows, on the same terms
 as `update_task` (reminders already present stay untouched, alarms the format
@@ -839,6 +842,96 @@ Contract and behaviour:
 - **Limit**: Maximum 200 UIDs per call. Passing more than 200 UIDs or an empty list raises an error.
 - **Partial-failure contract**: A failure on a single UID (e.g. event not found or ETag conflict) does not abort the batch; each UID gets its own entry in `ergebnisse`, and the order matches `event_uids` after deduplication. Server-wide errors (auth failure, missing calendar, connection error) propagate as exceptions immediately.
 - **Stale cache**: If the cached calendar has gone stale, resolution is refreshed once for the whole batch instead of reporting every UID as missing.
+
+---
+
+## `update_exdates(calendar_name, event_uids, add=None, remove=None, ignore_non_occurrences=True)`
+
+Adds or removes single exception dates on recurring events, merging them into
+what each event already has.
+
+> This tool's parameters and its return value are **English**, unlike the rest
+> of the surface. It was added that way deliberately; the German-named tools
+> are unchanged.
+
+Use this rather than `update_event`'s `ausnahme_daten` whenever the goal is
+"also skip these dates" or "no longer skip these dates". `ausnahme_daten`
+*replaces* an event's whole exception set, so it has to be handed every date
+the series already skips: for a series with 60 exceptions, cancelling one more
+day means reading all 60 back and writing 61. This tool merges server-side, so
+the call carries only what changes — across as many series as needed.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `calendar_name` | string | yes | Display name of the calendar holding the events |
+| `event_uids` | array of strings | yes | UIDs of the events to change (max 200) |
+| `add` | array of strings | no | Exception dates to add |
+| `remove` | array of strings | no | Exception dates to remove, so the occurrence happens again |
+| `ignore_non_occurrences` | boolean | no | Report entries that change nothing instead of failing the event (default `true`) |
+
+At least one of `add`/`remove` must be given.
+
+### Whole days vs. exact occurrences
+
+An entry is either a plain `"YYYY-MM-DD"` or a full ISO 8601 datetime, and the
+difference matters:
+
+- **`"2026-07-27"` means the whole day.** On a timed series it cancels every
+  occurrence that day, whatever time the series starts — so the same list of
+  days applies to several series with different start times, which is the
+  whole point of the batch. On `remove`, it drops every exception date the
+  event has on that day.
+- **A datetime cancels that one occurrence**, and must name it exactly — the
+  same rule `ausnahme_daten` follows.
+
+Unlike `ausnahme_daten`, entries do **not** have to match the event's own value
+kind: a day applies to a timed series. A datetime passed to an all-day series
+is the one combination that cannot work, and is reported rather than stored.
+
+### Entries that change nothing
+
+An entry can be perfectly valid and still do nothing to a given event: a day
+that series does not run on, a removal of an exception it never had. With
+`ignore_non_occurrences` at its default `true`, such an entry is listed under
+that event's `skipped` and the remaining entries are still applied — a batch
+covering five series has to tolerate a day two of them do not run on. Set it to
+`false` to have such an entry fail that event instead, leaving it untouched,
+when a typo should not pass unnoticed as "this series does not run that day".
+
+An entry that is not a readable date at all is always an error.
+
+Returns:
+```json
+{
+  "calendar_name": "Arbeit",
+  "succeeded": 5,
+  "failed": 0,
+  "results": [
+    {"uid": "uid1", "status": "ok", "added": 6, "removed": 0, "total": 66, "skipped": []},
+    {"uid": "uid2", "status": "ok", "added": 4, "removed": 0, "total": 12,
+     "skipped": [{"value": "2026-03-11", "reason": "this event has no occurrence on that day"}]},
+    {"uid": "uid3", "status": "error", "error": "Event 'uid3' was not found."}
+  ]
+}
+```
+
+`total` is how many exception dates the event has afterwards. The list itself
+is deliberately not returned — not having to move it across the wire is the
+reason this tool exists; read it with `get_event` if you really need it.
+
+Contract and behaviour:
+- **Merge, not replace**: exception dates already on an event are kept. Adding
+  one it already has is a no-op (`added: 0`), not a duplicate.
+- **Order**: removals are applied before additions, so a date named in both
+  ends up present exactly once.
+- **No pointless writes**: an event that ends up unchanged is not written back,
+  and reports `added: 0, removed: 0`.
+- **Leftovers are removable**: `remove` matches what the event *stores*, not
+  its recurrence set, so an exception date left behind by a series that has
+  since moved can still be removed.
+- **Per-event outcomes**: same partial-failure, deduplication, 200-UID limit,
+  calendar-resolution and stale-cache contract as
+  [`update_events`](#update_eventskalender_name-event_uids-).
 
 ---
 
