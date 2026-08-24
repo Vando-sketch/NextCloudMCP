@@ -1765,3 +1765,67 @@ def test_exdate_remove_works_on_an_event_without_a_start():
 
     assert report["removed"] == 1
     assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+
+
+def _floating_series() -> Event:
+    """A series another client left floating: DTSTART with no zone at all.
+
+    Its 01:00 start is what makes the day it falls on ambiguous - read in UTC
+    it belongs to the previous day, read in the server's default zone (which
+    is how every other part of the server reads a floating value) it does not.
+    """
+    return _event_from_ics(
+        "BEGIN:VEVENT\n"
+        "UID:float-1\n"
+        "SUMMARY:Nachtschicht\n"
+        "DTSTART:20260720T010000\n"
+        "RRULE:FREQ=WEEKLY;BYDAY=MO\n"
+        "END:VEVENT\n"
+    )
+
+
+def test_ausnahme_daten_still_accepts_an_occurrence_of_a_floating_series():
+    # The replacing path, which the shared occurrence index is also used by:
+    # this occurrence is real and must not be rejected as naming nothing.
+    event = _floating_series()
+
+    _apply(event, ausnahme_daten=["2026-07-27T01:00:00"])
+
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T01:00:00+02:00"]
+
+
+def test_exdate_add_of_a_whole_day_finds_a_floating_small_hours_occurrence():
+    event = _floating_series()
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
+
+    assert report["added"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T01:00:00+02:00"]
+
+
+def test_exdate_add_of_an_exact_occurrence_of_a_floating_series():
+    event = _floating_series()
+
+    report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T01:00:00"])
+
+    assert (report["added"], report["skipped"]) == (1, [])
+
+
+def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
+    # Another client left a timed series carrying one date-only and one timed
+    # EXDATE. Those cannot go under one property, and sorting them by
+    # occurrence would compare a date with a datetime - a TypeError naming
+    # neither the event nor the problem.
+    event = _event_from_ics(
+        "BEGIN:VEVENT\n"
+        "UID:mixed-1\n"
+        "SUMMARY:Standup\n"
+        "DTSTART;TZID=Europe/Berlin:20260720T090000\n"
+        "RRULE:FREQ=WEEKLY;BYDAY=MO\n"
+        "EXDATE;TZID=Europe/Berlin:20260727T090000\n"
+        "EXDATE;VALUE=DATE:20260803\n"
+        "END:VEVENT\n"
+    )
+
+    with pytest.raises(InvalidEventDataError, match="mix date-only and datetime"):
+        event_mapping.apply_exdate_changes(event, add=["2026-08-10"])

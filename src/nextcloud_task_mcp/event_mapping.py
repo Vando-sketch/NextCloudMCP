@@ -785,6 +785,16 @@ def _write_exdates(event, values, *, zone, all_day: bool) -> None:
     rather than silently coerced, because either coercion would move an
     exception to a different moment than the one stored.
     """
+    values = list(values)
+    if len({isinstance(value, datetime) for value in values}) > 1:
+        # Checked before sorting: the keys of a mixed set are dates and
+        # datetimes, and comparing those two raises a TypeError that says
+        # nothing about the event it came from.
+        raise InvalidEventDataError(
+            "This event's stored exception dates mix date-only and datetime values, which "
+            "cannot be written as one EXDATE property. Fix them with update_event's "
+            "ausnahme_daten (which replaces the whole set) instead."
+        )
     ordered = sorted(values, key=lambda value: _occurrence_key(value, all_day=all_day))
     written = [
         # `_as_utc` first: a floating value another client left behind means
@@ -795,12 +805,6 @@ def _write_exdates(event, values, *, zone, all_day: bool) -> None:
         _as_utc(value).astimezone(zone) if isinstance(value, datetime) else value
         for value in ordered
     ]
-    if len({isinstance(value, datetime) for value in written}) > 1:
-        raise InvalidEventDataError(
-            "This event's stored exception dates mix date-only and datetime values, which "
-            "cannot be written as one EXDATE property. Fix them with update_event's "
-            "ausnahme_daten (which replaces the whole set) instead."
-        )
     if "exdate" in event:
         del event["exdate"]
     if written:
