@@ -413,6 +413,26 @@ def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
     assert {"prioritaet", "tag", "suchtext", "list_name"} <= set(properties)
 
 
+def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
+    """A parameter with a Python default must be optional in the client schema.
+
+    fastmcp (<3) rebuilds tool functions whose annotations are PEP 563 strings
+    (`from __future__ import annotations`) and loses `__kwdefaults__` doing it,
+    so every keyword-only parameter turns required-but-nullable - and clients
+    that then pass an explicit null can trip over it. server.py therefore must
+    not use the future import; this test fails on every affected tool at once
+    if it comes back.
+    """
+    offenders = []
+    for tool_name, tool in tools.items():
+        required = set(tool.parameters.get("required") or [])
+        for param_name, param in inspect.signature(tool.fn).parameters.items():
+            if param.default is not inspect.Parameter.empty and param_name in required:
+                offenders.append(f"{tool_name}.{param_name}")
+
+    assert offenders == []
+
+
 def test_create_task_maps_german_params_to_service_call(tools, fake_service):
     fake_service.create_task.return_value = "new-uid"
     result = _run(
