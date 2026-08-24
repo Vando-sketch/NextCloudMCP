@@ -742,6 +742,27 @@ def test_list_events_unknown_felder_entry_raises(tools, fake_service):
         _run(tools["list_events"].fn(kalender_namen=["Termine"], felder=["uid", "summary"]))
 
 
+def test_list_events_empty_felder_means_no_whitelist(tools, fake_service):
+    """`[]` is what MCP clients send for an unset array - it must not blank the row.
+
+    Deliberately unlike `listen_namen=[]` (an empty scope, which returns no
+    rows): an empty *field* whitelist can only otherwise mean "a row of
+    nothing", which is never what a caller wants.
+    """
+    fake_service.list_events.return_value = [_sample_event()]
+    (event,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], felder=[]))
+    assert event == _sample_event()
+
+
+def test_list_events_kompakt_keeps_exdate_summary_dict(tools, fake_service):
+    """The >10-EXDATE summary is a dict, so `kompakt` must not prune it as "empty"."""
+    event = _sample_event()
+    event["ausnahme_daten"] = [f"2026-08-{i:02d}" for i in range(1, 16)]
+    fake_service.list_events.return_value = [event]
+    (result,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], kompakt=True))
+    assert result["ausnahme_daten"]["anzahl"] == 15
+
+
 def test_list_events_felder_combines_with_kompakt(tools, fake_service):
     fake_service.list_events.return_value = [_sample_event()]
     (event,) = _run(
@@ -779,6 +800,28 @@ def test_list_events_default_window_not_applied_when_scoped(tools, fake_service)
     _run(tools["list_events"].fn(bis="2026-07-31"))
     _, kwargs = fake_service.list_events.call_args
     assert kwargs["von"] is None and kwargs["bis"] == "2026-07-31"
+
+
+def test_list_events_default_window_lets_unscoped_expansion_work(tools, fake_service):
+    """Unscoped expansion gets the default bounds; a named calendar still needs its own.
+
+    `expand=True` without both bounds is refused one layer down
+    (`_collect_events`), so the default window is what makes a bare
+    `wiederholungen_aufloesen=True` call viable at all. Naming a calendar is a
+    scoping decision and turns the default off, so that call still arrives
+    unbounded and is refused as before - pinned here so the asymmetry is a
+    choice rather than a surprise.
+    """
+    fake_service.list_events.return_value = []
+    _run(tools["list_events"].fn(wiederholungen_aufloesen=True))
+    _, kwargs = fake_service.list_events.call_args
+    assert kwargs["expand"] is True
+    assert kwargs["von"] is not None and kwargs["bis"] is not None
+
+    fake_service.list_events.reset_mock()
+    _run(tools["list_events"].fn(kalender_namen=["Termine"], wiederholungen_aufloesen=True))
+    _, kwargs = fake_service.list_events.call_args
+    assert kwargs["von"] is None and kwargs["bis"] is None
 
 
 def _sample_task() -> dict:

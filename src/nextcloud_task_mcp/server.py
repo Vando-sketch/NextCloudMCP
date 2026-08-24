@@ -101,6 +101,17 @@ def _slim_rows(
     keys whose value is None/[]/"" plus everything in `kompakt_drop`, and
     truncates `text_key` to `_COMPACT_TEXT_LIMIT` characters. A key the caller
     whitelisted explicitly is exempt from `kompakt_drop` - asking for it wins.
+
+    An empty `felder` list means "no whitelist", not "no keys": the only other
+    reading returns a row of nothing per result, which no caller can want, and
+    MCP clients routinely send `[]` for an array parameter they mean to leave
+    unset. (`listen_namen=[]` reads the other way - an empty *scope* returns
+    no rows, which is a coherent answer - so the two differ deliberately.)
+
+    Falsy-but-real values survive: the emptiness test is `== []`/`== ""`
+    against those two literals only, so `fortschritt_prozent=0` and
+    `ganztaegig=False` are kept, and `ausnahme_daten` already summarized into
+    a dict by `list_events` is kept too.
     """
     if isinstance(felder, str):
         felder = [felder]
@@ -367,8 +378,9 @@ def build_server(
                 ("STRASSE" matches "Straße").
             felder: Optional whitelist of result keys (see Returns for the
                 vocabulary); every other key is omitted from each task dict.
-                Unknown names error. Use this to keep payloads small when you
-                only need a few fields.
+                Unknown names error, an empty list means "no whitelist" (unlike
+                an empty `listen_namen`, which is an empty scope). Use this to
+                keep payloads small when you only need a few fields.
             kompakt: If True, omit keys whose value is None, [] or "" plus the
                 rarely useful liste_url (unless whitelisted via `felder`), and
                 truncate notizen to 200 characters (marked with "… [gekürzt
@@ -795,8 +807,8 @@ def build_server(
                 required); each occurrence carries wiederholung_von.
             felder: Optional whitelist of result keys (see Returns for the
                 vocabulary); every other key is omitted from each event dict.
-                Unknown names error. Use this to keep payloads small when you
-                only need a few fields.
+                Unknown names error, an empty list means "no whitelist". Use
+                this to keep payloads small when you only need a few fields.
             kompakt: If True, omit keys whose value is None, [] or "" (e.g.
                 teilnehmer, organisator, wiederholung on most events) and
                 truncate beschreibung to 200 characters (marked with
@@ -807,7 +819,11 @@ def build_server(
         Called with neither `kalender_namen` nor a time bound, this would scan
         every event in the account; instead a default window of today ±90 days
         (in the server's default timezone) is applied. Pass `von` and/or `bis`
-        explicitly - or name a calendar - to query outside that window.
+        explicitly - or name a calendar - to query outside that window. Naming
+        a calendar is a scoping decision, so it turns the default window off
+        rather than narrowing it: `kalender_namen` plus
+        `wiederholungen_aufloesen=True` and no bounds still fails with
+        "requires both von and bis", the same as before this default existed.
 
         Naive datetimes (no UTC offset) are interpreted in the server's default
         timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin), like everywhere else
