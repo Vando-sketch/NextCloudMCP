@@ -67,7 +67,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, felder=None, kompakt=False, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -79,6 +79,8 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
+| `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per task. Unknown names error |
+| `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""` plus `liste_url` (unless whitelisted); truncate `notizen` to 200 chars with an `… [gekürzt …]` marker (`get_task` has the full text) |
 | `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
 
 > **BREAKING CHANGE**: Results are now sorted by `faellig_datum` ascending (tasks without a due date last, then by `titel`), rather than returned in server order.
@@ -622,7 +624,7 @@ Permanently deletes the calendar **and every event inside it**. Returns
 
 ---
 
-## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False)`
+## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False, felder=None, kompakt=False)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -633,6 +635,13 @@ Permanently deletes the calendar **and every event inside it**. Returns
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `limit` | integer | no | Max results, must be `> 0`; applied last (earliest events win) |
 | `wiederholungen_aufloesen` | boolean | no (default `false`) | Expand recurring events into single occurrences within `[von, bis]` (both bounds required) |
+| `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per event. Unknown names error |
+| `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""`; truncate `beschreibung` to 200 chars with an `… [gekürzt …]` marker (`get_event` has the full text) |
+
+Called with neither `kalender_namen` nor a time bound, a default window of
+**today ±90 days** (in the server's default timezone) is applied instead of
+scanning every event in the account. Any calendar name or either bound
+disables the default.
 
 The time-range filter runs server-side (CalDAV `time-range` REPORT), so a
 recurring event with an occurrence in the window matches even if its master
