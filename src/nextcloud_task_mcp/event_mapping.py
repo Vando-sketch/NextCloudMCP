@@ -725,7 +725,12 @@ def apply_exdate_changes(
     add = list(add or [])
     remove = list(remove or [])
 
-    all_day = not isinstance(_component_start(event), datetime)
+    start_value = _component_start(event)
+    # `is not None and`, not a plain `not isinstance`: an event without a
+    # DTSTART is not an all-day event, and `match_existing_exdates` reads it
+    # the same way. Disagreeing here would key the stored values one way and
+    # the values to drop the other, so no removal would ever match.
+    all_day = start_value is not None and not isinstance(start_value, datetime)
     zone = _wire_zone(_component_zone(event))
 
     kept: dict[Any, date | datetime] = {}
@@ -782,7 +787,13 @@ def _write_exdates(event, values, *, zone, all_day: bool) -> None:
     """
     ordered = sorted(values, key=lambda value: _occurrence_key(value, all_day=all_day))
     written = [
-        value.astimezone(zone) if isinstance(value, datetime) else value for value in ordered
+        # `_as_utc` first: a floating value another client left behind means
+        # the server's default zone, the same reading `_occurrence_key` and
+        # `parse_datetime_input` give it. Calling `astimezone` on it directly
+        # would read it in the host machine's zone instead, and move the
+        # exception to a different moment on the way out.
+        _as_utc(value).astimezone(zone) if isinstance(value, datetime) else value
+        for value in ordered
     ]
     if len({isinstance(value, datetime) for value in written}) > 1:
         raise InvalidEventDataError(

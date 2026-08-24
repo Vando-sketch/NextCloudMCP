@@ -1724,3 +1724,44 @@ def test_exdate_garbage_still_raises():
 
     with pytest.raises(InvalidEventDataError):
         event_mapping.apply_exdate_changes(event, add=["kein datum"])
+
+
+def test_exdate_add_reads_a_foreign_floating_exdate_in_the_default_zone():
+    """A floating EXDATE means the server's default zone, not the host's.
+
+    The default zone is deliberately set to one the test host does not run
+    in: reading the value with `astimezone` alone would silently use the
+    machine's own zone, which on a Berlin host looks identical to the correct
+    answer and differs everywhere else.
+    """
+    mapping.set_default_timezone("America/New_York")
+    event = _event_from_ics(
+        "BEGIN:VEVENT\n"
+        "UID:floating-1\n"
+        "SUMMARY:Standup\n"
+        "DTSTART;TZID=Europe/Berlin:20260720T090000\n"
+        "RRULE:FREQ=WEEKLY;BYDAY=MO\n"
+        "EXDATE:20260727T090000\n"
+        "END:VEVENT\n"
+    )
+
+    event_mapping.apply_exdate_changes(event, add=["2026-08-03T09:00:00 Europe/Berlin"])
+
+    # 09:00 New York is 15:00 Berlin: the stored exception keeps that instant
+    # when it is rewritten in the event's own zone alongside the new one.
+    exdate_line = [
+        line for line in event.to_ical().decode().splitlines() if line.startswith("EXDATE")
+    ][0]
+    assert exdate_line == "EXDATE;TZID=Europe/Berlin:20260727T150000,20260803T090000"
+
+
+def test_exdate_remove_works_on_an_event_without_a_start():
+    # Malformed, but reachable through import_ics: the stored values must
+    # still be keyed the same way on both sides of the operation.
+    event = _new_event()
+    event.add("exdate", datetime(2026, 7, 27, 9, 0, tzinfo=timezone.utc))
+
+    report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27T09:00:00Z"])
+
+    assert report["removed"] == 1
+    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
