@@ -9,6 +9,28 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **A move can change the hierarchy in the same call.** `move_task` takes an
+  optional `uebergeordnete_aufgabe` and `move_event` an optional
+  `verknuepfte_aufgabe`, applied in the target collection once the move
+  succeeded. Moving a task to another list nearly always changes its parent
+  too - the old parent stays behind in the source list - so the common case
+  cost two round trips, a `move_task` followed by an `update_task` that existed
+  only to fix up the link the move left dangling. Passing
+  `felder_leeren=["uebergeordnete_aufgabe"]` (or `["verknuepfte_aufgabe"]`)
+  detaches instead of re-parenting, which is what a move into an unrelated list
+  usually wants. Only that one field name is accepted there - these stay move
+  tools, and every other field still goes through `update_task`/`update_event`.
+  The result carries `"hierarchie": "gesetzt" | "geleert"` when the link was
+  changed, and is unchanged for a plain move. Setting a field and clearing it in
+  one call, or naming any other field, fails before anything is moved.
+  The hierarchy write deliberately runs *after* the move, on the object in its
+  new collection: if only that write fails, the error says the move itself
+  stands and names the tool and collection to retry the link change on, rather
+  than leaving the caller to guess which half happened. As in
+  `update_task`/`update_event`, the new value replaces the object's `RELATED-TO`
+  rather than adding to it - `link_task_to_event` remains the additive way to
+  link a task and an event.
+
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
   merging them into what each event already has. `update_event`'s
@@ -253,6 +275,12 @@ This project does not yet follow Semantic Versioning releases.
   still rejected.
 
 ### Fixed
+
+- **`move_task` rejects an expanded occurrence's UID** instead of acting on the
+  whole series. Every other task tool taking a UID already refused those
+  synthetic per-occurrence UIDs with an error naming the series' own UID;
+  `move_task` was the one that did not, and failed later with a bare
+  "task not found" instead.
 
 - **Every tool now advertises MCP `annotations`, so read-only calls no longer
   need a human to approve them.** All 44 tools were registered without

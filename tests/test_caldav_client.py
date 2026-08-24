@@ -5734,6 +5734,311 @@ def test_move_fallback_reports_unreadable_source_before_writing(
     event_obj.delete.assert_not_called()
 
 
+# ======================================================================
+# move_task / move_event with an optional hierarchy change
+# ======================================================================
+
+
+def _move_task_calendars(principal, mock_dav_client, *, status: int = 201):
+    """Source/target task lists wired for a successful CalDAV MOVE of 'task1'."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    source.get_todo_by_uid.return_value = todo_obj
+
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=status)
+    return source, target
+
+
+def _moved_todo(target, *, parent: str | None = None) -> tuple[MagicMock, Todo]:
+    """The task as the target list hands it back for the post-move hierarchy write."""
+    todo = Todo()
+    todo.add("uid", "task1")
+    todo.add("summary", "Test task")
+    if parent is not None:
+        todo.add("related-to", parent, parameters={"RELTYPE": "PARENT"})
+    moved = MagicMock()
+    moved.icalendar_component = todo
+    target.get_todo_by_uid.return_value = moved
+    return moved, todo
+
+
+def test_move_task_sets_new_parent_in_target_list(service, principal, mock_dav_client):
+    _, target = _move_task_calendars(principal, mock_dav_client)
+    moved, todo = _moved_todo(target, parent="alter-parent")
+
+    result = service.move_task("QuellListe", "task1", "ZielListe", "neuer-parent")
+
+    assert result == {
+        "uid": "task1",
+        "von": "QuellListe",
+        "nach": "ZielListe",
+        "methode": "MOVE",
+        "hierarchie": "gesetzt",
+    }
+    # Written on the copy in the *target* list, not the one in the source.
+    target.get_todo_by_uid.assert_called_once_with("task1")
+    moved.save.assert_called_once()
+    assert str(todo.get("related-to")) == "neuer-parent"
+
+
+def test_move_task_clears_parent_left_behind_in_source_list(service, principal, mock_dav_client):
+    _, target = _move_task_calendars(principal, mock_dav_client)
+    moved, todo = _moved_todo(target, parent="parent-in-quellliste")
+
+    result = service.move_task(
+        "QuellListe", "task1", "ZielListe", clear=("uebergeordnete_aufgabe",)
+    )
+
+    assert result["hierarchie"] == "geleert"
+    moved.save.assert_called_once()
+    assert todo.get("related-to") is None
+
+
+def test_move_task_without_hierarchy_args_does_not_touch_the_target_copy(
+    service, principal, mock_dav_client
+):
+    """The plain three-argument move stays a pure move: one MOVE, no follow-up write."""
+    _, target = _move_task_calendars(principal, mock_dav_client)
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result == {
+        "uid": "task1",
+        "von": "QuellListe",
+        "nach": "ZielListe",
+        "methode": "MOVE",
+    }
+    assert "hierarchie" not in result
+    target.get_todo_by_uid.assert_not_called()
+
+
+def test_move_task_applies_hierarchy_even_when_source_equals_target(service, principal):
+    """A same-list "move" is a no-op move, but the re-parent still has to happen."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source]
+    moved, todo = _moved_todo(source)
+
+    result = service.move_task("QuellListe", "task1", "QuellListe", "neuer-parent")
+
+    assert result["hierarchie"] == "gesetzt"
+    moved.save.assert_called_once()
+    assert str(todo.get("related-to")) == "neuer-parent"
+
+
+def test_move_task_reports_a_failed_reparent_without_disowning_the_move(
+    service, principal, mock_dav_client
+):
+    """The move already happened server-side; the error must say so, not imply a rollback."""
+    _, target = _move_task_calendars(principal, mock_dav_client)
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.move_task("QuellListe", "task1", "ZielListe", "neuer-parent")
+
+    msg = str(exc_info.value)
+    assert "was moved to 'ZielListe'" in msg
+    assert "The move itself stands" in msg
+    assert "update_task" in msg
+
+
+def test_move_task_rejects_unknown_and_contradictory_clear_entries(service, principal):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    # A move is not a general-purpose update: only the hierarchy field is clearable.
+    with pytest.raises(InvalidTaskDataError, match="notizen"):
+        service.move_task("QuellListe", "task1", "ZielListe", clear=("notizen",))
+
+    with pytest.raises(InvalidTaskDataError, match="set and clear"):
+        service.move_task(
+            "QuellListe", "task1", "ZielListe", "parent", clear=("uebergeordnete_aufgabe",)
+        )
+
+    # Rejected before anything is moved.
+    source.get_todo_by_uid.assert_not_called()
+
+
+def test_move_task_rejects_an_occurrence_uid_before_moving(service, principal):
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    with pytest.raises(InvalidTaskDataError, match="occurrence"):
+        service.move_task("QuellListe", "serie-1#2026-08-24", "ZielListe", "parent")
+
+    source.get_todo_by_uid.assert_not_called()
+
+
+def _move_event_calendars(principal, mock_dav_client, *, status: int = 204):
+    """Source/target calendars wired for a successful CalDAV MOVE of 'event1'."""
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_cal/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_cal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/event1.ics"
+    source.event_by_uid.return_value = event_obj
+
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=status)
+    return source, target
+
+
+def _moved_event(target, *, linked_task: str | None = None) -> tuple[MagicMock, Event]:
+    event = Event()
+    event.add("uid", "event1")
+    event.add("summary", "Zeitblock")
+    event.add("dtstart", datetime(2026, 8, 24, 10, 0, tzinfo=timezone.utc))
+    if linked_task is not None:
+        event.add("related-to", linked_task, parameters={"RELTYPE": "PARENT"})
+    moved = MagicMock()
+    moved.icalendar_component = event
+    target.event_by_uid.return_value = moved
+    return moved, event
+
+
+def test_move_event_sets_linked_task_in_target_calendar(service, principal, mock_dav_client):
+    _, target = _move_event_calendars(principal, mock_dav_client)
+    moved, event = _moved_event(target, linked_task="alte-aufgabe")
+
+    result = service.move_event("QuellKalender", "event1", "ZielKalender", "neue-aufgabe")
+
+    assert result == {
+        "uid": "event1",
+        "von": "QuellKalender",
+        "nach": "ZielKalender",
+        "methode": "MOVE",
+        "hierarchie": "gesetzt",
+    }
+    target.event_by_uid.assert_called_once_with("event1")
+    moved.save.assert_called_once()
+    assert str(event.get("related-to")) == "neue-aufgabe"
+
+
+def test_move_event_clears_task_links(service, principal, mock_dav_client):
+    _, target = _move_event_calendars(principal, mock_dav_client)
+    moved, event = _moved_event(target, linked_task="aufgabe-1")
+
+    result = service.move_event(
+        "QuellKalender", "event1", "ZielKalender", clear=("verknuepfte_aufgabe",)
+    )
+
+    assert result["hierarchie"] == "geleert"
+    moved.save.assert_called_once()
+    assert event.get("related-to") is None
+
+
+def test_move_event_without_hierarchy_args_does_not_touch_the_target_copy(
+    service, principal, mock_dav_client
+):
+    _, target = _move_event_calendars(principal, mock_dav_client)
+
+    result = service.move_event("QuellKalender", "event1", "ZielKalender")
+
+    assert "hierarchie" not in result
+    target.event_by_uid.assert_not_called()
+
+
+def test_move_event_reports_a_failed_relink_without_disowning_the_move(
+    service, principal, mock_dav_client
+):
+    _, target = _move_event_calendars(principal, mock_dav_client)
+    target.event_by_uid.side_effect = caldav_error.NotFoundError()
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.move_event("QuellKalender", "event1", "ZielKalender", "neue-aufgabe")
+
+    msg = str(exc_info.value)
+    assert "was moved to 'ZielKalender'" in msg
+    assert "The move itself stands" in msg
+    assert "update_event" in msg
+
+
+def test_move_event_rejects_unknown_and_contradictory_clear_entries(service, principal):
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_cal/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_cal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    with pytest.raises(InvalidEventDataError, match="ort"):
+        service.move_event("QuellKalender", "event1", "ZielKalender", clear=("ort",))
+
+    with pytest.raises(InvalidEventDataError, match="set and clear"):
+        service.move_event(
+            "QuellKalender", "event1", "ZielKalender", "aufgabe", clear=("verknuepfte_aufgabe",)
+        )
+
+    source.event_by_uid.assert_not_called()
+
+
+def test_move_task_applies_hierarchy_after_the_copy_fallback_too(
+    service, principal, mock_dav_client
+):
+    """The re-parent must land on the copy in the target, not on the deleted original."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    vcal = Calendar()
+    vcal.add("prodid", "-//test//EN")
+    vcal.add("version", "2.0")
+    todo = Todo()
+    todo.add("uid", "task1")
+    todo.add("summary", "Test task")
+    vcal.add_component(todo)
+    todo_obj.icalendar_instance = vcal
+    source.get_todo_by_uid.return_value = todo_obj
+
+    # The read-back has to carry the same instances the source did, or
+    # `_move_object`'s pre-delete comparison passes vacuously.
+    copied = MagicMock()
+    copied.icalendar_instance = Calendar.from_ical(vcal.to_ical())
+    copied_todo = next(c for c in copied.icalendar_instance.walk("VTODO"))
+    copied.icalendar_component = copied_todo
+    # NotFound (pre-write clash check), the copy read back, then the re-parent read.
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), copied, copied]
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=403)
+
+    result = service.move_task("QuellListe", "task1", "ZielListe", "neuer-parent")
+
+    assert result["methode"] == "kopiert"
+    assert result["hierarchie"] == "gesetzt"
+    todo_obj.delete.assert_called_once()
+    copied.save.assert_called_once()
+    assert str(copied_todo.get("related-to")) == "neuer-parent"
+
+
 # ------------------------------------------------------------------
 # list_tags
 # ------------------------------------------------------------------
