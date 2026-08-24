@@ -102,6 +102,8 @@ def _slim_rows(
     truncates `text_key` to `_COMPACT_TEXT_LIMIT` characters. A key the caller
     whitelisted explicitly is exempt from `kompakt_drop` - asking for it wins.
     """
+    if isinstance(felder, str):
+        felder = [felder]
     if felder:
         unknown = sorted(set(felder) - valid_keys)
         if unknown:

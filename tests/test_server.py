@@ -729,6 +729,13 @@ def test_list_events_felder_whitelist_filters_keys(tools, fake_service):
     assert event == {"uid": "e1", "titel": "Meeting", "start": "2026-07-20T14:00:00+02:00"}
 
 
+def test_list_events_felder_accepts_bare_string(tools, fake_service):
+    # Same lenience as listen_namen: a single name instead of a list works.
+    fake_service.list_events.return_value = [_sample_event()]
+    (event,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], felder="uid"))
+    assert event == {"uid": "e1"}
+
+
 def test_list_events_unknown_felder_entry_raises(tools, fake_service):
     fake_service.list_events.return_value = [_sample_event()]
     with pytest.raises(ToolError, match="Unbekannte felder-Einträge: summary"):
