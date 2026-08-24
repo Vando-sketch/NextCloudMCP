@@ -337,6 +337,108 @@ def test_append_note_to_empty_note_has_no_leading_separator():
     assert json.loads(put_call.content) == {"content": "Neu"}
 
 
+# --- replace_in_note ---
+
+
+def _note_body(content: str) -> dict[str, Any]:
+    return {
+        "id": 1,
+        "title": "Foo",
+        "category": "",
+        "favorite": False,
+        "modified": 0,
+        "content": content,
+    }
+
+
+def test_replace_in_note_replaces_single_occurrence():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.method == "GET":
+            return _json_response(200, _note_body("Anfang\n\nAlter Absatz.\n\nEnde"))
+        return _json_response(200, _note_body("Anfang\n\nNeuer Absatz.\n\nEnde"))
+
+    service = _service(handler)
+    result = _run(service.replace_in_note(1, "Alter Absatz.", "Neuer Absatz."))
+
+    put_call = next(c for c in calls if c.method == "PUT")
+    assert json.loads(put_call.content) == {"content": "Anfang\n\nNeuer Absatz.\n\nEnde"}
+    assert result["inhalt"] == "Anfang\n\nNeuer Absatz.\n\nEnde"
+
+
+def test_replace_in_note_rejects_zero_matches_without_writing():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return _json_response(200, _note_body("Inhalt"))
+
+    service = _service(handler)
+    with pytest.raises(InvalidNotizDataError, match="not found"):
+        _run(service.replace_in_note(1, "fehlt", "neu"))
+    assert all(c.method == "GET" for c in calls)
+
+
+def test_replace_in_note_rejects_multiple_matches_without_writing():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return _json_response(200, _note_body("x doppelt y doppelt z"))
+
+    service = _service(handler)
+    with pytest.raises(InvalidNotizDataError, match="occurs 2 times"):
+        _run(service.replace_in_note(1, "doppelt", "einfach"))
+    assert all(c.method == "GET" for c in calls)
+
+
+def test_replace_in_note_rejects_empty_alt_without_any_request():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return _json_response(200, _note_body(""))
+
+    service = _service(handler)
+    with pytest.raises(InvalidNotizDataError, match="alt"):
+        _run(service.replace_in_note(1, "", "neu"))
+    assert calls == []
+
+
+# --- replace_note_section ---
+
+
+def test_replace_note_section_reads_then_writes_patched_content():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.method == "GET":
+            return _json_response(200, _note_body("# T\n\n## A\n\nalt\n\n## B\n\nx\n"))
+        return _json_response(200, _note_body("patched"))
+
+    service = _service(handler)
+    _run(service.replace_note_section(1, "## A", "## A\n\nneu"))
+
+    put_call = next(c for c in calls if c.method == "PUT")
+    assert json.loads(put_call.content) == {"content": "# T\n\n## A\n\nneu\n\n## B\n\nx\n"}
+
+
+def test_replace_note_section_missing_heading_does_not_write():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return _json_response(200, _note_body("Nur Text, keine Ueberschrift"))
+
+    service = _service(handler)
+    with pytest.raises(InvalidNotizDataError, match="No heading matching"):
+        _run(service.replace_note_section(1, "## A", "## A\n\nneu"))
+    assert all(c.method == "GET" for c in calls)
+
+
 # --- search_notes ---
 
 
