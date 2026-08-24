@@ -13,17 +13,23 @@ from .mapping import (
     VISIBILITY_LABELS,
     _anchored,
     _as_utc,
+    _component_start,
     _component_zone,
+    _exdate_component_values,
     _extract_categories,
     _extract_exdates,
+    _occurrence_key,
     _set,
+    _wire_zone,
     apply_alarms,
     extract_alarms,
     format_datetime_output,
     local_midnight,
+    match_existing_exdates,
     names_timezone,
     parse_datetime_input,
     parse_rrule_text,
+    resolve_exdate_specs,
     visibility_label_to_ical,
 )
 from .mapping import (
@@ -685,6 +691,109 @@ def _parse_attendees(component) -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def apply_exdate_changes(
+    event,
+    *,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+    ignore_non_occurrences: bool = True,
+) -> dict[str, Any]:
+    """Add and/or remove exception dates on an event, keeping the rest.
+
+    The additive counterpart of `EventFields.ausnahme_daten`, which replaces
+    the event's whole EXDATE set. Cancelling six sick days on a series that
+    already skips sixty occurrences means writing six values here instead of
+    reading and rewriting sixty-six - the reason this exists.
+
+    Removals are applied before additions, so a date named in both ends up
+    present exactly once: the second half is what the caller last asked for.
+    Both sides go through `mapping`'s resolvers, so a whole-day spec applies to
+    a timed series without the caller knowing what time it starts, and a spec
+    that names no occurrence is reported in `skipped` rather than raised - see
+    `resolve_exdate_specs` for why. `ignore_non_occurrences=False` turns that
+    tolerance off: any spec that resolves to nothing raises instead, before a
+    single value is written, for a caller who would rather be told than have a
+    typo pass as "this series does not run that day".
+
+    Returns a report, not the resulting list: `added`, `removed`, `total`
+    (exception dates on the event afterwards) and `skipped`, a list of
+    {"value", "reason"} entries. The point of the tool is that neither side of
+    the wire has to carry the full list.
+    """
+    add = list(add or [])
+    remove = list(remove or [])
+
+    all_day = not isinstance(_component_start(event), datetime)
+    zone = _wire_zone(_component_zone(event))
+
+    kept: dict[Any, date | datetime] = {}
+    for value in _exdate_component_values(event):
+        kept.setdefault(_occurrence_key(value, all_day=all_day), value)
+    before = len(kept)
+
+    try:
+        # Both only read DTSTART/RRULE/RDATE and the stored EXDATEs, so
+        # resolving before anything is applied changes neither answer.
+        drop, skipped_pairs = match_existing_exdates(event, remove)
+        resolution = resolve_exdate_specs(event, add)
+    except InvalidTaskDataError as exc:
+        # Same re-raise as `_exdate_values`: shared resolvers, event-side error.
+        raise InvalidEventDataError(str(exc)) from None
+
+    for key in drop:
+        kept.pop(key, None)
+    removed = before - len(kept)
+
+    skipped_pairs.extend(resolution.skipped)
+    after_removal = len(kept)
+    for value in resolution.values:
+        kept.setdefault(_occurrence_key(value, all_day=all_day), value)
+    added = len(kept) - after_removal
+
+    if skipped_pairs and not ignore_non_occurrences:
+        spec, reason = skipped_pairs[0]
+        raise InvalidEventDataError(
+            f"Exception date '{spec}' changed nothing on this event: {reason}. "
+            "Pass ignore_non_occurrences=true to skip such entries instead."
+        )
+
+    if added or removed:
+        _write_exdates(event, kept.values(), zone=zone, all_day=all_day)
+    return {
+        "added": added,
+        "removed": removed,
+        "total": len(kept),
+        "skipped": [{"value": spec, "reason": reason} for spec, reason in skipped_pairs],
+    }
+
+
+def _write_exdates(event, values, *, zone, all_day: bool) -> None:
+    """Replace the event's EXDATEs with `values`, in the event's own spelling.
+
+    Every value of one EXDATE property shares that property's parameters, so
+    the datetimes are re-expressed in the event's zone first - the same rule
+    (and the same reasons) as `_exdate_values`. A set that mixes dates and
+    datetimes cannot be written under one property at all; that only happens
+    when another client left the event in that state, and it is reported
+    rather than silently coerced, because either coercion would move an
+    exception to a different moment than the one stored.
+    """
+    ordered = sorted(values, key=lambda value: _occurrence_key(value, all_day=all_day))
+    written = [
+        value.astimezone(zone) if isinstance(value, datetime) else value for value in ordered
+    ]
+    if len({isinstance(value, datetime) for value in written}) > 1:
+        raise InvalidEventDataError(
+            "This event's stored exception dates mix date-only and datetime values, which "
+            "cannot be written as one EXDATE property. Fix them with update_event's "
+            "ausnahme_daten (which replaces the whole set) instead."
+        )
+    if "exdate" in event:
+        del event["exdate"]
+    if written:
+        event.add("exdate", written)
 
 
 def parse_vevent(component) -> dict[str, Any]:

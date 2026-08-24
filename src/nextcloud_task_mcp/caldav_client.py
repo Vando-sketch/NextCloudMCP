@@ -2259,9 +2259,13 @@ class CalDavService:
         self,
         calendar_name: str,
         event_uids: list[str],
-        operation: Callable[[DAVCalendar, str], None],
+        operation: Callable[[DAVCalendar, str], dict[str, Any] | None],
     ) -> dict[str, Any]:
         """Run `operation` per UID, reporting outcomes instead of aborting on the first failure.
+
+        A dict returned by `operation` is merged into that UID's result entry,
+        for a batch whose per-event outcome is more than "it worked"
+        (`change_exdates` reports what it changed on each event).
 
         A batch is only useful if one bad UID doesn't discard the work done
         for the others, so a failure that belongs to a single event (unknown
@@ -2303,9 +2307,10 @@ class CalDavService:
             failed = 0
 
             for uid in unique_uids:
+                detail: dict[str, Any] | None = None
                 try:
                     try:
-                        operation(calendar, uid)
+                        detail = operation(calendar, uid)
                     except caldav_error.NotFoundError:
                         if refreshed:
                             raise
@@ -2316,7 +2321,7 @@ class CalDavService:
                         self._calendar_cache.pop(("VEVENT", calendar_name), None)
                         self._invalidate_collection_caches()
                         calendar = self._resolve_and_cache(calendar_name, "VEVENT")
-                        operation(calendar, uid)
+                        detail = operation(calendar, uid)
                 except caldav_error.NotFoundError:
                     results.append(
                         {"uid": uid, "status": "fehler", "fehler": f"Event '{uid}' was not found."}
@@ -2342,7 +2347,7 @@ class CalDavService:
                     failed += 1
                     continue
                 else:
-                    results.append({"uid": uid, "status": "ok"})
+                    results.append({"uid": uid, "status": "ok", **(detail or {})})
                     succeeded += 1
 
             return {
@@ -2378,6 +2383,47 @@ class CalDavService:
                 event_obj.save()
 
             return self._batch_over_events(calendar_name, event_uids, operation)
+
+    def change_exdates(
+        self,
+        calendar_name: str,
+        event_uids: list[str],
+        add: list[str] | None = None,
+        remove: list[str] | None = None,
+        ignore_non_occurrences: bool = True,
+    ) -> dict[str, Any]:
+        """Add and/or remove exception dates on several event series at once.
+
+        The additive counterpart of `update_events` with `ausnahme_daten`,
+        which replaces each event's whole EXDATE set and therefore has to be
+        handed every value the series already had. Here each event is read,
+        merged and written server-side, so cancelling the same days across
+        five series costs one call carrying those days - not five reads plus
+        five rewrites of everything those series already skipped.
+
+        An event whose stored set already covers the additions (and holds none
+        of the removals) is left untouched rather than written back unchanged.
+        Per-event outcomes follow `_batch_over_events`, each carrying the
+        `apply_exdate_changes` report for that event.
+        """
+        if not add and not remove:
+            raise InvalidEventDataError("Name at least one exception date to add or remove.")
+
+        def operation(calendar: DAVCalendar, uid: str) -> dict[str, Any]:
+            event_obj = calendar.event_by_uid(uid)
+            component = event_obj.icalendar_component
+            report = event_mapping.apply_exdate_changes(
+                component,
+                add=add,
+                remove=remove,
+                ignore_non_occurrences=ignore_non_occurrences,
+            )
+            if report["added"] or report["removed"]:
+                _sync_vtimezones(event_obj.icalendar_instance, component)
+                event_obj.save()
+            return report
+
+        return self._batch_over_events(calendar_name, event_uids, operation)
 
     def delete_events(self, calendar_name: str, event_uids: list[str]) -> dict[str, Any]:
         """Permanently delete several events of a calendar.

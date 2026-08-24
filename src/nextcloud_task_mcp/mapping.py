@@ -7,7 +7,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil.rrule import rrulestr
@@ -740,6 +740,256 @@ def _extract_exdates(component) -> list[str]:
     return result
 
 
+def _local_date(value: date | datetime, zone: tzinfo) -> date:
+    """The calendar day `value` falls on, seen from the component's own zone.
+
+    A date-only value already is a day; an aware datetime is re-expressed in
+    `zone` first, so "the 9th" means the 9th where the series runs, not
+    wherever the value happens to be spelled.
+    """
+    if not isinstance(value, datetime):
+        return value
+    if value.tzinfo is None:
+        return value.date()
+    return value.astimezone(zone).date()
+
+
+def _exdate_component_values(component) -> list[date | datetime]:
+    """Every stored EXDATE value of the component, as dates/datetimes.
+
+    The value-side counterpart of `_extract_exdates` (which formats the same
+    values as ISO strings for the read tools), reading all three wire forms
+    other clients produce: one property, repeated properties, comma lists.
+    """
+    exdate = component.get("exdate")
+    if exdate is None:
+        return []
+    entries = exdate if isinstance(exdate, list) else [exdate]
+    values: list[date | datetime] = []
+    for entry in entries:
+        dts = getattr(entry, "dts", None)
+        if dts is not None:
+            for item in dts:
+                value = getattr(item, "dt", None)
+                if isinstance(value, (date, datetime)):
+                    values.append(value)
+        else:
+            single = getattr(entry, "dt", None)
+            if isinstance(single, (date, datetime)):
+                values.append(single)
+    return values
+
+
+class _OccurrenceIndex(NamedTuple):
+    """One component's recurrence set, indexed both ways an exception date asks.
+
+    `by_key` answers "is this exact moment an occurrence" (`_occurrence_key`),
+    `by_day` answers "which occurrences fall on this day" - the second is what
+    lets a whole-day exception apply to a series whose start time it does not
+    know.
+
+    `known` is False when the set could not be expanded at all (no RRULE, or a
+    rule `dateutil` refuses); `complete` is False when the scan stopped at
+    `_RECURRENCE_SCAN_LIMIT` before reaching the requested bound. Both mean the
+    absence of a match proves nothing, and callers treat that as inconclusive
+    rather than as a mismatch.
+    """
+
+    by_key: dict[Any, date | datetime]
+    by_day: dict[date, list[date | datetime]]
+    known: bool
+    complete: bool
+
+
+def _occurrence_index(component, *, until: date | None) -> _OccurrenceIndex:
+    """Expand the component's recurrence set up to and including the day `until`.
+
+    RDATE values belong to that set as much as the rule's own occurrences, so
+    they are indexed too - an exception date naming one of them cancels it.
+    The expansion stops at the first occurrence past `until` (they ascend) or
+    after `_RECURRENCE_SCAN_LIMIT` of them, so a per-second rule cannot turn a
+    validity check into a year-deep walk.
+    """
+    dtstart_value = _component_start(component)
+    if dtstart_value is None:
+        return _OccurrenceIndex({}, {}, False, False)
+    all_day = not isinstance(dtstart_value, datetime)
+    zone = _wire_zone(_component_zone(component))
+
+    by_key: dict[Any, date | datetime] = {}
+    by_day: dict[date, list[date | datetime]] = {}
+
+    def record(value: date | datetime) -> None:
+        if all_day and isinstance(value, datetime):
+            # `dateutil` expands an all-day series into naive midnights, and
+            # an RDATE may be written either way. The set is the component's
+            # own kind, so that an occurrence taken from here can be written
+            # straight back as an EXDATE.
+            value = value.date()
+        key = _occurrence_key(value, all_day=all_day)
+        if key in by_key:
+            return
+        by_key[key] = value
+        by_day.setdefault(_local_date(value, zone), []).append(value)
+
+    for extra in _rdate_values(component):
+        record(extra)
+
+    if component.get("rrule") is None:
+        # RDATEs alone are still a recurrence set this can answer for.
+        return _OccurrenceIndex(by_key, by_day, bool(by_key), True)
+
+    complete = True
+    try:
+        # `_extract_rrule`, not `rrule_prop.to_ical()`: a component carrying a
+        # duplicated RRULE property exposes a *list* here, and `.to_ical()` on
+        # a list raises AttributeError (finding 5.6, same crash, same fix).
+        rule = rrulestr(str(_extract_rrule(component)), dtstart=dtstart_value)
+        for position, occurrence in enumerate(rule):
+            if position >= _RECURRENCE_SCAN_LIMIT:
+                complete = False
+                break
+            if until is not None and _local_date(occurrence, zone) > until:
+                break
+            record(occurrence)
+    except (ValueError, TypeError, OverflowError):
+        return _OccurrenceIndex(by_key, by_day, False, False)  # proves nothing
+    return _OccurrenceIndex(by_key, by_day, True, complete)
+
+
+@dataclass(frozen=True)
+class ExdateResolution:
+    """What a batch of exception-date specs resolved to on one component.
+
+    `values` are the occurrence values to write, ascending and deduplicated,
+    already expressed the way the component writes its own - so the
+    one-property/one-kind rule `_exdate_values` enforces holds by
+    construction. `skipped` pairs every spec that resolved to nothing with the
+    reason it did.
+    """
+
+    values: list[date | datetime]
+    skipped: list[tuple[str, str]]
+
+
+def _unresolved_day_reason(index: _OccurrenceIndex, noun: str) -> str:
+    """Why a whole-day spec found no occurrence - missing, or unknowable."""
+    if not index.known:
+        return f"this {noun} has no recurrence to expand, so a whole-day exception names nothing"
+    if not index.complete:
+        return (
+            f"this {noun}'s recurrence is too dense to expand that far - "
+            "name the occurrence exactly instead of the day"
+        )
+    return f"this {noun} has no occurrence on that day"
+
+
+def resolve_exdate_specs(component, specs: list[str], *, noun: str = "event") -> ExdateResolution:
+    """Resolve exception-date specs against the component's own recurrence set.
+
+    Two things separate this from the `_exdate_values` +
+    `_check_exdates_match_occurrences` pair that `ausnahme_daten` goes through
+    on create/update, and both exist for the same reason - cancelling the same
+    days across several series at once:
+
+    - a date-only spec on a *timed* component means "every occurrence on that
+      day", not "midnight on that day". Five series that each start at a
+      different hour take one list of days here, instead of one exact datetime
+      per series;
+    - a spec naming no occurrence is *reported*, not raised. A batch spanning
+      several series has to tolerate a day some of them simply do not run on.
+
+    A spec that is not a readable date/datetime at all still raises - that is
+    a broken call, not a day this component happens not to have.
+    """
+    start_value = _component_start(component)
+    if start_value is None:
+        reason = f"this {noun} has no start to anchor an exception date to"
+        return ExdateResolution([], [(spec, reason) for spec in specs])
+    if not specs:
+        return ExdateResolution([], [])
+
+    all_day = not isinstance(start_value, datetime)
+    zone = _wire_zone(_component_zone(component))
+    parsed = [(spec, parse_datetime_input(spec, keep_zone=True)) for spec in specs]
+    index = _occurrence_index(component, until=max(_local_date(v, zone) for _, v in parsed))
+
+    chosen: dict[Any, date | datetime] = {}
+    skipped: list[tuple[str, str]] = []
+    for spec, value in parsed:
+        if all_day and isinstance(value, datetime):
+            skipped.append((spec, f"this {noun} is all-day - name the day as 'YYYY-MM-DD'"))
+            continue
+        if not all_day and not isinstance(value, datetime):
+            # A whole day of a timed series: every occurrence falling on it.
+            matches = index.by_day.get(value, [])
+            if not matches:
+                skipped.append((spec, _unresolved_day_reason(index, noun)))
+                continue
+            for match in matches:
+                chosen.setdefault(_occurrence_key(match, all_day=all_day), match)
+            continue
+        anchored = value.astimezone(zone) if isinstance(value, datetime) else value
+        key = _occurrence_key(anchored, all_day=all_day)
+        exact = index.by_key.get(key)
+        if exact is None:
+            if index.known and index.complete:
+                skipped.append((spec, f"names no occurrence of this {noun}'s recurrence"))
+                continue
+            # Inconclusive (no rule, or one too dense to expand): keep the
+            # caller's own value - the same benefit of the doubt
+            # `_check_exdates_match_occurrences` gives.
+            exact = anchored
+        chosen.setdefault(key, exact)
+    return ExdateResolution([chosen[key] for key in sorted(chosen)], skipped)
+
+
+def match_existing_exdates(
+    component, specs: list[str], *, noun: str = "event"
+) -> tuple[set[Any], list[tuple[str, str]]]:
+    """Pick out the stored EXDATEs that `specs` name, for removal.
+
+    Matched against what the component *stores*, not against its recurrence
+    set: an exception date can outlive the occurrence it once cancelled (the
+    series moved underneath it), and removing such a leftover has to keep
+    working. A date-only spec drops every stored exception on that day,
+    mirroring `resolve_exdate_specs`.
+
+    Returns the `_occurrence_key`s to drop, and the specs that matched nothing.
+    """
+    start_value = _component_start(component)
+    all_day = start_value is not None and not isinstance(start_value, datetime)
+    zone = _wire_zone(_component_zone(component))
+
+    by_key: dict[Any, date | datetime] = {}
+    by_day: dict[date, list[Any]] = {}
+    for value in _exdate_component_values(component):
+        key = _occurrence_key(value, all_day=all_day)
+        if key in by_key:
+            continue
+        by_key[key] = value
+        by_day.setdefault(_local_date(value, zone), []).append(key)
+
+    drop: set[Any] = set()
+    skipped: list[tuple[str, str]] = []
+    for spec in specs:
+        value = parse_datetime_input(spec, keep_zone=True)
+        if not all_day and not isinstance(value, datetime):
+            keys = by_day.get(value, [])
+            if not keys:
+                skipped.append((spec, f"this {noun} has no exception date on that day"))
+                continue
+            drop.update(keys)
+            continue
+        anchored = value.astimezone(zone) if isinstance(value, datetime) else value
+        key = _occurrence_key(anchored, all_day=all_day)
+        if key not in by_key:
+            skipped.append((spec, f"this {noun} has no such exception date"))
+            continue
+        drop.add(key)
+    return drop, skipped
+
+
 def _check_exdates_match_occurrences(
     component,
     entries: list[str],
@@ -783,24 +1033,15 @@ def _check_exdates_match_occurrences(
         wanted.pop(_occurrence_key(extra, all_day=all_day), None)
     if not wanted:
         return
-    latest = max(wanted)
 
-    try:
-        # `_extract_rrule`, not `rrule_prop.to_ical()`: a component carrying a
-        # duplicated RRULE property exposes a *list* here, and `.to_ical()` on
-        # a list raises AttributeError (finding 5.6, same crash, same fix).
-        rule = rrulestr(str(_extract_rrule(component)), dtstart=dtstart_value)
-        for index, occurrence in enumerate(rule):
-            if index >= _RECURRENCE_SCAN_LIMIT:
-                return
-            key = _occurrence_key(occurrence, all_day=all_day)
-            wanted.pop(key, None)
-            if not wanted:
-                return
-            if key > latest:
-                break  # occurrences ascend, so nothing further can match
-    except (ValueError, TypeError, OverflowError):
-        return  # a rule (or a DTSTART) dateutil cannot expand proves nothing
+    zone = _wire_zone(_component_zone(component))
+    index = _occurrence_index(component, until=max(_local_date(v, zone) for v in values))
+    if not index.known or not index.complete:
+        return  # a set we could not expand in full proves nothing
+    for key in index.by_key:
+        wanted.pop(key, None)
+    if not wanted:
+        return
 
     spec = next(iter(wanted.values()))
     raise InvalidTaskDataError(
