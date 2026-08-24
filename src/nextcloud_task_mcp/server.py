@@ -1596,7 +1596,8 @@ def build_server(
         `abschnitt` is an ATX heading prefix like "## 7." that must select
         exactly one heading line of the same level (same number of '#')
         starting with it; the match stops at a word boundary, so "## 7"
-        does not select "## 75. History". The section runs from that
+        does not select "## 75. History" and "## 7.1" does not select
+        "## 7.1.1 Details". The section runs from that
         heading up to the next heading of the same or a higher level (or
         the end of the note). Heading-shaped lines inside fenced code
         blocks or a leading YAML front matter block are ignored; setext

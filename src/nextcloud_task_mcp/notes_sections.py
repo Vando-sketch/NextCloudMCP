@@ -20,8 +20,11 @@ from .errors import InvalidNotizDataError
 
 _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-# `abschnitt` itself: 1-6 '#', then nothing or whitespace + the heading's start.
-_ABSCHNITT_RE = re.compile(r"(#{1,6})(?:\s.*)?", re.DOTALL)
+# `abschnitt` itself: 1-6 '#', then nothing or whitespace + the heading's
+# start. No DOTALL - a multi-line abschnitt (e.g. swapped arguments) must
+# fail here with the clear "heading prefix" error, not a puzzling
+# "no heading found" later.
+_ABSCHNITT_RE = re.compile(r"(#{1,6})(?:\s.*)?")
 
 
 def _heading_levels(lines: list[str]) -> list[int | None]:
@@ -44,11 +47,13 @@ def _heading_levels(lines: list[str]) -> list[int | None]:
         fence_match = _FENCE_RE.match(lines[i])
         if fence is not None:
             # A closing fence must repeat the opening character at least as
-            # many times (CommonMark); anything else stays inside the block.
+            # many times and carry no info string (CommonMark) - a line like
+            # ```python inside a ``` block stays inside it.
             if (
                 fence_match
                 and fence_match.group(1)[0] == fence[0]
                 and len(fence_match.group(1)) >= len(fence)
+                and not lines[i][fence_match.end() :].strip()
             ):
                 fence = None
         elif fence_match:
@@ -63,14 +68,19 @@ def _heading_levels(lines: list[str]) -> list[int | None]:
 def _matches_prefix(line: str, prefix: str) -> bool:
     """True if the heading line starts with `prefix` at a word boundary.
 
-    The boundary check keeps "## 7" from selecting "## 75. History": the
-    character right after the prefix must not be alphanumeric.
+    The boundary keeps "## 7" from selecting "## 75. History" and "## 7.1"
+    from selecting "## 7.1.1 Details": after the prefix the line must end,
+    continue with whitespace, or continue with a single punctuation
+    character that is itself followed by whitespace or the end (the
+    "## 7" -> "## 7. Deployment" case).
     """
     stripped = line.strip()
     if not stripped.startswith(prefix):
         return False
     rest = stripped[len(prefix) :]
-    return not rest[:1].isalnum()
+    if not rest or rest[0].isspace():
+        return True
+    return not rest[0].isalnum() and (len(rest) == 1 or rest[1].isspace())
 
 
 def replace_section(content: str, abschnitt: str, inhalt: str) -> str:

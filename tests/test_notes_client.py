@@ -368,6 +368,24 @@ def test_replace_in_note_replaces_single_occurrence():
     assert result["inhalt"] == "Anfang\n\nNeuer Absatz.\n\nEnde"
 
 
+def test_replace_in_note_handles_multiline_markdown_passages():
+    calls: list[httpx.Request] = []
+    old = "- [Link](https://a.example)\n- **fett** und *kursiv*"
+    new = "- [Link](https://b.example)\n- nur noch Text"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if request.method == "GET":
+            return _json_response(200, _note_body(f"Kopf\n\n{old}\n\nFuss"))
+        return _json_response(200, _note_body("egal"))
+
+    service = _service(handler)
+    _run(service.replace_in_note(1, old, new))
+
+    put_call = next(c for c in calls if c.method == "PUT")
+    assert json.loads(put_call.content) == {"content": f"Kopf\n\n{new}\n\nFuss"}
+
+
 def test_replace_in_note_rejects_zero_matches_without_writing():
     calls: list[httpx.Request] = []
 
