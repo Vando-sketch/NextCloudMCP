@@ -297,7 +297,7 @@ Permanently deletes the task.
 
 ### `move_task(list_name, task_uid, ziel_liste, uebergeordnete_aufgabe=None, felder_leeren=None)`
 
-Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert", "verwaiste_verknuepfungen": ...}`.
+Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server *refuses* `MOVE` (HTTP 403/405/409/501). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. A gateway status (502/503/504) is no refusal but no answer either — the move may already have happened — so it is retried instead, and a task found in the target rather than the source comes back as `"bereits_dort"`. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert" | "bereits_dort", "verwaiste_verknuepfungen": ...}`.
 
 **Orphaned subtask links (`verwaiste_verknuepfungen`):** Nextcloud Tasks resolves the
 subtask hierarchy (`RELATED-TO;RELTYPE=PARENT`) only *within* one task list. Moving one half
@@ -316,6 +316,25 @@ move argument can reach — separate objects in the source list — so repair th
 them along too, or with one `update_task` each.
 
 A list change almost always changes the hierarchy too, since the old parent stays behind in the source list. `uebergeordnete_aufgabe` sets a new parent, or `felder_leeren=["uebergeordnete_aufgabe"]` detaches the task, in the same call — the write lands on the copy in the target list after the move succeeded, and the result then also carries `"hierarchie": "gesetzt" | "geleert"`. Only that one field is accepted here; everything else still goes through `update_task`.
+
+### Task batches: `update_tasks`, `delete_tasks`, `move_tasks`
+
+| Tool | Purpose |
+|---|---|
+| `update_tasks(list_name, task_uids, ...)` | Batch update up to 200 tasks with the same field patch; patch validated up front |
+| `delete_tasks(list_name, task_uids)` | Batch delete up to 200 tasks from a task list |
+| `move_tasks(list_name, task_uids, ziel_liste)` | Move up to 200 tasks to another list; both lists resolved once |
+
+The task-side twins of `update_events`/`delete_events`, and the tools for
+migrating a list. One call resolves the list once and returns
+`{"list_name", "erfolgreich", "fehlgeschlagen", "ergebnisse"}` with a per-UID
+status, so an unknown UID or a conflicting edit costs one entry rather than the
+whole batch. Gateway failures (502/503/504) and dropped connections are retried
+per item before anything is reported. A failure that says the *call* is broken
+still stops the batch, but names how far it got — which UIDs were done, which
+are still to do — since re-running with the rest is the way out. `move_tasks`
+is safe to re-run in full: a task already in the target is reported as
+`"bereits_dort"`. See [`docs/tools.md`](docs/tools.md).
 
 ### Calendar & event tools (VEVENT)
 
@@ -339,7 +358,7 @@ the full reference.
 | `update_exdates(calendar_name, event_uids, add=None, remove=None, ...)` | Add/remove single exception dates on up to 200 recurring events without rewriting the whole list |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
 | `delete_events(kalender_name, event_uids)` | Batch delete up to 200 events from a calendar |
-| `move_event(kalender_name, event_uid, ziel_kalender, verknuepfte_aufgabe=None, felder_leeren=None)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete; optionally re-links (or unlinks) its task in the same call, mirroring `move_task` |
+| `move_event(kalender_name, event_uid, ziel_kalender, verknuepfte_aufgabe=None, felder_leeren=None)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete, retry on a gateway status; optionally re-links (or unlinks) its task in the same call, mirroring `move_task` |
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
 | `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |
 | `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |

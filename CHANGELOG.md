@@ -9,6 +9,35 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Tasks can be updated, deleted and moved in batches.** `update_tasks`,
+  `delete_tasks` and `move_tasks` take a list of up to 200 UIDs where their
+  singular counterparts take one, and are the task-side twins of the existing
+  `update_events`/`delete_events`. The list is resolved once for the whole
+  call, duplicate UIDs are deduplicated, and the reply is
+  `{"list_name", "erfolgreich", "fehlgeschlagen", "ergebnisse"}` with a status
+  per UID - so an unknown UID, a conflicting edit, or a patch that doesn't fit
+  one task costs one entry instead of the work already done for the others.
+  `update_tasks` validates its patch once up front, before a single task is
+  written, exactly as `update_events` does.
+  `move_tasks` is the reason the set exists: migrating a list used to be one
+  `move_task` call per task, and a run that half-failed left no way to tell
+  which tasks had gone through. Re-running `move_tasks` with the full UID list
+  is safe - a task already sitting in the target is reported as
+  `"methode": "bereits_dort"` rather than moved twice or reported as missing.
+
+- **Transient failures are retried instead of surfaced.** HTTP 502/503/504 and
+  dropped connections are retried three times (0.5s then 1.0s apart) around
+  each batch item and around a single `move_task`/`move_event`. A proxy hiccup
+  in front of Nextcloud now costs a second request rather than an entry in a
+  failure list.
+
+- **A batch that has to stop says how far it got.** A failure that means the
+  whole call is broken - bad credentials, an unreachable server, a write that
+  keeps failing however often it is retried - still aborts rather than
+  repeating itself two hundred times. But an exception carries no
+  `ergebnisse`, so the message now names how many objects were done, which
+  ones, and which UIDs are still to do. This applies to the event batches too.
+
 - **A move can change the hierarchy in the same call.** `move_task` takes an
   optional `uebergeordnete_aufgabe` and `move_event` an optional
   `verknuepfte_aufgabe`, applied in the target collection once the move
@@ -263,6 +292,19 @@ This project does not yet follow Semantic Versioning releases.
   lifecycle, recurrence expansion incl. EXDATE, linking, agenda).
 
 ### Changed
+
+- **A gateway status on a CalDAV `MOVE` is retried, not turned into a copy.**
+  `move_task`/`move_event` used to treat HTTP 502 like 403/405/409/501 - as
+  the server refusing to `MOVE` - and fall back to copy-then-delete. But 502
+  (like 503 and 504) is a proxy failing to relay an answer, not an answer:
+  the `MOVE` may well have been carried out, in which case the copy path reads
+  a source that is already gone or clashes with the object now in the target.
+  Those statuses now retry the whole move instead, and the fallback is reserved
+  for the statuses that really do mean "this server won't `MOVE`". A move whose
+  acknowledgement was lost is recognized by finding the UID in the target and
+  reported as `"methode": "bereits_dort"` - a third value alongside `"MOVE"`
+  and `"kopiert"`, and the same recovery that makes a missing source object
+  check the target before being called missing.
 
 - **`complete_task` ends recurring task series.** Completing a recurring task
   does not automatically roll the series forward to the next occurrence
