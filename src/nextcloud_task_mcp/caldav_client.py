@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import re
 import threading
@@ -10,7 +11,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from datetime import date, datetime, timedelta, timezone
-from time import monotonic
+from time import monotonic, sleep
 from typing import Any, NamedTuple, TypeVar
 from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
@@ -48,11 +49,13 @@ from .errors import (
     InvalidEventDataError,
     InvalidIcsDataError,
     InvalidTaskDataError,
+    ObjectMoveError,
     TaskConflictError,
     TaskListAlreadyExistsError,
     TaskListNotFoundError,
     TaskMcpError,
     TaskNotFoundError,
+    TransientServerError,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,6 +112,31 @@ _VTIMEZONE_HORIZON = _RANGE_MAX.date()
 # One tool call should stay one bounded unit of work: a caller asking to touch
 # thousands of events is better served by several calls it can check in between.
 _BATCH_UID_LIMIT = 200
+
+# HTTP statuses that say "the request never reached a decision" rather than
+# "the answer is no": a reverse proxy in front of Nextcloud timing out or
+# dropping the upstream connection. Retrying one of these is the cheapest way
+# to turn a batch that half-worked into one that worked. 4xx is excluded (the
+# request itself is wrong, so a retry changes nothing) and so is 500, which
+# Nextcloud returns for data it will keep refusing. 429 and 503-with-Retry-After
+# never get here: caldav's own backoff (`rate_limit_handle`, see `__init__`)
+# already sleeps and retries those, and its RateLimitError only surfaces once
+# that gave up - a 503 *without* a Retry-After header falls through to us,
+# hence its presence in this set.
+_TRANSIENT_HTTP_STATUSES = frozenset({502, 503, 504})
+
+# Three attempts with 0.5s then 1.0s in between: enough for a proxy hiccup or a
+# restarting php-fpm worker to clear, short enough that 200 UIDs all failing
+# can't stretch one tool call past a client's patience.
+_BATCH_RETRY_ATTEMPTS = 3
+_BATCH_RETRY_BASE_DELAY = 0.5
+
+# caldav renders a failed response as "<status> <reason>\n\n<body>" (see
+# `caldav.lib.error.errmsg`), so a status is only ever the leading token. The
+# reason phrase has to be there too: the same field otherwise holds a real URL
+# on some caldav error paths, and a host whose name begins with three digits
+# must not read as a status code.
+_LEADING_HTTP_STATUS_RE = re.compile(r"^\s*([1-5]\d{2})[ \t]+\S")
 
 # A date-only string is what makes an event all-day (see `parse_datetime_input`).
 _ALL_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -231,6 +259,19 @@ def _translate(exc: Exception) -> TaskMcpError:
             "and retry."
         )
     if isinstance(exc, caldav_error.DAVError):
+        # Checked before the flat "the request failed" below because the
+        # difference is actionable: a gateway status means the request reached
+        # no decision, which `_retry_transient` can act on - but only if this
+        # translation preserves it. Flattening it here would silently turn
+        # every retryable failure into a permanent one at the first call site
+        # that translates before retrying.
+        status = _dav_error_status(exc)
+        if status in _TRANSIENT_HTTP_STATUSES:
+            return TransientServerError(
+                f"Nextcloud gave no answer to this request (HTTP {status}); it may or may "
+                "not have been carried out. This is usually a proxy in front of Nextcloud "
+                "rather than Nextcloud itself."
+            )
         logger.warning("CalDAV request failed", exc_info=exc)
         return TaskMcpError("The CalDAV request failed on the Nextcloud server.")
     if isinstance(exc, (_http_errors.ConnectionError, _http_errors.Timeout)):
@@ -242,6 +283,148 @@ def _translate(exc: Exception) -> TaskMcpError:
         return ConnectionFailedError("A network error occurred talking to Nextcloud.")
     logger.warning("Unexpected error talking to Nextcloud", exc_info=exc)
     return TaskMcpError("An unexpected error occurred talking to Nextcloud.")
+
+
+def _dav_error_status(exc: Exception) -> int | None:
+    """Recover the HTTP status a caldav `DAVError` was built from, if it carries one.
+
+    caldav keeps no field for it. `errmsg(response)` renders the response as
+    "<status> <reason>\\n\\n<body>" and that string is handed to `DAVError` as
+    its *url* argument (see `DAVObject._post_delete` and
+    `CalendarObjectResource._post_put`), so the status survives only as the
+    leading token of `.url`. Read defensively: anything that doesn't start with
+    a three-digit number yields None, and every caller treats None as "not
+    provably retryable".
+    """
+    for candidate in (getattr(exc, "url", None), getattr(exc, "reason", None)):
+        if not isinstance(candidate, str):
+            continue
+        match = _LEADING_HTTP_STATUS_RE.match(candidate)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _is_transient(exc: Exception) -> bool:
+    """True for a failure that says nothing about the request, only about the moment."""
+    if isinstance(exc, (TransientServerError, ConnectionFailedError)):
+        # The already-translated forms. Most write paths run their exceptions
+        # through `_translate` before anything else sees them, so recognizing
+        # only the raw library exceptions below would leave the retries dead on
+        # exactly the paths that need them most.
+        return True
+    if isinstance(exc, (_http_errors.ConnectionError, _http_errors.Timeout)):
+        return True
+    if isinstance(
+        exc,
+        (
+            caldav_error.NotFoundError,
+            caldav_error.AuthorizationError,
+            caldav_error.ETagMismatchError,
+            caldav_error.ScheduleTagMismatchError,
+            caldav_error.ConsistencyError,
+            caldav_error.RateLimitError,
+        ),
+    ):
+        # Each of these is a definite answer about this request - and
+        # RateLimitError only surfaces once caldav's own backoff has already
+        # waited and given up, so retrying it here would only wait again.
+        return False
+    if isinstance(exc, caldav_error.DAVError):
+        return _dav_error_status(exc) in _TRANSIENT_HTTP_STATUSES
+    return False
+
+
+def _sleep(seconds: float) -> None:
+    """Indirection over `time.sleep` so tests can drive the retry path instantly."""
+    sleep(seconds)
+
+
+def _retry_transient(fn: Callable[[], _T]) -> _T:
+    """Run `fn`, repeating it while it fails transiently.
+
+    Each attempt is a whole operation - re-read the object, write it back - so
+    a retry never replays a body built against a response that never arrived.
+    That is also why this is only wrapped around batch items: the operations it
+    covers are re-runnable, and a batch is where a proxy hiccup is expensive
+    (the caller cannot retry "the third of thirteen moves" without first
+    working out which of them went through).
+    """
+    delay = _BATCH_RETRY_BASE_DELAY
+    for attempt in range(1, _BATCH_RETRY_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            if attempt == _BATCH_RETRY_ATTEMPTS or not _is_transient(exc):
+                raise
+            logger.info(
+                "Transient CalDAV failure on attempt %s/%s, retrying",
+                attempt,
+                _BATCH_RETRY_ATTEMPTS,
+                exc_info=exc,
+            )
+            _sleep(delay)
+            delay *= 2
+    raise AssertionError("unreachable")  # pragma: no cover - the loop always returns or raises
+
+
+@dataclasses.dataclass(frozen=True)
+class _BatchKind:
+    """Everything that differs between the event batches and the task batches.
+
+    The batch machinery itself (dedup, the UID limit, resolving the collection
+    once, the partial-failure report) is identical for both, so it lives in
+    `_batch_over_uids` and is handed one of the two instances below rather than
+    being written twice.
+
+    `component` is the CalDAV component kind the collection must support;
+    `name_key` is what the returned envelope calls the collection, matching the
+    parameter name the tool takes; `uids_param` and `noun` only appear in error
+    messages, and `invalid_error` is the kind-specific `InvalidTaskDataError` /
+    `InvalidEventDataError` used both for rejecting the UID list up front and
+    for recognizing a patch that doesn't fit one particular object.
+    """
+
+    component: str
+    name_key: str
+    uids_param: str
+    noun: str
+    invalid_error: type[TaskMcpError]
+
+
+_EVENT_BATCH = _BatchKind("VEVENT", "kalender_name", "event_uids", "Event", InvalidEventDataError)
+_TASK_BATCH = _BatchKind("VTODO", "list_name", "task_uids", "Task", InvalidTaskDataError)
+
+
+def _aborted_batch(
+    cause: TaskMcpError,
+    kind: _BatchKind,
+    uid: str,
+    results: list[dict[str, Any]],
+    unique_uids: list[str],
+) -> TaskMcpError:
+    """Re-raise a call-scoped failure with what the batch had already done.
+
+    Some failures are worth stopping for - the server is unreachable, the
+    credentials are wrong, a write keeps failing however often it is retried.
+    Continuing through 200 UIDs would then just produce 200 copies of the same
+    error, slowly.
+
+    But an exception carries no `ergebnisse`, and "which of the thirteen went
+    through?" is the exact question a half-finished migration leaves behind. So
+    the report is folded into the message: what stopped it, where, and which
+    UIDs are still to do. The class is kept, so callers that distinguish e.g.
+    an authentication failure still can.
+    """
+    # `results` has no entry for the UID that is failing right now, so the slice
+    # starts at it: it and everything after it still needs doing.
+    still_to_do = unique_uids[len(results) :]
+    done = [entry["uid"] for entry in results if entry["status"] == "ok"]
+    noun = kind.noun.lower()
+    detail = f"{cause} Stopped at {noun} '{uid}': {len(done)} of {len(unique_uids)} were done"
+    detail += f" ({', '.join(done)})." if done else "."
+    detail += f" Still to do: {', '.join(still_to_do)}. Re-run with those once the cause is gone."
+    return type(cause)(detail)
 
 
 # ----------------------------------------------------------------------
@@ -693,6 +876,30 @@ def _sync_vtimezones(vcal: Calendar, component: Any) -> None:
             0, Timezone.from_tzinfo(zone, tzid=tzid, last_date=_VTIMEZONE_HORIZON)
         )
         seen_tzids.add(tzid)
+
+
+def _apply_task_patch(todo_obj: Any, fields: mapping.TaskFields) -> None:
+    """Write `fields` onto a fetched task object and save it back.
+
+    The patch goes on the *series master*, not on whatever component caldav
+    happens to hand back as `icalendar_component`: a recurring task's file also
+    holds its RECURRENCE-ID overrides, and patching one of those would change a
+    single occurrence while the caller asked to change the task.
+
+    Shared by `update_task` and `update_tasks` so the two cannot drift apart,
+    and written to be re-runnable: every field here is set rather than
+    appended, so a retry after a lost response lands on the same result.
+    """
+    master = None
+    for component in todo_obj.icalendar_instance.walk("VTODO"):
+        if "recurrence-id" not in component:
+            master = component
+            break
+    if master is None:
+        master = todo_obj.icalendar_component
+    mapping.apply_task_fields(master, fields)
+    _sync_vtimezones(todo_obj.icalendar_instance, master)
+    todo_obj.save()
 
 
 def _reject_occurrence_uid(task_uid: str) -> None:
@@ -1703,17 +1910,7 @@ class CalDavService:
         with self._lock:
 
             def op(calendar: DAVCalendar):
-                todo_obj = calendar.get_todo_by_uid(task_uid)
-                master = None
-                for component in todo_obj.icalendar_instance.walk("VTODO"):
-                    if "recurrence-id" not in component:
-                        master = component
-                        break
-                if master is None:
-                    master = todo_obj.icalendar_component
-                mapping.apply_task_fields(master, fields)
-                _sync_vtimezones(todo_obj.icalendar_instance, master)
-                todo_obj.save()
+                _apply_task_patch(calendar.get_todo_by_uid(task_uid), fields)
 
             try:
                 self._with_calendar(list_name, op)
@@ -1791,7 +1988,8 @@ class CalDavService:
 
         Prefers a CalDAV MOVE request (preserving server-side URL identity and
         ETags). Falls back to copy-then-delete if the server rejects MOVE with
-        403/405/409/501/502.
+        403/405/409/501, and retries it instead if the server gives no answer
+        at all (502/503/504).
 
         Args:
             list_name: Display name of the source task list.
@@ -1808,9 +2006,9 @@ class CalDavService:
 
         Returns:
             {"uid": task_uid, "von": source, "nach": target,
-            "methode": "MOVE" | "kopiert"}, plus "hierarchie":
-            "gesetzt" | "geleert" when the parent was changed, plus
-            "verwaiste_verknuepfungen" (see `_orphaned_subtask_links`).
+            "methode": "MOVE" | "kopiert" | "bereits_dort"}, plus
+            "hierarchie": "gesetzt" | "geleert" when the parent was changed,
+            plus "verwaiste_verknuepfungen" (see `_orphaned_subtask_links`).
         """
         clear_parent = _validate_move_clear(
             clear,
@@ -1991,6 +2189,114 @@ class CalDavService:
                         }
                     )
         return orphans
+
+    @staticmethod
+    def _validate_task_patch(fields: mapping.TaskFields) -> None:
+        """Reject an empty or invalid patch before a single task is written.
+
+        The task-side twin of `_validate_event_patch`, and for the same reason:
+        a batch must not stop halfway because the 40th task was the first to
+        reveal a bad RRULE. The patch is applied to a throwaway VTODO first, so
+        every check `apply_task_fields` performs - unknown `felder_leeren`
+        names, setting and clearing the same field, bad status/visibility/
+        RRULE/date, an out-of-range percentage - happens there, on nothing.
+
+        The probe carries a DTSTART because relative reminders and `wiederholung`
+        both validate against having one, and its value kind follows the patch's
+        own `faellig_datum` so an all-day due date isn't judged against a timed
+        probe. Whether the patch fits a *given* task stays per-task and is
+        reported per UID.
+        """
+        patch_fields = [f.name for f in dataclasses.fields(fields) if f.name != "clear"]
+        if not fields.clear and all(getattr(fields, name) is None for name in patch_fields):
+            raise InvalidTaskDataError(
+                "No fields to update given - set at least one field, or name one in felder_leeren."
+            )
+
+        probe = Todo()
+        if fields.start_datum is None:
+            # With `start_datum` in the patch, `apply_task_fields` sets DTSTART
+            # on the probe itself before it validates anything against it.
+            all_day_due = (
+                fields.faellig_datum is not None
+                and _ALL_DAY_RE.match(fields.faellig_datum) is not None
+            )
+            probe.add("dtstart", date(1970, 1, 1) if all_day_due else _PROBE_START)
+        mapping.apply_task_fields(probe, fields)
+
+    def update_tasks(
+        self, list_name: str, task_uids: list[str], fields: mapping.TaskFields
+    ) -> dict[str, Any]:
+        """Apply one field patch to several tasks of a list.
+
+        The patch is validated before the first write (`_validate_task_patch`),
+        so a rejected patch leaves every task untouched instead of stopping
+        halfway through the batch. Per-task outcomes follow `_batch_over_uids`.
+        """
+        self._validate_task_patch(fields)
+
+        def operation(calendar: DAVCalendar, uid: str) -> None:
+            # Per UID rather than up front: one occurrence UID in the list is
+            # a caller mistake about that entry, not a reason to refuse the
+            # other 40 tasks.
+            _reject_occurrence_uid(uid)
+            _apply_task_patch(calendar.get_todo_by_uid(uid), fields)
+
+        return self._batch_over_uids(_TASK_BATCH, list_name, task_uids, operation)
+
+    def delete_tasks(self, list_name: str, task_uids: list[str]) -> dict[str, Any]:
+        """Permanently delete several tasks of a list.
+
+        Irreversible from this API's point of view, like `delete_task`, and a
+        batch multiplies the damage a wrong UID list does - callers should
+        confirm with the user first. Per-task outcomes follow `_batch_over_uids`.
+        """
+
+        def operation(calendar: DAVCalendar, uid: str) -> None:
+            _reject_occurrence_uid(uid)
+            calendar.get_todo_by_uid(uid).delete()
+
+        return self._batch_over_uids(_TASK_BATCH, list_name, task_uids, operation)
+
+    def move_tasks(self, list_name: str, task_uids: list[str], target_list: str) -> dict[str, Any]:
+        """Move several tasks from one list to another, reporting each outcome.
+
+        Both lists are resolved once for the whole batch rather than twice per
+        task, and each move follows `move_task` exactly - CalDAV MOVE first,
+        copy-then-delete where the server refuses it, a retry where the server
+        gives no answer.
+
+        A move that fails after its retries is recorded against its UID and the
+        batch carries on, because a partly-migrated list is the situation this
+        exists to get out of, not one to create. Re-running the call with the
+        same UIDs is safe: a task already sitting in the target is reported as
+        "bereits_dort" instead of being moved again or reported as missing.
+        """
+        with self._lock:
+            target_col = self._resolve_target_collection(target_list, "VTODO")
+            target_display = target_col.get_display_name() or target_list
+
+            def operation(calendar: DAVCalendar, uid: str) -> dict[str, Any]:
+                _reject_occurrence_uid(uid)
+                # `_move_one` already raises `ObjectMoveError` for every
+                # halfway point that concerns one task (a UID the target
+                # already holds, a copy the server would not accept, a source
+                # it would not delete), which `_batch_over_uids` records per
+                # UID. Whatever else reaches here is call-scoped - rate
+                # limiting, a forbidden request, a gateway that kept not
+                # answering - and must be left to abort the batch. Re-badging
+                # it as an `ObjectMoveError` would instead have the batch put
+                # the same broken request to the server another 199 times.
+                return self._move_one(
+                    calendar,
+                    target_col,
+                    uid,
+                    "VTODO",
+                    calendar.get_display_name() or list_name,
+                    target_display,
+                )
+
+            return self._batch_over_uids(_TASK_BATCH, list_name, task_uids, operation)
 
     # ------------------------------------------------------------------
     # Event calendars (VEVENT)
@@ -2528,49 +2834,57 @@ class CalDavService:
             probe.add("dtstart", date(1970, 1, 1) if all_day_end else _PROBE_START)
         event_mapping.apply_event_fields(probe, fields)
 
-    def _batch_over_events(
+    def _batch_over_uids(
         self,
-        calendar_name: str,
-        event_uids: list[str],
+        kind: _BatchKind,
+        collection_name: str,
+        uids: list[str],
         operation: Callable[[DAVCalendar, str], dict[str, Any] | None],
     ) -> dict[str, Any]:
         """Run `operation` per UID, reporting outcomes instead of aborting on the first failure.
 
         A dict returned by `operation` is merged into that UID's result entry,
-        for a batch whose per-event outcome is more than "it worked"
-        (`change_exdates` reports what it changed on each event).
+        for a batch whose per-object outcome is more than "it worked"
+        (`change_exdates` reports what it changed on each event, `move_tasks`
+        which route the move took).
 
         A batch is only useful if one bad UID doesn't discard the work done
-        for the others, so a failure that belongs to a single event (unknown
-        UID, edit conflict) becomes an entry in `ergebnisse` and the loop
+        for the others, so a failure that belongs to a single object (unknown
+        UID, edit conflict, a patch that doesn't fit *this* one, a move that
+        clashes in the target) becomes an entry in `ergebnisse` and the loop
         continues. Anything saying the whole call is broken - bad
-        credentials, transport failure, the calendar itself gone - still
+        credentials, transport failure, the collection itself gone - still
         propagates, because continuing would just produce one identical
         error per UID.
 
-        The calendar is resolved once for the whole batch. If that cached
+        Each item is run through `_retry_transient`, so a proxy 502 or a
+        dropped connection costs a retry rather than an entry in the failure
+        list. Only a failure that survives those retries is reported.
+
+        The collection is resolved once for the whole batch. If that cached
         collection turns out to be stale, resolution is refreshed once (the
         same recovery `_with_collection` does per call) rather than reporting
         every UID as missing.
         """
-        if not event_uids:
-            raise InvalidEventDataError(
-                "event_uids must not be empty - name at least one event to act on."
+        if not uids:
+            raise kind.invalid_error(
+                f"{kind.uids_param} must not be empty - name at least one "
+                f"{kind.noun.lower()} to act on."
             )
-        unique_uids = _dedup_strings(event_uids) or []
+        unique_uids = _dedup_strings(uids) or []
         if len(unique_uids) > _BATCH_UID_LIMIT:
-            raise InvalidEventDataError(
-                f"A batch takes at most {_BATCH_UID_LIMIT} event UIDs, got {len(unique_uids)}. "
-                "Split the call into several smaller ones."
+            raise kind.invalid_error(
+                f"A batch takes at most {_BATCH_UID_LIMIT} {kind.noun.lower()} UIDs, "
+                f"got {len(unique_uids)}. Split the call into several smaller ones."
             )
 
         with self._lock:
             try:
-                calendar = self._get_collection(calendar_name, "VEVENT")
+                collection = self._get_collection(collection_name, kind.component)
             except TaskMcpError:
                 raise
             except caldav_error.NotFoundError as exc:
-                raise CalendarNotFoundError(f"Calendar '{calendar_name}' was not found.") from exc
+                raise self._not_found(collection_name, kind.component) from exc
             except Exception as exc:
                 raise _translate(exc) from exc
 
@@ -2583,39 +2897,45 @@ class CalDavService:
                 detail: dict[str, Any] | None = None
                 try:
                     try:
-                        detail = operation(calendar, uid)
+                        detail = _retry_transient(functools.partial(operation, collection, uid))
                     except caldav_error.NotFoundError:
                         if refreshed:
                             raise
-                        # Either this one event is gone or the whole cached
+                        # Either this one object is gone or the whole cached
                         # collection is stale - re-resolve once and retry, so
                         # a stale cache can't turn into "all 60 UIDs missing".
                         refreshed = True
-                        self._calendar_cache.pop(("VEVENT", calendar_name), None)
+                        self._calendar_cache.pop((kind.component, collection_name), None)
                         self._invalidate_collection_caches()
-                        calendar = self._resolve_and_cache(calendar_name, "VEVENT")
-                        detail = operation(calendar, uid)
+                        collection = self._resolve_and_cache(collection_name, kind.component)
+                        detail = _retry_transient(functools.partial(operation, collection, uid))
                 except caldav_error.NotFoundError:
                     results.append(
-                        {"uid": uid, "status": "fehler", "fehler": f"Event '{uid}' was not found."}
+                        {
+                            "uid": uid,
+                            "status": "fehler",
+                            "fehler": f"{kind.noun} '{uid}' was not found.",
+                        }
                     )
                     failed += 1
                 except Exception as exc:
                     translated = exc if isinstance(exc, TaskMcpError) else _translate(exc)
                     if isinstance(translated, TaskConflictError):
-                        # `_translate` phrases this one for tasks.
+                        # `_translate` phrases this one for a single task; in a
+                        # batch the UID is what tells the caller which one.
                         reason = (
-                            f"Event '{uid}' was modified by another client since it was last "
-                            "read (conflicting edit). Re-read it and retry."
+                            f"{kind.noun} '{uid}' was modified by another client since it was "
+                            "last read (conflicting edit). Re-read it and retry."
                         )
-                    elif isinstance(translated, InvalidEventDataError):
+                    elif isinstance(translated, (kind.invalid_error, ObjectMoveError)):
                         # The patch itself was validated up front, so this is
-                        # about *this* event - typically an all-day event
-                        # meeting a timed patch. One mismatched event must not
-                        # abort a batch that is already half written.
+                        # about *this* object - typically an all-day event
+                        # meeting a timed patch, or a move that found the UID
+                        # already sitting in the target. One mismatched object
+                        # must not abort a batch that is already half written.
                         reason = str(translated)
                     else:
-                        raise translated from exc
+                        raise _aborted_batch(translated, kind, uid, results, unique_uids) from exc
                     results.append({"uid": uid, "status": "fehler", "fehler": reason})
                     failed += 1
                     continue
@@ -2624,11 +2944,20 @@ class CalDavService:
                     succeeded += 1
 
             return {
-                "kalender_name": calendar_name,
+                kind.name_key: collection_name,
                 "erfolgreich": succeeded,
                 "fehlgeschlagen": failed,
                 "ergebnisse": results,
             }
+
+    def _batch_over_events(
+        self,
+        calendar_name: str,
+        event_uids: list[str],
+        operation: Callable[[DAVCalendar, str], dict[str, Any] | None],
+    ) -> dict[str, Any]:
+        """Event flavour of `_batch_over_uids`, kept for the VEVENT call sites."""
+        return self._batch_over_uids(_EVENT_BATCH, calendar_name, event_uids, operation)
 
     def update_events(
         self, calendar_name: str, event_uids: list[str], fields: event_mapping.EventFields
@@ -2741,7 +3070,8 @@ class CalDavService:
 
         Prefers a CalDAV MOVE request (preserving server-side URL identity and
         ETags). Falls back to copy-then-delete if the server rejects MOVE with
-        403/405/409/501/502.
+        403/405/409/501, and retries it instead if the server gives no answer
+        at all (502/503/504).
 
         Args:
             calendar_name: Display name of the source calendar.
@@ -2757,8 +3087,9 @@ class CalDavService:
                 `InvalidEventDataError`; use `update_event` for those.
 
         Returns:
-            {"uid": event_uid, "von": source, "nach": target, "methode": "MOVE" | "kopiert"},
-            plus "hierarchie": "gesetzt" | "geleert" when the link was changed.
+            {"uid": event_uid, "von": source, "nach": target,
+            "methode": "MOVE" | "kopiert" | "bereits_dort"}, plus
+            "hierarchie": "gesetzt" | "geleert" when the link was changed.
         """
         clear_link = _validate_move_clear(
             clear,
@@ -2787,19 +3118,73 @@ class CalDavService:
             result["hierarchie"] = "geleert" if clear_link else "gesetzt"
             return result
 
+    @staticmethod
+    def _fetch_object(collection: DAVCalendar, uid: str, component: str) -> Any:
+        """Read one calendar object of either kind from `collection` by UID."""
+        if component == "VEVENT":
+            return collection.event_by_uid(uid)
+        return collection.get_todo_by_uid(uid)
+
     def _move_object(
         self, source_name: str, uid: str, target_name: str, component: str
     ) -> dict[str, str]:
-        """Move a calendar object (VEVENT or VTODO) from one collection to another."""
+        """Move a calendar object (VEVENT or VTODO) from one collection to another.
+
+        A move that fails transiently (a gateway status, a dropped connection)
+        is retried whole - see `_retry_transient` and `_move_one`'s
+        "bereits_dort" recovery, which together make a lost acknowledgement
+        cost a second request rather than a misleading error.
+        """
         with self._lock:
             target_col = self._resolve_target_collection(target_name, component)
             source_col = self._resolve_collection(source_name, component)
-
-            source_url_norm = _normalize_collection_href(str(source_col.url))
-            target_url_norm = _normalize_collection_href(str(target_col.url))
-
             source_display = source_col.get_display_name() or source_name
             target_display = target_col.get_display_name() or target_name
+            try:
+                return _retry_transient(
+                    functools.partial(
+                        self._move_one,
+                        source_col,
+                        target_col,
+                        uid,
+                        component,
+                        source_display,
+                        target_display,
+                    )
+                )
+            except caldav_error.NotFoundError as exc:
+                # `_move_one` deliberately leaves this untranslated so a batch
+                # can tell "this UID is gone" from "the cached collection is
+                # stale" (see `_batch_over_uids`); a single move has no such
+                # recovery and just reports the object as missing.
+                if component == "VEVENT":
+                    raise EventNotFoundError(f"Event '{uid}' was not found.") from exc
+                raise TaskNotFoundError(f"Task '{uid}' was not found.") from exc
+
+    def _move_one(
+        self,
+        source_col: DAVCalendar,
+        target_col: DAVCalendar,
+        uid: str,
+        component: str,
+        source_display: str,
+        target_display: str,
+    ) -> dict[str, str]:
+        """Move one object between two collections that are already resolved.
+
+        Split out of `_move_object` so a batch move resolves both collections
+        once and then walks its UID list through here, instead of paying two
+        name resolutions per task.
+
+        Every failure that concerns only this one object is raised as an
+        `ObjectMoveError` naming the state it was left in; a missing source
+        object is left as caldav's own `NotFoundError` for the caller to phrase
+        (see `_move_object`). Failures that concern the whole connection - bad
+        credentials above all - propagate as themselves.
+        """
+        with self._lock:
+            source_url_norm = _normalize_collection_href(str(source_col.url))
+            target_url_norm = _normalize_collection_href(str(target_col.url))
 
             if source_url_norm == target_url_norm:
                 return {
@@ -2813,15 +3198,33 @@ class CalDavService:
             kind_label = "calendar" if component == "VEVENT" else "task list"
             kind_article = "An event" if component == "VEVENT" else "A task"
 
+            def fetch_from_target() -> Any:
+                return self._fetch_object(target_col, uid, component)
+
             try:
-                if component == "VEVENT":
-                    obj = source_col.event_by_uid(uid)
-                else:
-                    obj = source_col.get_todo_by_uid(uid)
-            except caldav_error.NotFoundError as exc:
-                if component == "VEVENT":
-                    raise EventNotFoundError(f"Event '{uid}' was not found.") from exc
-                raise TaskNotFoundError(f"Task '{uid}' was not found.") from exc
+                obj = self._fetch_object(source_col, uid, component)
+            except caldav_error.NotFoundError as not_in_source:
+                # A MOVE the server carried out but never got to acknowledge -
+                # a proxy 502 on the way back, a dropped connection - leaves
+                # the source empty and the target holding the object. A retry
+                # of this move (see `_retry_transient`) lands exactly here, so
+                # check the target before calling the UID missing: this is what
+                # makes re-running a half-failed batch converge instead of
+                # reporting every already-moved task as gone.
+                try:
+                    fetch_from_target()
+                except caldav_error.NotFoundError:
+                    raise not_in_source from None
+                except TaskMcpError:
+                    raise
+                except Exception as probe_exc:
+                    raise _translate(probe_exc) from probe_exc
+                return {
+                    "uid": uid,
+                    "von": source_display,
+                    "nach": target_display,
+                    "methode": "bereits_dort",
+                }
             except TaskMcpError:
                 raise
             except Exception as exc:
@@ -2877,14 +3280,28 @@ class CalDavService:
                     # `Overwrite: F` - the target already holds this UID. Not
                     # an ETag conflict (`TaskConflictError`), which is about a
                     # concurrent edit to the *same* object.
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"{kind_article} with UID '{uid}' already exists in target "
                         f"{kind_label} '{target_display}'."
                     )
-                if status in (403, 405, 409, 501, 502):
+                if status in _TRANSIENT_HTTP_STATUSES:
+                    # Deliberately NOT the copy fallback, which is for a server
+                    # that *won't* MOVE (403/405/409/501). A gateway status is
+                    # no answer at all: the MOVE may well have been carried out
+                    # and only its acknowledgement lost, in which case copying
+                    # would read a source that is already gone or clash with
+                    # the object now sitting in the target. Retrying the whole
+                    # move is the answer instead - its source lookup then finds
+                    # the object in the target and reports "bereits_dort".
+                    raise TransientServerError(
+                        f"Nextcloud gave no answer while moving {kind_str} '{uid}' to "
+                        f"'{target_display}' (HTTP {status}); the move may or may not "
+                        "have been carried out. Check both collections."
+                    )
+                if status in (403, 405, 409, 501):
                     use_fallback = True
                 else:
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"Nextcloud rejected moving {kind_str} '{uid}' (HTTP {status})."
                     )
 
@@ -2892,11 +3309,6 @@ class CalDavService:
                 # `Overwrite: F` would have stopped a server-side MOVE from
                 # replacing an existing object; the copy path has to make that
                 # check itself, before writing anything.
-                def fetch_from_target():
-                    if component == "VEVENT":
-                        return target_col.event_by_uid(uid)
-                    return target_col.get_todo_by_uid(uid)
-
                 try:
                     fetch_from_target()
                 except caldav_error.NotFoundError:
@@ -2906,7 +3318,7 @@ class CalDavService:
                 except Exception as exc:
                     raise _translate(exc) from exc
                 else:
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"{kind_article} with UID '{uid}' already exists in target "
                         f"{kind_label} '{target_display}'."
                     )
@@ -2917,7 +3329,7 @@ class CalDavService:
                 try:
                     ical_text = obj.icalendar_instance.to_ical().decode("utf-8")
                 except Exception as read_exc:
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"Could not read {kind_str} '{uid}' from '{source_display}' to copy it. "
                         "Nothing was written or deleted."
                     ) from read_exc
@@ -2934,7 +3346,7 @@ class CalDavService:
                     else:
                         target_col.save_todo(ical=ical_text, no_overwrite=True)
                 except caldav_error.ConsistencyError as clash_exc:
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"{kind_article} with UID '{uid}' already exists in target "
                         f"{kind_label} '{target_display}'. The original in "
                         f"'{source_display}' was left untouched."
@@ -2942,7 +3354,20 @@ class CalDavService:
                 except TaskMcpError:
                     raise
                 except Exception as write_exc:
-                    raise TaskMcpError(
+                    if _is_transient(write_exc):
+                        # Deliberately not retried, and deliberately not
+                        # claiming the target is clean. A write that got no
+                        # answer may still have landed, and a retry would
+                        # either find its own copy and call it a clash, or -
+                        # worse, if it ever learned to ignore that - risk
+                        # deleting the source against a copy nobody verified.
+                        raise ObjectMoveError(
+                            f"Copying {kind_str} '{uid}' to '{target_display}' got no answer "
+                            f"from the server, so it may or may not have arrived there. The "
+                            f"original in '{source_display}' was kept either way - check "
+                            f"'{target_display}' before retrying."
+                        ) from write_exc
+                    raise ObjectMoveError(
                         f"Could not copy {kind_str} '{uid}' to '{target_display}'. "
                         f"The original in '{source_display}' was left untouched."
                     ) from write_exc
@@ -2954,7 +3379,7 @@ class CalDavService:
                 except TaskMcpError:
                     raise
                 except Exception as verify_exc:
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"Copied {kind_str} '{uid}' to '{target_display}', but could not read "
                         f"it back to confirm the copy, so the original in '{source_display}' "
                         "was kept. Check both collections before retrying."
@@ -2967,7 +3392,7 @@ class CalDavService:
                 if expected_markers is None:
                     # Nothing to compare against - "can't tell" is not a licence
                     # to delete, even though the copy itself may be fine.
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"Copied {kind_str} '{uid}' to '{target_display}', but could not re-read "
                         f"the original in '{source_display}' to compare instances, so it was "
                         f"kept. Remove the copy from '{target_display}' before retrying."
@@ -2982,7 +3407,7 @@ class CalDavService:
                     )
                     if missing:
                         total = sum(expected_markers.values())
-                        raise TaskMcpError(
+                        raise ObjectMoveError(
                             f"Copied {kind_str} '{uid}' to '{target_display}', but {missing} of "
                             f"{total} instances are missing there, so the original in "
                             f"'{source_display}' was kept. Remove the incomplete copy from "
@@ -2994,7 +3419,7 @@ class CalDavService:
                 except TaskMcpError:
                     raise
                 except Exception as del_exc:
-                    raise TaskMcpError(
+                    raise ObjectMoveError(
                         f"Copied {kind_str} '{uid}' to '{target_display}', but deleting the "
                         f"original from '{source_display}' failed - it now exists in both "
                         "collections. Delete the original manually."
@@ -3009,7 +3434,7 @@ class CalDavService:
 
             # Unreachable: every branch above either returns, raises, or sets
             # use_fallback. Kept so the function has no implicit None return.
-            raise TaskMcpError(f"Could not move {kind_str} '{uid}'.")
+            raise ObjectMoveError(f"Could not move {kind_str} '{uid}'.")
 
     # ------------------------------------------------------------------
     # Task <-> event linking and combined views
