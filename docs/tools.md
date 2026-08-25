@@ -67,7 +67,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, felder=None, kompakt=False, list_name=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, ohne_erinnerung=False, ohne_sichtbarkeit=False, ohne_tags=False, uid_regex=None, felder=None, kompakt=False, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -79,6 +79,10 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
+| `ohne_erinnerung` | boolean | no (default `false`) | Only tasks with no reminders (empty `erinnerungen`) |
+| `ohne_sichtbarkeit` | boolean | no (default `false`) | Only tasks with no visibility set (`sichtbarkeit` is `null`) |
+| `ohne_tags` | boolean | no (default `false`) | Only tasks with no tags |
+| `uid_regex` | string (regex) | no | Only tasks whose stored uid contains a match (`re.search`, case-sensitive; anchor with `^...$` for a full match). Matches the series uid, never a synthetic `<uid>#<occurrence>` |
 | `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per task. Unknown names error; `[]` means *no* whitelist (unlike `listen_namen=[]`, an empty scope) |
 | `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""` plus `liste_url` (unless whitelisted); truncate `notizen` to 200 chars with an `… [gekürzt …]` marker (`get_task` has the full text) |
 | `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
@@ -111,6 +115,7 @@ Result — one dict per task:
     "prioritaet": "hoch",
     "fortschritt_prozent": 20,
     "status": "offen",
+    "sichtbarkeit": null,
     "ort": "Zuhause",
     "url": "https://example.com/steuer",
     "tags": ["Finanzen", "Wichtig"],
@@ -642,7 +647,7 @@ Permanently deletes the calendar **and every event inside it**. Returns
 
 ---
 
-## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False, felder=None, kompakt=False)`
+## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False, ohne_erinnerung=False, ohne_sichtbarkeit=False, ohne_tags=False, uid_regex=None, felder=None, kompakt=False)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -653,8 +658,18 @@ Permanently deletes the calendar **and every event inside it**. Returns
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `limit` | integer | no | Max results, must be `> 0`; applied last (earliest events win) |
 | `wiederholungen_aufloesen` | boolean | no (default `false`) | Expand recurring events into single occurrences within `[von, bis]` (both bounds required) |
+| `ohne_erinnerung` | boolean | no (default `false`) | Only events with no reminders (empty `erinnerungen`) |
+| `ohne_sichtbarkeit` | boolean | no (default `false`) | Only events with no visibility set (`sichtbarkeit` is `null`) |
+| `ohne_tags` | boolean | no (default `false`) | Only events with no tags |
+| `uid_regex` | string (regex) | no | Only events whose uid contains a match (`re.search`, case-sensitive; anchor with `^...$` for a full match) |
 | `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per event. Unknown names error; `[]` means *no* whitelist |
 | `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""`; truncate `beschreibung` to 200 chars with an `… [gekürzt …]` marker (`get_event` has the full text) |
+
+The four `ohne_*`/`uid_regex` filters exist for **cleanup sweeps**: items
+created by hand on a phone are recognizable by all-uppercase UUIDs
+(`uid_regex="^[A-F0-9-]+$"`) and missing reminders/visibility/tags, so
+combining them shortlists those in one call instead of a manual pass over
+every event. The same four filters exist on `list_tasks`.
 
 Called with neither `kalender_namen` nor a time bound, a default window of
 **today ±90 days** (in the server's default timezone) is applied instead of
@@ -662,7 +677,9 @@ scanning every event in the account. Any calendar name or either bound
 disables the default — naming a calendar is a scoping decision, so
 `kalender_namen` plus `wiederholungen_aufloesen=true` and no bounds still
 fails with *"Expanding recurring events requires both von and bis bounds."*,
-exactly as before.
+exactly as before. The cleanup filters narrow that window rather than
+widening it, so a sweep over older events needs `von`/`bis` (or a calendar
+name) alongside them.
 
 The time-range filter runs server-side (CalDAV `time-range` REPORT), so a
 recurring event with an occurrence in the window matches even if its master

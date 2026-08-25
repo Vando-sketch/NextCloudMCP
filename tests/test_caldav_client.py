@@ -471,6 +471,7 @@ def test_list_tasks_parses_todos(service, principal):
             "prioritaet": None,
             "fortschritt_prozent": 0,
             "status": "offen",
+            "sichtbarkeit": None,
             "ort": None,
             "url": None,
             "tags": [],
