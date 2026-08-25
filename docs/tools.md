@@ -532,15 +532,32 @@ Returns `{"uid": "<task_uid>"}`.
 
 ---
 
-## `move_task(list_name, task_uid, ziel_liste)`
+## `move_task(list_name, task_uid, ziel_liste, uebergeordnete_aufgabe=None, felder_leeren=None)`
 
-Moves a task (VTODO) from one task list to another.
+Moves a task (VTODO) from one task list to another, optionally re-parenting it
+in the same call.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `list_name` | string | yes | Display name of the source task list |
 | `task_uid` | string | yes | UID of the task to move |
 | `ziel_liste` | string | yes | Display name of the target task list |
+| `uebergeordnete_aufgabe` | string | no | UID of the task's new parent, set in the target list after the move |
+| `felder_leeren` | array | no | Only `["uebergeordnete_aufgabe"]` — detach the task from its parent instead |
+
+Hierarchy shortcut:
+- A list change almost always changes the hierarchy too — the old parent stays
+  behind in the source list — so the parent link can be set (or dropped) in the
+  same call instead of a follow-up `update_task`.
+- Like `update_task`, `uebergeordnete_aufgabe` *replaces* the task's
+  `RELATED-TO` rather than adding to it.
+- The hierarchy write happens **after** the move, on the copy in the target
+  list, and applies to a same-list no-op move as well. If only that write fails,
+  the error says so in as many words — the move itself stands, and only the
+  hierarchy change needs retrying with `update_task` on the target list.
+- `felder_leeren` accepts nothing but `"uebergeordnete_aufgabe"` here (this is a
+  move tool, not a general-purpose update); any other name, or setting and
+  clearing the parent in one call, is an error raised before anything is moved.
 
 Behaviour:
 - Resolves source and target task lists. Target must support VTODO tasks; if the target exists but does not accept tasks (e.g. an events-only calendar), an error is raised naming both target and component kind before any object is touched.
@@ -557,11 +574,12 @@ Result shape:
   "uid": "0f8ba4a4-...",
   "von": "Privat",
   "nach": "Arbeit",
-  "methode": "MOVE"
+  "methode": "MOVE",
+  "hierarchie": "gesetzt"
 }
 ```
 
-(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed. `"hierarchie"` is only present when the parent was changed: `"gesetzt"` for a new `uebergeordnete_aufgabe`, `"geleert"` for `felder_leeren`.)
 
 ---
 
@@ -1068,15 +1086,33 @@ Contract and behaviour:
 
 ---
 
-## `move_event(kalender_name, event_uid, ziel_kalender)`
+## `move_event(kalender_name, event_uid, ziel_kalender, verknuepfte_aufgabe=None, felder_leeren=None)`
 
-Moves an event (VEVENT) from one calendar to another.
+Moves an event (VEVENT) from one calendar to another, optionally re-linking its
+task in the same call.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `kalender_name` | string | yes | Display name of the source calendar |
 | `event_uid` | string | yes | UID of the event to move |
 | `ziel_kalender` | string | yes | Display name of the target calendar |
+| `verknuepfte_aufgabe` | string | no | UID of the task to link the event to, set in the target calendar after the move |
+| `felder_leeren` | array | no | Only `["verknuepfte_aufgabe"]` — drop the event's task links instead |
+
+Task-link shortcut:
+- Mirrors `move_task`'s `uebergeordnete_aufgabe`: a calendar change usually comes
+  with a link change, so it can be done in the same call instead of a follow-up
+  `update_event`.
+- Like `update_event`, `verknuepfte_aufgabe` *replaces* the event's whole
+  `RELATED-TO` set (so a `"voraussetzung"` link goes with it) rather than adding
+  one. `link_task_to_event` is the additive counterpart.
+- The link write happens **after** the move, on the copy in the target calendar,
+  and applies to a same-calendar no-op move as well. If only that write fails,
+  the error says so — the move stands, and only the link needs retrying with
+  `update_event` on the target calendar.
+- `felder_leeren` accepts nothing but `"verknuepfte_aufgabe"` here; any other
+  name, or setting and clearing the link in one call, is an error raised before
+  anything is moved.
 
 Behaviour:
 - Resolves source and target calendars. Target must support VEVENT events; if the target exists but does not accept events (e.g. a tasks-only list), an error is raised naming both target and component kind before any object is touched.
@@ -1093,11 +1129,12 @@ Result shape:
   "uid": "event-uid",
   "von": "QuellKalender",
   "nach": "ZielKalender",
-  "methode": "MOVE"
+  "methode": "MOVE",
+  "hierarchie": "gesetzt"
 }
 ```
 
-(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed. `"hierarchie"` is only present when the task link was changed: `"gesetzt"` for a new `verknuepfte_aufgabe`, `"geleert"` for `felder_leeren`.)
 
 ---
 

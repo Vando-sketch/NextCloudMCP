@@ -698,20 +698,49 @@ def build_server(
         return {"uid": task_uid}
 
     @mcp.tool(annotations=_MODIFY)
-    async def move_task(list_name: str, task_uid: str, ziel_liste: str) -> dict[str, str]:
-        """Verschiebt eine Aufgabe in eine andere Aufgabenliste.
+    async def move_task(
+        list_name: str,
+        task_uid: str,
+        ziel_liste: str,
+        uebergeordnete_aufgabe: str | None = None,
+        felder_leeren: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Verschiebt eine Aufgabe in eine andere Aufgabenliste, optional mit neuer Hierarchie.
 
         Args:
             list_name: Anzeige-Name der Quell-Aufgabenliste.
             task_uid: UID der zu verschiebenden Aufgabe.
             ziel_liste: Anzeige-Name der Ziel-Aufgabenliste.
+            uebergeordnete_aufgabe: Optionale UID der neuen uebergeordneten
+                Aufgabe, gesetzt in der Ziel-Liste nachdem das Verschieben
+                geklappt hat - erspart den zweiten update_task-Aufruf, denn
+                beim Listenwechsel wechselt fast immer auch die Hierarchie.
+                Wie bei update_task ersetzt das die bestehende Verknuepfung
+                (RELATED-TO), es kommt keine dazu.
+            felder_leeren: Optional ["uebergeordnete_aufgabe"], um die Aufgabe
+                stattdessen aus ihrer Hierarchie zu loesen - der uebliche Fall,
+                wenn die uebergeordnete Aufgabe in der Quell-Liste zurueck
+                bleibt. Andere Feldnamen sind hier nicht erlaubt (dafuer gibt es
+                update_task), ebenso wenig das gleichzeitige Setzen und Leeren
+                desselben Feldes.
 
         Returns:
             {"uid": ..., "von": Quell-Liste, "nach": Ziel-Liste,
-            "methode": "MOVE" | "kopiert"}
+            "methode": "MOVE" | "kopiert"}; zusaetzlich
+            "hierarchie": "gesetzt" | "geleert", wenn die uebergeordnete
+            Aufgabe mitgeaendert wurde. Schlaegt nur die Hierarchie-Aenderung
+            fehl, meldet der Fehler ausdruecklich, dass das Verschieben selbst
+            bestand hat.
         """
 
-        res: dict[str, str] = await _call(caldav_service.move_task, list_name, task_uid, ziel_liste)
+        res: dict[str, str] = await _call(
+            caldav_service.move_task,
+            list_name,
+            task_uid,
+            ziel_liste,
+            uebergeordnete_aufgabe,
+            tuple(felder_leeren) if felder_leeren else (),
+        )
         return res
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -1293,21 +1322,47 @@ def build_server(
         return res
 
     @mcp.tool(annotations=_MODIFY)
-    async def move_event(kalender_name: str, event_uid: str, ziel_kalender: str) -> dict[str, str]:
-        """Verschiebt einen Kalendereintrag in einen anderen Kalender.
+    async def move_event(
+        kalender_name: str,
+        event_uid: str,
+        ziel_kalender: str,
+        verknuepfte_aufgabe: str | None = None,
+        felder_leeren: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Verschiebt einen Kalendereintrag in einen anderen Kalender, optional neu verknuepft.
 
         Args:
             kalender_name: Anzeige-Name des Quell-Kalenders.
             event_uid: UID des zu verschiebenden Kalendereintrags.
             ziel_kalender: Anzeige-Name des Ziel-Kalenders.
+            verknuepfte_aufgabe: Optionale UID der Aufgabe, mit der der Eintrag
+                verknuepft werden soll, gesetzt im Ziel-Kalender nachdem das
+                Verschieben geklappt hat - erspart den zweiten
+                update_event-Aufruf. Wie bei update_event ersetzt das die
+                gesamte RELATED-TO-Menge des Eintrags (auch eine
+                "voraussetzung"-Verknuepfung); link_task_to_event ist die
+                additive Variante.
+            felder_leeren: Optional ["verknuepfte_aufgabe"], um die
+                Aufgaben-Verknuepfungen des Eintrags stattdessen zu entfernen.
+                Andere Feldnamen sind hier nicht erlaubt (dafuer gibt es
+                update_event), ebenso wenig das gleichzeitige Setzen und Leeren
+                desselben Feldes.
 
         Returns:
             {"uid": ..., "von": Quell-Kalender, "nach": Ziel-Kalender,
-            "methode": "MOVE" | "kopiert"}
+            "methode": "MOVE" | "kopiert"}; zusaetzlich
+            "hierarchie": "gesetzt" | "geleert", wenn die Verknuepfung
+            mitgeaendert wurde. Schlaegt nur die Verknuepfung fehl, meldet der
+            Fehler ausdruecklich, dass das Verschieben selbst bestand hat.
         """
 
         res: dict[str, str] = await _call(
-            caldav_service.move_event, kalender_name, event_uid, ziel_kalender
+            caldav_service.move_event,
+            kalender_name,
+            event_uid,
+            ziel_kalender,
+            verknuepfte_aufgabe,
+            tuple(felder_leeren) if felder_leeren else (),
         )
         return res
 
