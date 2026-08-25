@@ -334,6 +334,8 @@ reference.
 | `get_notiz(notiz_id)` | Single note by id, including full content |
 | `create_notiz(titel, kategorie=None, inhalt=None, favorit=None)` | New note |
 | `update_notiz(notiz_id, ...)` | Partial update; `inhalt` replaces content wholesale |
+| `replace_in_notiz(notiz_id, alt, neu)` | Patch one passage: `alt` must match the content exactly once (0 or >1 matches is an error), then it is replaced by `neu` |
+| `update_notiz_abschnitt(notiz_id, abschnitt, inhalt)` | Replace one Markdown section (ATX heading + body, up to the next same-or-higher-level heading) selected by a heading prefix like `"## 7."`; `inhalt` includes the heading line |
 | `append_notiz(notiz_id, text)` | Read-then-write append to existing content |
 | `search_notizen(suchtext, kategorie=None)` | Case-insensitive substring search over title/content (client-side - the API has no full-text search) |
 | `delete_notiz(notiz_id)` | Permanently delete a note |
