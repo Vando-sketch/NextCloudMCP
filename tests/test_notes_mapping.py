@@ -57,7 +57,7 @@ def test_parse_note_summary_maps_fields():
         "favorite": True,
         # Formatted in the server's default timezone, like every other
         # timestamp this server returns (+01:00 on 1 January in Europe/Berlin).
-        "changed": "2025-01-01T01:00:00+01:00",
+        "modified": "2025-01-01T01:00:00+01:00",
     }
     assert "content" not in result
 
@@ -71,7 +71,7 @@ def test_parse_note_summary_modified_follows_the_default_timezone():
     """
     note = {"id": 1, "title": "Foo", "modified": 1735689600}
     mapping.set_default_timezone("America/New_York")
-    assert parse_note_summary(note)["changed"] == "2024-12-31T19:00:00-05:00"
+    assert parse_note_summary(note)["modified"] == "2024-12-31T19:00:00-05:00"
 
 
 def test_parse_note_summary_empty_category_becomes_none():
@@ -81,7 +81,7 @@ def test_parse_note_summary_empty_category_becomes_none():
 
 def test_parse_note_summary_missing_modified_is_none():
     note = {"id": 1, "title": "Foo", "category": "", "favorite": False}
-    assert parse_note_summary(note)["changed"] is None
+    assert parse_note_summary(note)["modified"] is None
 
 
 def test_parse_note_includes_content_and_readonly():
@@ -96,7 +96,7 @@ def test_parse_note_includes_content_and_readonly():
     }
     result = parse_note(note)
     assert result["content"] == "Full text"
-    assert result["schreibgeschuetzt"] is True
+    assert result["read_only"] is True
 
 
 def test_parse_note_missing_content_is_empty_string():

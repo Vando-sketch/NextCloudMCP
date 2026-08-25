@@ -161,10 +161,10 @@ Claude Desktop (no native remote-connector UI yet) instead uses the
 
 ## Tools
 
-All tool parameter names match the field names below exactly (German field names in
-ASCII transliteration, e.g. `priority`, `due_date` - the Anthropic API only
-allows `[a-zA-Z0-9_.-]` in schema property names) - this is the literal MCP tool
-schema Claude calls.
+All tool parameter names match the field names below exactly (e.g. `priority`,
+`due_date`) - this is the literal MCP tool schema Claude calls. Names are
+plain ASCII, since the Anthropic API only allows `[a-zA-Z0-9_.-]` in schema
+property names.
 
 ### `list_task_lists()`
 
@@ -291,20 +291,20 @@ A list change almost always changes the hierarchy too, since the old parent stay
 ### Calendar & event tools (VEVENT)
 
 The same CalDAV account also holds event calendars; these tools mirror the task
-tools' conventions (German ASCII parameter names, same ISO 8601 date semantics,
+tools' conventions (same parameter naming, same ISO 8601 date semantics,
 `clear_fields` for clearing fields). See [`docs/tools.md`](docs/tools.md) for
 the full reference.
 
 | Tool | Purpose |
 |---|---|
-| `list_calendars()` | All event calendars with `color` (`#RRGGBB`) and supported `komponenten` |
+| `list_calendars()` | All event calendars with `color` (`#RRGGBB`) and supported `components` |
 | `create_calendar(display_name, color=None)` | New VEVENT calendar via `MKCALENDAR`, optional color |
 | `update_calendar(calendar_name, new_display_name=None, color=None)` | Rename and/or recolor (`PROPPATCH`); URL/id stays stable |
 | `delete_calendar(calendar_name)` | Permanently delete a calendar and all its events |
-| `list_events(calendar_names=None, start=None, end=None, search_text=None, tag=None, limit=None, expand_recurrences=False, without_reminder=False, without_visibility=False, without_tags=False, uid_regex=None, fields=None, compact=False)` | Time-range query across one/several/all calendars, full-text, tag and cleanup filters (`ohne_*`, `uid_regex` — see `list_tasks`); optionally expands recurring events into single occurrences. `fields` whitelists result keys, `compact` drops empty fields and truncates `description`. Without calendars *and* bounds, a default window of today ±90 days applies |
+| `list_events(calendar_names=None, start=None, end=None, search_text=None, tag=None, limit=None, expand_recurrences=False, without_reminder=False, without_visibility=False, without_tags=False, uid_regex=None, fields=None, compact=False)` | Time-range query across one/several/all calendars, full-text, tag and cleanup filters (`without_*`, `uid_regex` — see `list_tasks`); optionally expands recurring events into single occurrences. `fields` whitelists result keys, `compact` drops empty fields and truncates `description`. Without calendars *and* bounds, a default window of today ±90 days applies |
 | `get_event(calendar_name, event_uid)` | Single event by UID |
 | `create_event(calendar_name, title, start, ...)` | Full event creation: all-day or timed, `location`, `description`, `tags`, `status` (`"confirmed"`/`"tentative"`/`"cancelled"`), `visibility`, recurrence (`recurrence` = raw RRULE), exceptions (`exception_dates` → EXDATE), reminders (`reminders` → VALARM), `url`, task link (`linked_task`) |
-| `create_birthday(name, date, year=None, calendar="Birthdays")` | One call for the fixed birthday convention: title `"🎂 <Name> (<Birth_year>)"`, all-day on the birth date (so the age is readable from each occurrence), `FREQ=YEARLY`, tag `Birthday`, `visibility` `private`, reminders on the day and the day before. `date` is `"MM-DD"` or `"YYYY-MM-DD"`; the birth year is optional |
+| `create_birthday(name, date, year=None, calendar="Birthdays")` | One call for the fixed birthday convention: title `"🎂 <name> (<birth year>)"`, all-day on the birth date (so the age is readable from each occurrence), `FREQ=YEARLY`, tag `Birthday`, `visibility` `private`, reminders on the day and the day before. `date` is `"MM-DD"` or `"YYYY-MM-DD"`; the birth year is optional |
 | `update_event(calendar_name, event_uid, ...)` | Partial update, same fields; `clear_fields` clears properties |
 | `update_events(calendar_name, event_uids, ...)` | Batch update up to 200 events with the same field patch; patch validated up front |
 | `update_exdates(calendar_name, event_uids, add=None, remove=None, ...)` | Add/remove single exception dates on up to 200 recurring events without rewriting the whole list |

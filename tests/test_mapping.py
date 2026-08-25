@@ -44,31 +44,31 @@ def test_apply_and_parse_round_trip():
     todo = _new_todo()
     _apply(
         todo,
-        title="Steuererklärung",
+        title="File taxes",
         start_date="2026-07-01",
         due_date="2026-07-20",
         priority="high",
         progress_percent=20,
-        location="Zuhause",
-        url="https://example.com/steuer",
+        location="Home",
+        url="https://example.com/taxes",
         tags=["Finance", "Important"],
-        notes="Belege sammeln",
+        notes="Gather receipts",
         visibility="private",
     )
     parsed = mapping.parse_vtodo(todo)
 
     assert parsed["uid"] == "task-1"
-    assert parsed["title"] == "Steuererklärung"
+    assert parsed["title"] == "File taxes"
     # Date-only input (B1): all-day, not a midnight datetime.
     assert parsed["start_date"] == "2026-07-01"
     assert parsed["due_date"] == "2026-07-20"
     assert parsed["priority"] == "high"
     assert parsed["progress_percent"] == 20
     assert parsed["status"] == "open"
-    assert parsed["location"] == "Zuhause"
-    assert parsed["url"] == "https://example.com/steuer"
+    assert parsed["location"] == "Home"
+    assert parsed["url"] == "https://example.com/taxes"
     assert set(parsed["tags"]) == {"Finance", "Important"}
-    assert parsed["notes"] == "Belege sammeln"
+    assert parsed["notes"] == "Gather receipts"
     assert parsed["reminders"] == []
     assert parsed["parent_uid"] is None
 
@@ -76,23 +76,23 @@ def test_apply_and_parse_round_trip():
 def test_apply_task_fields_replaces_instead_of_appending():
     """Component.add() appends by default; applying twice must not duplicate values."""
     todo = _new_todo()
-    _apply(todo, title="Erster Title", due_date="2026-07-20")
-    _apply(todo, title="Zweiter Title")
+    _apply(todo, title="First title", due_date="2026-07-20")
+    _apply(todo, title="Second title")
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["title"] == "Zweiter Title"
+    assert parsed["title"] == "Second title"
     assert parsed["due_date"] == "2026-07-20"  # untouched field survives
 
 
 def test_apply_task_fields_leaves_unset_fields_untouched():
     todo = _new_todo()
-    _apply(todo, title="Title", location="Büro")
-    _apply(todo, notes="Neue Note")
+    _apply(todo, title="Title", location="Office")
+    _apply(todo, notes="New note")
 
     parsed = mapping.parse_vtodo(todo)
     assert parsed["title"] == "Title"
-    assert parsed["location"] == "Büro"
-    assert parsed["notes"] == "Neue Note"
+    assert parsed["location"] == "Office"
+    assert parsed["notes"] == "New note"
 
 
 @pytest.mark.parametrize(
@@ -121,12 +121,12 @@ def test_ical_priority_to_label(value, label):
 
 def test_invalid_priority_label_raises():
     with pytest.raises(InvalidTaskDataError):
-        mapping.priority_label_to_ical("super-dringend")
+        mapping.priority_label_to_ical("super-urgent")
 
 
 def test_invalid_visibility_label_raises():
     with pytest.raises(InvalidTaskDataError):
-        mapping.visibility_label_to_ical("geheim")
+        mapping.visibility_label_to_ical("secret")
 
 
 def test_percent_complete_out_of_range_raises():
@@ -615,10 +615,10 @@ def test_updating_other_fields_leaves_alarms_alone():
     _apply(todo, title="Task", due_date="2026-07-20T10:00:00", reminders=["-PT30M"])
     before = todo.to_ical()
 
-    _apply(todo, location="Zuhause")
+    _apply(todo, location="Home")
 
     assert [c for c in todo.subcomponents if c.name == "VALARM"]
-    assert todo.to_ical().replace(b"LOCATION:Zuhause\r\n", b"") == before
+    assert todo.to_ical().replace(b"LOCATION:Home\r\n", b"") == before
 
 
 def test_parent_uid_set_and_extracted():
@@ -656,7 +656,7 @@ def test_task_status_label_to_ical(label, ical_value):
 
 def test_task_status_label_to_ical_unknown_raises():
     with pytest.raises(InvalidTaskDataError, match="Unknown status"):
-        mapping.task_status_label_to_ical("fertig")
+        mapping.task_status_label_to_ical("done")
 
 
 @pytest.mark.parametrize(
@@ -745,7 +745,7 @@ def test_apply_task_fields_unknown_status_raises_and_does_not_write():
     todo = _new_todo()
     _apply(todo, title="Task", due_date="2026-07-20")
     with pytest.raises(InvalidTaskDataError, match="Unknown status"):
-        _apply(todo, status="fertig")
+        _apply(todo, status="done")
     # Nothing about the task changed - not even STATUS was written.
     assert "status" not in todo
     parsed = mapping.parse_vtodo(todo)
@@ -1136,7 +1136,7 @@ def test_clear_removes_percent_complete():
 
 def test_clear_removes_location():
     todo = _new_todo()
-    _apply(todo, location="Büro")
+    _apply(todo, location="Office")
     mapping.apply_task_fields(todo, TaskFields(clear=("location",)))
     assert "location" not in todo
 
@@ -1187,7 +1187,7 @@ def test_clear_removes_all_alarms():
 
 def test_clear_multiple_fields_at_once():
     todo = _new_todo()
-    _apply(todo, due_date="2026-07-20", location="Büro", priority="high")
+    _apply(todo, due_date="2026-07-20", location="Office", priority="high")
     mapping.apply_task_fields(todo, TaskFields(clear=("due_date", "location", "priority")))
     assert "due" not in todo
     assert "location" not in todo
@@ -1215,10 +1215,10 @@ def test_clear_and_set_same_field_raises():
 
 def test_clear_does_not_affect_untouched_fields():
     todo = _new_todo()
-    _apply(todo, due_date="2026-07-20", location="Büro")
+    _apply(todo, due_date="2026-07-20", location="Office")
     mapping.apply_task_fields(todo, TaskFields(clear=("due_date",)))
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["location"] == "Büro"
+    assert parsed["location"] == "Office"
 
 
 def test_clear_on_field_that_was_never_set_is_a_no_op():
@@ -1313,7 +1313,7 @@ def test_clear_removes_recurrence():
 def test_invalid_recurrence_rejected():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError, match="RRULE"):
-        _apply(todo, title="T", start_date="2026-07-20", recurrence="kaputt")
+        _apply(todo, title="T", start_date="2026-07-20", recurrence="broken")
 
 
 def test_recurrence_empty_result_is_invalid():
@@ -1539,7 +1539,7 @@ def test_exception_dates_writes_exdate_and_reads_back():
     todo = _new_todo()
     _apply(
         todo,
-        title="Muell rausbringen",
+        title="Take out the trash",
         start_date="2026-07-20",
         recurrence="FREQ=DAILY",
         exception_dates=["2026-07-22", "2026-07-24"],
@@ -1615,7 +1615,7 @@ def test_clearing_recurrence_also_drops_exdate_and_rdate():
     todo = _todo_from_ics(
         "BEGIN:VTODO\n"
         "UID:task-1\n"
-        "SUMMARY:Muell\n"
+        "SUMMARY:Trash\n"
         "DTSTART;VALUE=DATE:20260720\n"
         "RRULE:FREQ=DAILY\n"
         "EXDATE;VALUE=DATE:20260722\n"
@@ -2070,8 +2070,8 @@ def test_filter_tasks_priority():
 
 
 def test_filter_tasks_unknown_priority_raises():
-    with pytest.raises(InvalidTaskDataError, match="Unknown priority 'dringend'"):
-        mapping.filter_tasks([], priority="dringend")
+    with pytest.raises(InvalidTaskDataError, match="Unknown priority 'urgent'"):
+        mapping.filter_tasks([], priority="urgent")
 
 
 def test_filter_tasks_tag():
@@ -2110,28 +2110,28 @@ def test_filter_tasks_combination():
             _task("1", "2026-07-10"),
             priority="high",
             tags=["work"],
-            title="Write report",
+            title="Write summary",
             notes="Important",
         ),
         dict(
             _task("2", "2026-07-05"),
             priority="high",
             tags=["work"],
-            title="Bericht abgeben",
-            notes="Dringend",
+            title="File invoice",
+            notes="Urgent",
         ),
         dict(
             _task("3", "2026-07-01"),
             priority="low",
             tags=["work"],
-            title="Read report",
+            title="Read summary",
             notes="Fine",
         ),
         dict(
             _task("4", "2026-07-02"),
             priority="high",
             tags=["home"],
-            title="Bericht zuhause",
+            title="File taxes",
             notes=None,
         ),
     ]
@@ -2139,7 +2139,7 @@ def test_filter_tasks_combination():
         tasks,
         priority="high",
         tag="WORK",
-        search_text="bericht",
+        search_text="invoice",
         due_before="2026-07-15",
         limit=1,
     )
@@ -2155,9 +2155,9 @@ def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
     that have no due date instead.
     """
     tasks = [
-        dict(_task("bad", "12:00:00"), title="Kaputt"),
-        dict(_task("good", "2026-07-01"), title="Heil"),
-        dict(_task("none", None), title="Ohne"),
+        dict(_task("bad", "12:00:00"), title="Broken"),
+        dict(_task("good", "2026-07-01"), title="Fine"),
+        dict(_task("none", None), title="Empty"),
     ]
 
     res = mapping.filter_tasks(tasks)
@@ -2168,8 +2168,8 @@ def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
 def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
     """It can't be judged "before"/"after" anything, exactly like a missing one."""
     tasks = [
-        dict(_task("bad", "(2026-07-01, 2026-07-02)"), title="Kaputt"),
-        dict(_task("good", "2026-07-01"), title="Heil"),
+        dict(_task("bad", "(2026-07-01, 2026-07-02)"), title="Broken"),
+        dict(_task("good", "2026-07-01"), title="Fine"),
     ]
 
     res = mapping.filter_tasks(tasks, due_before="2026-07-31")
@@ -2178,7 +2178,7 @@ def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
 
 
 def test_filter_tasks_tag_matches_across_unicode_spellings():
-    """ "ü" has two spellings and "ß" uppercases to "SS" - a German API must match both."""
+    """ "ü" has two spellings and "ß" uppercases to "SS" - both spellings must match."""
     tasks = [
         dict(_task("1", "2026-07-01"), tags=["Büro"]),  # u + combining diaeresis
         dict(_task("2", "2026-07-01"), tags=["Straße"]),
@@ -2202,7 +2202,7 @@ def test_filter_tasks_title_tiebreak_sorts_umlauts_next_to_their_base_letter():
     tasks = [
         dict(_task("z", "2026-07-01"), title="Dentist"),
         dict(_task("ae", "2026-07-01"), title="Ärztin"),
-        dict(_task("a", "2026-07-01"), title="Apotheke"),
+        dict(_task("a", "2026-07-01"), title="Apple"),
     ]
 
     res = mapping.filter_tasks(tasks)
@@ -2217,8 +2217,8 @@ def test_filter_tasks_empty_filter_value_means_no_filter():
     `search_text=""` matched everything, and an empty due bound raised too.
     """
     tasks = [
-        dict(_task("1", "2026-07-01"), priority="high", tags=["work"], title="Bericht"),
-        dict(_task("2", "2026-07-02"), priority=None, tags=[], title="Anruf"),
+        dict(_task("1", "2026-07-01"), priority="high", tags=["work"], title="Report"),
+        dict(_task("2", "2026-07-02"), priority=None, tags=[], title="Call"),
     ]
 
     assert [t["uid"] for t in mapping.filter_tasks(tasks, priority="")] == ["1", "2"]
@@ -2233,11 +2233,11 @@ def test_filter_tasks_empty_filter_value_means_no_filter():
 def test_filter_tasks_empty_due_bound_does_not_exclude_tasks_without_a_due_date():
     """An empty bound is no bound, so it must not drag in the "has to have a due date" rule."""
     tasks = [
-        dict(_task("mit", "2026-07-01")),
-        dict(_task("ohne", None)),
+        dict(_task("with", "2026-07-01")),
+        dict(_task("without", None)),
     ]
 
-    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["mit", "ohne"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["with", "without"]
 
 
 def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
@@ -2269,29 +2269,29 @@ def test_parse_vtodo_missing_or_unknown_class_reads_as_none():
 
 def test_filter_tasks_without_reminder_keeps_only_tasks_without_reminders():
     tasks = [
-        dict(_task("nackt", "2026-07-01"), reminders=[]),
+        dict(_task("bare", "2026-07-01"), reminders=[]),
         dict(_task("reminded", "2026-07-02"), reminders=["-PT30M"]),
     ]
     res = mapping.filter_tasks(tasks, without_reminder=True)
-    assert [t["uid"] for t in res] == ["nackt"]
+    assert [t["uid"] for t in res] == ["bare"]
 
 
 def test_filter_tasks_without_visibility_keeps_only_tasks_without_class():
     tasks = [
-        dict(_task("nackt", "2026-07-01"), visibility=None),
+        dict(_task("bare", "2026-07-01"), visibility=None),
         dict(_task("private", "2026-07-02"), visibility="private"),
     ]
     res = mapping.filter_tasks(tasks, without_visibility=True)
-    assert [t["uid"] for t in res] == ["nackt"]
+    assert [t["uid"] for t in res] == ["bare"]
 
 
 def test_filter_tasks_without_tags_keeps_only_untagged_tasks():
     tasks = [
-        dict(_task("nackt", "2026-07-01"), tags=[]),
-        dict(_task("getaggt", "2026-07-02"), tags=["Work"]),
+        dict(_task("bare", "2026-07-01"), tags=[]),
+        dict(_task("tagged", "2026-07-02"), tags=["Work"]),
     ]
     res = mapping.filter_tasks(tasks, without_tags=True)
-    assert [t["uid"] for t in res] == ["nackt"]
+    assert [t["uid"] for t in res] == ["bare"]
 
 
 def test_filter_tasks_uid_regex_is_case_sensitive_search():

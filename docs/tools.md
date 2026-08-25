@@ -1,8 +1,8 @@
 # Tool reference
 
 Detailed reference for all MCP tools (task, task-list, calendar and event
-tools), including argument/result examples. Parameter names are the literal
-MCP schema names (German field names in ASCII transliteration).
+tools), including argument/result examples. Parameter names, result keys and
+enum values are all the literal MCP schema names, now in English throughout.
 
 Values for enum-like fields:
 
@@ -18,7 +18,7 @@ Values for enum-like fields:
 | `attendees[].role` | `"chair"`, `"required"` (default), `"optional"`, `"non-participant"` |
 | `response` (`respond_to_event`) | `"accepted"`, `"cancelled"`, `"tentative"` |
 | `type` (`share_calendar`/`list_calendar_shares`) | `"user"`, `"group"` |
-| `status` (`list_calendar_shares`) | `"akzeptiert"`, `"pending"`, `"abgelehnt"`, `"ungueltig"`, `"geloescht"`, or a raw lowercased status the server reported |
+| `status` (`list_calendar_shares`) | `"accepted"`, `"pending"`, `"declined"`, `"invalid"`, `"deleted"`, or a raw lowercased status the server reported |
 | `type` (`list_trash`) | `"task"`, `"event"`, or `null` |
 
 > **BREAKING CHANGE**: Task `status` now has **four** possible values instead of two -
@@ -109,18 +109,18 @@ Result — one dict per task:
 [
   {
     "uid": "0f8ba4a4-...",
-    "title": "Steuererklärung",
+    "title": "Tax return",
     "start_date": "2026-07-01",
     "due_date": "2026-07-20",
     "priority": "high",
     "progress_percent": 20,
     "status": "open",
     "visibility": null,
-    "location": "Zuhause",
-    "url": "https://example.com/steuer",
-    "tags": ["Finanzen", "Wichtig"],
+    "location": "Home",
+    "url": "https://example.com/taxes",
+    "tags": ["Finance", "Important"],
     "reminders": ["-P1D"],
-    "notes": "Belege sammeln",
+    "notes": "Collect receipts",
     "parent_uid": null,
     "recurrence": null,
     "exception_dates": [],
@@ -263,7 +263,7 @@ Fields not set on the task are `null` (`tags` is `[]`, `progress_percent` is `0`
   in the server's default timezone (`MCP_DEFAULT_TIMEZONE`), so an all-day task due exactly
   on the boundary date is included by either bound. A datetime bound (with a specific time) is used exactly as given.
 - `due_before` and `due_after` can be combined to select a range.
-- Tasks are sorted by `due_date` ascending (tasks without a readable due date sort last), then by `title` — case-insensitively and with umlauts filed under their base letter (`"Ärztin"` between `"Apotheke"` and `"Dentist"`, not behind both), not in raw codepoint order.
+- Tasks are sorted by `due_date` ascending (tasks without a readable due date sort last), then by `title` — case-insensitively and with umlauts filed under their base letter (`"Ärztin"` between `"Apple"` and `"Dentist"`, not behind both), not in raw codepoint order.
 - `limit` caps the number of results, applied *last* after merging and sorting across lists. `limit <= 0`
   is an error (`InvalidTaskDataError`).
 
@@ -378,10 +378,10 @@ Example call:
 ```json
 {
   "list_name": "Personal",
-  "title": "Steuererklärung abgeben",
+  "title": "File tax return",
   "due_date": "2026-07-20",
   "priority": "high",
-  "tags": ["Finanzen"],
+  "tags": ["Finance"],
   "reminders": ["-P1D", "-PT2H"]
 }
 ```
@@ -624,7 +624,7 @@ No parameters. Returns every VEVENT-supporting calendar:
     "name": "Personal",
     "url": "https://cloud.example.com/remote.php/dav/calendars/demo/personal/",
     "color": "#00679e",
-    "komponenten": ["VEVENT"]
+    "components": ["VEVENT"]
   }
 ]
 ```
@@ -665,7 +665,7 @@ Permanently deletes the calendar **and every event inside it**. Returns
 | `fields` | list of strings | no | Whitelist of result keys; everything else is omitted per event. Unknown names error; `[]` means *no* whitelist |
 | `compact` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""`; truncate `description` to 200 chars with an `… [truncated …]` marker (`get_event` has the full text) |
 
-The four `ohne_*`/`uid_regex` filters exist for **cleanup sweeps**: items
+The four `without_*`/`uid_regex` filters exist for **cleanup sweeps**: items
 created by hand on a phone are recognizable by all-uppercase UUIDs
 (`uid_regex="^[A-F0-9-]+$"`) and missing reminders/visibility/tags, so
 combining them shortlists those in one call instead of a manual pass over
@@ -692,8 +692,8 @@ event started long before. Results are sorted by `start`. One event dict:
   "start": "2026-07-20T14:00:00+02:00",
   "end": "2026-07-20T15:00:00+02:00",
   "all_day": false,
-  "location": "Konferenzraum",
-  "description": "Sprint-Planung",
+  "location": "Conference room",
+  "description": "Sprint planning",
   "tags": ["Work"],
   "reminders": ["-PT30M"],
   "status": "confirmed",
@@ -704,11 +704,11 @@ event started long before. Results are sorted by `start`. One event dict:
   "linked_tasks": [{"uid": "0f8ba4a4-...", "relation": "time_block"}],
   "recurrence_id": null,
   "calendar": "Personal",
-  "organizer": {"email": "chef@example.com", "name": "Chefin"},
+  "organizer": {"email": "manager@example.com", "name": "Manager"},
   "attendees": [
     {
-      "email": "kollege@example.com",
-      "name": "Kollege",
+      "email": "colleague@example.com",
+      "name": "Colleague",
       "status": "accepted",
       "role": "required",
       "rsvp": true
@@ -818,7 +818,7 @@ Example:
 ```json
 {
   "calendar_name": "Events",
-  "title": "Sprint-Planung",
+  "title": "Sprint planning",
   "start": "2026-07-20T14:00:00",
   "end": "2026-07-20T15:00:00",
   "attendees": [
@@ -839,7 +839,7 @@ calendar looks like:
 
 | Field | Value |
 |---|---|
-| `title` | `"🎂 <name> (<Birth_year>)"` — without the parentheses if no birth year is known |
+| `title` | `"🎂 <name> (<birth year>)"` — without the parentheses if no birth year is known |
 | `start` / `end` | The **birth** date, all-day, one day (`end` = `start`) |
 | `recurrence` | `"FREQ=YEARLY"` |
 | `tags` | `["Birthday"]` |
@@ -855,7 +855,7 @@ Parameters:
 
 | Parameter | Required | Notes |
 |---|---|---|
-| `name` | yes | The person's name, without the cake and without the year — both are added. A title read back from an existing entry (`"🎂 Papa (1975)"`) works too: the cake is not doubled and the `(1975)` is read as the birth year |
+| `name` | yes | The person's name, without the cake and without the year — both are added. A title read back from an existing entry (`"🎂 Dad (1975)"`) works too: the cake is not doubled and the `(1975)` is read as the birth year |
 | `date` | yes | `"MM-DD"` (e.g. `"07-04"`), or a full `"YYYY-MM-DD"` whose year is the year of **birth** |
 | `year` | no | Year of birth. May instead come from `date` or from a trailing `"(1975)"` in `name` |
 | `calendar` | no | Target calendar display name, `"Birthdays"` by default |
@@ -882,10 +882,10 @@ Returns the created event, same dict shape as `get_event`.
 Example:
 
 ```json
-{"name": "Papa", "date": "07-04", "year": 1975}
+{"name": "Dad", "date": "07-04", "year": 1975}
 ```
 
-writes `🎂 Papa (1975)` as an all-day event on 1975-07-04, repeating yearly.
+writes `🎂 Dad (1975)` as an all-day event on 1975-07-04, repeating yearly.
 
 ---
 
@@ -931,8 +931,8 @@ Returns:
 ```json
 {
   "calendar_name": "Events",
-  "erfolgreich": 58,
-  "fehlgeschlagen": 2,
+  "succeeded": 58,
+  "failed": 2,
   "results": [
     {"uid": "uid1", "status": "ok"},
     {"uid": "uid2", "status": "error", "error": "Event 'uid2' was not found."}
@@ -955,10 +955,6 @@ Contract and behaviour:
 
 Adds or removes single exception dates on recurring events, merging them into
 what each event already has.
-
-> This tool's parameters and its return value are **English**, unlike the rest
-> of the surface. It was added that way deliberately; the German-named tools
-> are unchanged.
 
 Use this rather than `update_event`'s `exception_dates` whenever the goal is
 "also skip these dates" or "no longer skip these dates". `exception_dates`
@@ -1037,7 +1033,7 @@ Contract and behaviour:
   since moved can still be removed.
 - **Per-event outcomes**: same partial-failure, deduplication, 200-UID limit,
   calendar-resolution and stale-cache contract as
-  [`update_events`](#update_eventskalender_name-event_uids-).
+  [`update_events`](#update_eventscalendar_name-event_uids-).
 
 ---
 
@@ -1085,8 +1081,8 @@ Returns:
 ```json
 {
   "calendar_name": "Events",
-  "erfolgreich": 2,
-  "fehlgeschlagen": 0,
+  "succeeded": 2,
+  "failed": 0,
   "results": [
     {"uid": "uid1", "status": "ok"},
     {"uid": "uid2", "status": "ok"}
@@ -1198,7 +1194,7 @@ event dicts with the same shape as `list_events` entries, each with an added
 [
   {
     "uid": "7f0c9e2a-...",
-    "title": "Steuererklärung vorbereiten",
+    "title": "Prepare tax return",
     "start": "2026-07-20T14:00:00+02:00",
     "end": "2026-07-20T15:00:00+02:00",
     "all_day": false,
@@ -1369,13 +1365,13 @@ call fails with an error rather than silently returning an empty (looks
   "start": "2026-07-20T00:00:00+02:00",
   "end": "2026-07-21T00:00:00+02:00",
   "user": null,
-  "belegt": [
+  "busy": [
     {"start": "2026-07-20T14:00:00+02:00", "end": "2026-07-20T15:00:00+02:00"}
   ]
 }
 ```
 
-`belegt` ("busy") is the merged, sorted list of busy intervals; empty if the
+`busy` is the merged, sorted list of busy intervals; empty if the
 user is free the whole range.
 
 ---
@@ -1417,7 +1413,7 @@ Lists everyone a task list or event calendar is currently shared with:
 
 ```json
 [
-  {"recipient": "bob", "type": "user", "write_access": true, "status": "akzeptiert"},
+  {"recipient": "bob", "type": "user", "write_access": true, "status": "accepted"},
   {"recipient": "team", "type": "group", "write_access": false, "status": "pending"}
 ]
 ```
@@ -1486,7 +1482,7 @@ Lists every note without its content, to keep the listing cheap.
 | `category` | string | no | Filter to notes in this category |
 
 ```json
-[{"id": 42, "title": "Project X", "category": "Work", "favorite": false, "changed": "2026-07-20T12:00:00+00:00"}]
+[{"id": 42, "title": "Project X", "category": "Work", "favorite": false, "modified": "2026-07-20T12:00:00+00:00"}]
 ```
 
 ### `get_note(note_id)`
@@ -1498,7 +1494,7 @@ Fetches one note, including its full content.
 | `note_id` | integer | yes | Note id, from `list_notes`/`search_notes` |
 
 ```json
-{"id": 42, "title": "Project X", "category": "Work", "content": "...", "favorite": false, "changed": "2026-07-20T12:00:00+00:00", "schreibgeschuetzt": false}
+{"id": 42, "title": "Project X", "category": "Work", "content": "...", "favorite": false, "modified": "2026-07-20T12:00:00+00:00", "read_only": false}
 ```
 
 ### `create_note(title, category=None, content=None, favorite=None)`
@@ -1591,8 +1587,8 @@ Built with a single `PRODID`/`VERSION` header; a recurring event/task and its
 override instances are kept together, and `VTIMEZONE` components are
 de-duplicated by `TZID`.
 
-This pair is the lossless path for anything the German field names don't
-model. `VALARM`s in particular go out and come back verbatim — action,
+This pair is the lossless path for anything this server's field vocabulary
+doesn't model. `VALARM`s in particular go out and come back verbatim — action,
 `ATTACH`, `DURATION`/`REPEAT`, the `RELATED` anchor and the dismissed state
 (`ACKNOWLEDGED`) included — where `reminders` only carries a trigger time.
 
@@ -1613,13 +1609,13 @@ being imported into a plain task list) is skipped rather than failing the
 whole import.
 
 ```json
-{"calendar_name": "Private", "importiert": 3, "uebersprungen": 1}
+{"calendar_name": "Private", "imported": 3, "skipped": 1}
 ```
 
-`importiert` is the number of calendar objects created; `uebersprungen`
-("skipped") the number of UID groups whose component kind wasn't supported
-by the target calendar. Malformed ICS text is rejected with a clean error
-that includes the parser's detail message.
+`imported` is the number of calendar objects created; `skipped` is the
+number of UID groups whose component kind wasn't supported by the target
+calendar. Malformed ICS text is rejected with a clean error that includes
+the parser's detail message.
 
 ---
 
@@ -1627,7 +1623,7 @@ that includes the parser's detail message.
 
 All failures come back as short, single-line MCP tool errors, for example:
 
-- `Task list 'Einkuafsliste' was not found.` — typo in the list name; call
+- `Task list 'Grocery Lsit' was not found.` — typo in the list name; call
   `list_task_lists` to see valid names.
 - `Task 'abc-123' was not found.` — stale or wrong UID.
 - `Multiple task lists are named 'Personal', which is ambiguous. Rename the task lists
@@ -1643,13 +1639,13 @@ All failures come back as short, single-line MCP tool errors, for example:
   Re-fetch the task and retry.` — another client (e.g. the Nextcloud Tasks app) changed
   this task between your last read and this write; re-fetch it with `list_tasks` and
   retry the change.
-- `Unknown priority 'dringend'. Expected one of: high, medium, low.`
-- `Unknown status 'fertig'. Expected one of: open, in-progress, completed, cancelled.` —
+- `Unknown priority 'urgent'. Expected one of: high, medium, low.`
+- `Unknown status 'done'. Expected one of: open, in-progress, completed, cancelled.` —
   `update_task`'s `status` parameter; nothing is written to the task.
 - `end and duration_minutes cannot both be given; pass at most one to control how long
   the event runs.` — `create_event_from_task`.
-- `Could not parse Reminder '1 Tag vorher': expected an ISO 8601 duration like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime.`
-- `Unknown clear_fields entry/entries: telefonnummer. Expected one of: start_date,
+- `Could not parse Reminder '1 day before': expected an ISO 8601 duration like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime.`
+- `Unknown clear_fields entry/entries: phone_number. Expected one of: start_date,
   due_date, priority, progress_percent, location, url, tags, reminders, notes,
   visibility, parent_task.`
 - `Cannot both set and clear the same field in one call: due_date.`
@@ -1658,15 +1654,15 @@ All failures come back as short, single-line MCP tool errors, for example:
   supports no VEVENTs; call `list_calendars` to see valid names.
 - `Event 'abc-123' was not found.` — stale or wrong event UID.
 - `A calendar named 'Events' already exists.`
-- `color must look like '#RRGGBB' (or '#RRGGBBAA'), got 'rot'.`
-- `Could not parse recurrence 'jeden Montag' as an RFC 5545 RRULE (e.g. 'FREQ=WEEKLY;BYDAY=MO').`
+- `color must look like '#RRGGBB' (or '#RRGGBBAA'), got 'red'.`
+- `Could not parse recurrence 'every Monday' as an RFC 5545 RRULE (e.g. 'FREQ=WEEKLY;BYDAY=MO').`
 - `start and end must both be all-day dates or both be datetimes; got one of each. ...`
 - `Expanding recurring events requires both start and end bounds.`
-- `Unknown relation 'egal'. Expected one of: time_block, prerequisite.`
+- `Unknown relation 'whatever'. Expected one of: time_block, prerequisite.`
 - `The task has no due_date (due date); pass an explicit start for the event instead.`
 - `date must be a date-only 'YYYY-MM-DD' string, got '2026-07-20T14:00:00'.`
-- `Unknown role 'chef'. Expected one of: chair, required, optional, non-participant.`
-- `Unknown response 'vielleicht'. Expected one of: accepted, cancelled, tentative.`
+- `Unknown role 'boss'. Expected one of: chair, required, optional, non-participant.`
+- `Unknown response 'maybe'. Expected one of: accepted, cancelled, tentative.`
 - `You are not listed as an attendee of this event, so there is nothing to respond to.`
 - `Nextcloud could not provide free/busy information for 'bob@example.com' (the user may
   be unknown, or scheduling may be disabled on the server).`
