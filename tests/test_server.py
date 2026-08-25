@@ -91,6 +91,8 @@ def test_all_tools_registered(tools):
         "get_notiz",
         "create_notiz",
         "update_notiz",
+        "replace_in_notiz",
+        "update_notiz_abschnitt",
         "append_notiz",
         "search_notizen",
         "delete_notiz",
@@ -182,6 +184,20 @@ def test_update_notiz_only_sets_given_fields(tools, fake_notes_service):
     assert fields.favorit is None
 
 
+def test_replace_in_notiz_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.replace_in_note.return_value = {"id": 2, "inhalt": "Neu"}
+    result = _run(tools["replace_in_notiz"].fn(2, "Alt", "Neu"))
+    assert result == {"id": 2, "inhalt": "Neu"}
+    fake_notes_service.replace_in_note.assert_called_once_with(2, "Alt", "Neu")
+
+
+def test_update_notiz_abschnitt_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.replace_note_section.return_value = {"id": 2, "inhalt": "## A\n\nNeu"}
+    result = _run(tools["update_notiz_abschnitt"].fn(2, "## A", "## A\n\nNeu"))
+    assert result == {"id": 2, "inhalt": "## A\n\nNeu"}
+    fake_notes_service.replace_note_section.assert_called_once_with(2, "## A", "## A\n\nNeu")
+
+
 def test_append_notiz_delegates_to_notes_service(tools, fake_notes_service):
     fake_notes_service.append_note.return_value = {"id": 2, "inhalt": "Alt\n\nNeu"}
     result = _run(tools["append_notiz"].fn(2, "Neu"))
@@ -208,6 +224,8 @@ def test_notiz_tools_use_ascii_parameter_names(tools):
         "get_notiz",
         "create_notiz",
         "update_notiz",
+        "replace_in_notiz",
+        "update_notiz_abschnitt",
         "append_notiz",
         "search_notizen",
         "delete_notiz",
@@ -1352,6 +1370,8 @@ DESTRUCTIVE_TOOLS = {
     "respond_to_event",
     "unshare_calendar",
     "update_notiz",
+    "replace_in_notiz",
+    "update_notiz_abschnitt",
     "delete_notiz",
 }
 
