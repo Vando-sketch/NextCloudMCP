@@ -130,6 +130,7 @@ def test_create_task_uses_umlaut_parameter_names(tools):
     assert "faellig_datum" in schema["properties"]
     assert "prioritaet" in schema["properties"]
     assert "uebergeordnete_aufgabe" in schema["properties"]
+    assert "status" in schema["properties"]
     assert schema["required"] == ["list_name", "titel"]
 
 
@@ -537,6 +538,29 @@ def test_create_task_passes_wiederholung(tools, fake_service):
     assert fields.wiederholung == "FREQ=WEEKLY;BYDAY=MO"
 
 
+def test_create_task_passes_status(tools, fake_service):
+    """Importing an already-finished task must be one call, not create+complete."""
+    fake_service.create_task.return_value = "new-uid"
+    _run(
+        tools["create_task"].fn(
+            list_name="Personal",
+            titel="Schon erledigt",
+            status="erledigt",
+        )
+    )
+    args, _ = fake_service.create_task.call_args
+    _, fields = args
+    assert fields.status == "erledigt"
+
+
+def test_create_task_status_defaults_to_unset(tools, fake_service):
+    fake_service.create_task.return_value = "new-uid"
+    _run(tools["create_task"].fn(list_name="Personal", titel="Offene Aufgabe"))
+    args, _ = fake_service.create_task.call_args
+    _, fields = args
+    assert fields.status is None
+
+
 def test_update_task_passes_wiederholung(tools, fake_service):
     _run(tools["update_task"].fn("Personal", "task-uid", wiederholung="FREQ=DAILY"))
     args, _ = fake_service.update_task.call_args
@@ -602,6 +626,7 @@ def test_move_task_delegates(tools, fake_service):
         "von": "Privat",
         "nach": "Arbeit",
         "methode": "MOVE",
+        "verwaiste_verknuepfungen": [],
     }
     result = _run(
         tools["move_task"].fn(list_name="Privat", task_uid="task-uid", ziel_liste="Arbeit")
@@ -611,8 +636,33 @@ def test_move_task_delegates(tools, fake_service):
         "von": "Privat",
         "nach": "Arbeit",
         "methode": "MOVE",
+        "verwaiste_verknuepfungen": [],
     }
     fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit", None, ())
+
+
+def test_move_task_passes_orphan_warning_through(tools, fake_service):
+    """The warning is the point of the call for a caller fixing a hierarchy -
+    it has to survive the tool layer unflattened."""
+    orphans = [
+        {
+            "uid": "kind1",
+            "titel": "Erster Schritt",
+            "liste": "Privat",
+            "fehlende_uebergeordnete_uid": "task-uid",
+        }
+    ]
+    fake_service.move_task.return_value = {
+        "uid": "task-uid",
+        "von": "Privat",
+        "nach": "Arbeit",
+        "methode": "kopiert",
+        "verwaiste_verknuepfungen": orphans,
+    }
+    result = _run(
+        tools["move_task"].fn(list_name="Privat", task_uid="task-uid", ziel_liste="Arbeit")
+    )
+    assert result["verwaiste_verknuepfungen"] == orphans
 
 
 def test_move_task_passes_new_parent_through(tools, fake_service):
@@ -622,6 +672,7 @@ def test_move_task_passes_new_parent_through(tools, fake_service):
         "nach": "Arbeit",
         "methode": "MOVE",
         "hierarchie": "gesetzt",
+        "verwaiste_verknuepfungen": [],
     }
     result = _run(
         tools["move_task"].fn(
@@ -642,6 +693,7 @@ def test_move_task_passes_felder_leeren_through_as_tuple(tools, fake_service):
         "nach": "Arbeit",
         "methode": "MOVE",
         "hierarchie": "geleert",
+        "verwaiste_verknuepfungen": [],
     }
     _run(
         tools["move_task"].fn(
