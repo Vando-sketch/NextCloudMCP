@@ -585,9 +585,7 @@ def test_move_tasks_delegates(tools, fake_service):
     }
     fake_service.move_tasks.return_value = expected_res
     res = _run(
-        tools["move_tasks"].fn(
-            list_name="MCP-World", task_uids=["t1", "t2"], ziel_liste="Archiv"
-        )
+        tools["move_tasks"].fn(list_name="MCP-World", task_uids=["t1", "t2"], ziel_liste="Archiv")
     )
     assert res == expected_res
     fake_service.move_tasks.assert_called_once_with("MCP-World", ["t1", "t2"], "Archiv")
