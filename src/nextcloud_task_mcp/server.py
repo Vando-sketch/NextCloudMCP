@@ -1,6 +1,9 @@
 """FastMCP server exposing Nextcloud Tasks (CalDAV) as MCP tools."""
 
-from __future__ import annotations
+# No `from __future__ import annotations` here: with PEP 563 string annotations,
+# fastmcp (<3) rebuilds each tool function to resolve them and drops
+# `__kwdefaults__` in the process, so every keyword-only parameter loses its
+# default and is marked required in the MCP schema clients see.
 
 import functools
 import logging
