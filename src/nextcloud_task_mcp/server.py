@@ -446,9 +446,10 @@ def build_server(
         Returns:
             A list of task dicts with keys: uid, title, start_date, due_date,
             priority, progress_percent, status ("open"/"in-progress"/
-            "completed"/"cancelled" - see update_task's status parameter to set
-            it), visibility ("public"/"private"/"confidential" or None -
-            see create_task's visibility parameter), location, url, tags, reminders
+            "completed"/"cancelled" - see create_task/update_task's status
+            parameter to set it), visibility ("public"/"private"/
+            "confidential" or None - see create_task's visibility parameter),
+            location, url, tags, reminders
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
@@ -535,6 +536,7 @@ def build_server(
         parent_task: str | None = None,
         recurrence: str | None = None,
         exception_dates: list[str] | None = None,
+        status: str | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
@@ -553,7 +555,10 @@ def build_server(
                 back to start_date) or an absolute ISO 8601 datetime -> VALARM.
                 The leading "-" is what makes a relative reminder fire *before*
                 that date; a positive duration ("PT30M") is valid and means 30
-                minutes *after* it.
+                minutes *after* it. Reading a task back normalizes equivalent
+                spellings of the same trigger to one form ("-P1W" reads back as
+                "-P7D", and "P0D"/"PT0S"/"-PT0M" - a reminder firing exactly at
+                that date - all read back as "-PT0M").
             notes: Optional notes -> DESCRIPTION.
             visibility: Optional "public" / "private" / "confidential" -> CLASS.
             parent_task: Optional UID of an existing task to link this
@@ -568,6 +573,16 @@ def build_server(
                 all-day task, a full datetime otherwise) and must name an
                 occurrence the recurrence actually produces; an entry that
                 would cancel nothing is rejected rather than stored.
+            status: Optional "open" / "in-progress" / "completed" / "cancelled" ->
+                STATUS, for creating a task that is not simply open - importing
+                an already-finished task, say, which otherwise took a
+                create_task plus a complete_task. Omitted (the default) creates
+                an open task. "completed" behaves like complete_task (also sets
+                PERCENT-COMPLETE=100 and a COMPLETED timestamp of *now*, since
+                the real completion time is not recorded anywhere to recover);
+                "in-progress" and "cancelled" only set STATUS. An explicit
+                progress_percent in the same call wins over the percentage
+                status would otherwise derive.
 
         Date/time semantics for start_date and due_date: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
@@ -599,6 +614,7 @@ def build_server(
             parent_task=parent_task,
             recurrence=recurrence,
             exception_dates=exception_dates,
+            status=status,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
@@ -730,8 +746,16 @@ def build_server(
         target_list: str,
         parent_task: str | None = None,
         clear_fields: list[str] | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Move a task to a different task list, optionally re-parenting it too.
+
+        Nextcloud Tasks resolves the subtask hierarchy (RELATED-TO) only
+        *within* one list. Moving just one half of a parent/child pair leaves
+        the link in place as a property, but pointing nowhere in its own list
+        - without raising an error anywhere. For the moved task itself,
+        `parent_task` and `clear_fields` take care of that in the same call;
+        whatever still points nowhere afterwards is reported in
+        `orphaned_subtask_links` (see Returns).
 
         Args:
             list_name: Display name of the source task list.
@@ -754,9 +778,20 @@ def build_server(
             "hierarchy": "set" | "cleared" if the parent task was also changed.
             If only the hierarchy change fails, the error explicitly states
             that the move itself succeeded.
+            Always included is "orphaned_subtask_links": the subtask links
+            that point nowhere after this call - one entry per link, as
+            {"uid", "title", "list", "missing_parent_uid"}, where "uid"/"list"
+            name the task carrying the link and "missing_parent_uid" the
+            parent task that is not (or no longer) in that list. The final
+            state is what gets checked, i.e. after any hierarchy change made
+            in the same call; what typically remains are the subtasks left
+            behind in the source list (no parameter of this tool reaches
+            those - use update_task per subtask). [] means "no orphaned
+            links", None means "could not be checked after the move" - the
+            move itself succeeded in both cases.
         """
 
-        res: dict[str, str] = await _call(
+        res: dict[str, Any] = await _call(
             caldav_service.move_task,
             list_name,
             task_uid,
@@ -1089,8 +1124,8 @@ def build_server(
           Without a birth year it starts on the next upcoming occurrence.
         - recurrence "FREQ=YEARLY", tags ["Birthday"], visibility
           "private", reminders ["-PT0M", "-P1D"] (on the day itself and the
-          day before). Entries written to the legacy "Geburtstage" calendar
-          are tagged "Geburtstag" instead, matching the entries already in
+          day before). Entries written to the legacy "Birthdays" calendar
+          are tagged "Birthday" instead, matching the entries already in
           it, so one tag still covers the whole calendar.
 
         Args:
@@ -1115,7 +1150,7 @@ def build_server(
                 carries no year. A birth date that is still ahead is rejected.
             calendar: Display name of the target calendar. Left out, it is
                 "Birthdays", except on a server that still has the
-                "Geburtstage" calendar an earlier version of this tool wrote
+                "Birthdays" calendar an earlier version of this tool wrote
                 to and no "Birthdays" - there the existing calendar is used,
                 so birthdays stay in one place instead of being split across
                 two. Naming a calendar explicitly always uses that one.

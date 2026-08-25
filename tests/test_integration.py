@@ -441,6 +441,64 @@ def test_move_task_keeps_uid_and_fields(live_service, test_list_name, move_targe
                 pass
 
 
+def test_move_task_reports_the_subtask_link_it_orphans(
+    live_service, test_list_name, move_target_list
+):
+    """Against a real server, because the warning depends on what Nextcloud
+    actually stores: that a moved subtask keeps its RELATED-TO, and that the
+    parent left behind is still listed under the source list."""
+    parent_uid = live_service.create_task(
+        test_list_name, mapping.TaskFields(title="Orphaned-Test-Elternaufgabe")
+    )
+    child_uid = live_service.create_task(
+        test_list_name,
+        mapping.TaskFields(title="Orphaned-Test-Subtask", parent_task=parent_uid),
+    )
+
+    try:
+        result = live_service.move_task(test_list_name, child_uid, move_target_list)
+
+        assert result["orphaned_subtask_links"] == [
+            {
+                "uid": child_uid,
+                "title": "Orphaned-Test-Subtask",
+                "list": move_target_list,
+                "fehlende_parent_uid": parent_uid,
+            }
+        ]
+        # The link itself survives the move untouched - that is exactly why it
+        # needs reporting rather than fixing.
+        moved = live_service.get_task(move_target_list, child_uid)
+        assert moved["parent_uid"] == parent_uid
+    finally:
+        for list_name, uid in (
+            (move_target_list, child_uid),
+            (test_list_name, child_uid),
+            (test_list_name, parent_uid),
+        ):
+            try:
+                live_service.delete_task(list_name, uid)
+            except Exception:
+                pass
+
+
+def test_create_task_with_status_completed_reads_back_as_completed(live_service, test_list_name):
+    """One call instead of create_task + complete_task, verified end to end."""
+    uid = live_service.create_task(
+        test_list_name,
+        mapping.TaskFields(title="Direkt-completed-Test", status="completed"),
+    )
+    try:
+        task = live_service.get_task(test_list_name, uid)
+        assert task["status"] == "completed"
+        assert task["progress_percent"] == 100
+    finally:
+        try:
+            live_service.delete_task(test_list_name, uid)
+        except Exception:
+            pass
+
+
 def test_move_task_reparents_in_the_target_list(live_service, test_list_name, move_target_list):
     """The whole point of the hierarchy shortcut: one call, and the parent is the new one."""
     parent_uid = live_service.create_task(
@@ -460,6 +518,9 @@ def test_move_task_reparents_in_the_target_list(live_service, test_list_name, mo
         result = live_service.move_task(test_list_name, child_uid, move_target_list, parent_uid)
         assert result["to"] == move_target_list
         assert result["hierarchy"] == "set"
+        # The re-parent repaired the very link this move would have orphaned,
+        # and it ran before the scan, so there is nothing left to warn about.
+        assert result["orphaned_subtask_links"] == []
 
         moved = live_service.get_task(move_target_list, child_uid)
         assert moved["parent_uid"] == parent_uid

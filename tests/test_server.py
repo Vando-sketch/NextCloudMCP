@@ -130,6 +130,7 @@ def test_create_task_uses_umlaut_parameter_names(tools):
     assert "due_date" in schema["properties"]
     assert "priority" in schema["properties"]
     assert "parent_task" in schema["properties"]
+    assert "status" in schema["properties"]
     assert schema["required"] == ["list_name", "title"]
 
 
@@ -537,6 +538,29 @@ def test_create_task_passes_recurrence(tools, fake_service):
     assert fields.recurrence == "FREQ=WEEKLY;BYDAY=MO"
 
 
+def test_create_task_passes_status(tools, fake_service):
+    """Importing an already-finished task must be one call, not create+complete."""
+    fake_service.create_task.return_value = "new-uid"
+    _run(
+        tools["create_task"].fn(
+            list_name="Personal",
+            title="Already done",
+            status="completed",
+        )
+    )
+    args, _ = fake_service.create_task.call_args
+    _, fields = args
+    assert fields.status == "completed"
+
+
+def test_create_task_status_defaults_to_unset(tools, fake_service):
+    fake_service.create_task.return_value = "new-uid"
+    _run(tools["create_task"].fn(list_name="Personal", title="Open task"))
+    args, _ = fake_service.create_task.call_args
+    _, fields = args
+    assert fields.status is None
+
+
 def test_update_task_passes_recurrence(tools, fake_service):
     _run(tools["update_task"].fn("Personal", "task-uid", recurrence="FREQ=DAILY"))
     args, _ = fake_service.update_task.call_args
@@ -602,6 +626,7 @@ def test_move_task_delegates(tools, fake_service):
         "from": "Private",
         "to": "Work",
         "method": "MOVE",
+        "orphaned_subtask_links": [],
     }
     result = _run(
         tools["move_task"].fn(list_name="Private", task_uid="task-uid", target_list="Work")
@@ -611,8 +636,33 @@ def test_move_task_delegates(tools, fake_service):
         "from": "Private",
         "to": "Work",
         "method": "MOVE",
+        "orphaned_subtask_links": [],
     }
     fake_service.move_task.assert_called_once_with("Private", "task-uid", "Work", None, ())
+
+
+def test_move_task_passes_orphan_warning_through(tools, fake_service):
+    """The warning is the point of the call for a caller fixing a hierarchy -
+    it has to survive the tool layer unflattened."""
+    orphans = [
+        {
+            "uid": "child1",
+            "title": "First step",
+            "list": "Private",
+            "fehlende_parent_uid": "task-uid",
+        }
+    ]
+    fake_service.move_task.return_value = {
+        "uid": "task-uid",
+        "from": "Private",
+        "to": "Work",
+        "method": "copied",
+        "orphaned_subtask_links": orphans,
+    }
+    result = _run(
+        tools["move_task"].fn(list_name="Private", task_uid="task-uid", target_list="Work")
+    )
+    assert result["orphaned_subtask_links"] == orphans
 
 
 def test_move_task_passes_new_parent_through(tools, fake_service):
@@ -622,6 +672,7 @@ def test_move_task_passes_new_parent_through(tools, fake_service):
         "to": "Work",
         "method": "MOVE",
         "hierarchy": "set",
+        "orphaned_subtask_links": [],
     }
     result = _run(
         tools["move_task"].fn(
@@ -642,6 +693,7 @@ def test_move_task_passes_clear_fields_through_as_tuple(tools, fake_service):
         "to": "Work",
         "method": "MOVE",
         "hierarchy": "cleared",
+        "orphaned_subtask_links": [],
     }
     _run(
         tools["move_task"].fn(
@@ -893,20 +945,20 @@ def test_create_birthday_writes_to_the_given_calendar(tools, fake_service):
 
 def test_create_birthday_uses_the_legacy_calendar_when_it_is_the_only_one(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    fake_service.list_calendars.return_value = [{"name": "Geburtstage"}, {"name": "Work"}]
+    fake_service.list_calendars.return_value = [{"name": "Birthdays"}, {"name": "Work"}]
 
     _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
 
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Geburtstage"
+    assert cal_name == "Birthdays"
     # The tag follows the calendar, so one tag still covers all of its entries.
-    assert fields.tags == ["Geburtstag"]
-    fake_service.get_event.assert_called_once_with("Geburtstage", "new-uid")
+    assert fields.tags == ["Birthday"]
+    fake_service.get_event.assert_called_once_with("Birthdays", "new-uid")
 
 
 def test_create_birthday_prefers_the_english_calendar_when_both_exist(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    fake_service.list_calendars.return_value = [{"name": "Geburtstage"}, {"name": "Birthdays"}]
+    fake_service.list_calendars.return_value = [{"name": "Birthdays"}, {"name": "Birthdays"}]
 
     _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
 
@@ -918,11 +970,11 @@ def test_create_birthday_prefers_the_english_calendar_when_both_exist(tools, fak
 def test_create_birthday_named_legacy_calendar_still_gets_the_legacy_tag(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
 
-    _run(tools["create_birthday"].fn(name="Dad", date="07-04", calendar="Geburtstage"))
+    _run(tools["create_birthday"].fn(name="Dad", date="07-04", calendar="Birthdays"))
 
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Geburtstage"
-    assert fields.tags == ["Geburtstag"]
+    assert cal_name == "Birthdays"
+    assert fields.tags == ["Birthday"]
 
 
 def test_create_birthday_creates_the_english_calendar_on_a_fresh_account(tools, fake_service):

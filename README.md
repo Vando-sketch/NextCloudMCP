@@ -214,6 +214,15 @@ Creates a task. Required: `list_name`, `title`. Optional fields and their CalDAV
 | `parent_task` | `RELATED-TO;RELTYPE=PARENT` | UID of an existing task; makes this task its subtask |
 | `recurrence` | `RRULE` | raw RFC 5545 text, e.g. `"FREQ=WEEKLY;BYDAY=MO"`; requires the task to have a `start_date` or `due_date` (existing or set in the same call) to recur from |
 | `exception_dates` | `EXDATE` | ISO 8601 occurrences the series skips; each must match `start_date`'s value kind and name a real occurrence |
+| `status` | `STATUS` | `"open"` (the default when omitted) / `"in-progress"` / `"completed"` / `"cancelled"`; see below |
+
+**Status on creation (`status`):** a task is created open unless you say otherwise. Passing
+`status` creates it in that state instead, so importing an already-finished task is one call
+rather than a `create_task` followed by a `complete_task`. The values mean exactly what they
+mean in `update_task`: `"completed"` also sets `PERCENT-COMPLETE=100` and a `COMPLETED`
+timestamp — of *now*, since the real completion time is not recoverable from anywhere —
+while `"in-progress"`/`"cancelled"` only set `STATUS`. An explicit `progress_percent` in the
+same call wins over the percentage `status` would otherwise derive.
 
 **Reminders (`reminders`):** each entry is either a relative RFC 5545 duration (e.g.
 `"-P1D"`, `"-PT1H"`) or an absolute ISO 8601 datetime. Relative reminders trigger before
@@ -223,7 +232,11 @@ default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`) and stored as
 5545; reading them back formats the same instant in the default timezone, so the string may
 differ from what was written. Reading a reminder and writing it back is safe — the alarm is
 recognized as already present and left alone — but the strings are normalized (`"-P1W"` reads
-back as `"-P7D"`, `"...Z"` as the default timezone's offset). Alarms whose trigger this format
+back as `"-P7D"`, `"...Z"` as the default timezone's offset, and every spelling of a
+zero-length trigger — `"P0D"`, `"PT0S"`, `"-PT0M"` — as `"-PT0M"`). That last one matters
+because a reminder firing exactly at the due date is written as `P0D` by this server's
+iCalendar library and as `-PT0M` by the Nextcloud Tasks UI, so the same reminder used to read
+back differently depending on which client last wrote the alarm. Alarms whose trigger this format
 cannot express are not listed, and are never touched by a write; see `docs/tools.md`.
 
 > **BREAKING CHANGE**: Server timezone handling uses a single configurable default timezone (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Setting `MCP_DEFAULT_TIMEZONE=UTC` restores the previous UTC-hardcoded behavior.
@@ -239,7 +252,7 @@ a recurring event on its wall-clock time across daylight-saving changes.
 
 ### `update_task(list_name, task_uid, ...)`
 
-Same fields as `create_task`, all optional except `task_uid`, plus `status`. Only fields
+Same fields as `create_task` (`status` included), all optional except `task_uid`. Only fields
 you pass are changed; everything else on the task is left untouched. Passing `reminders`
 replaces the reminders `list_tasks` shows; `clear_fields` clears *every* alarm instead.
 
@@ -284,7 +297,23 @@ Permanently deletes the task.
 
 ### `move_task(list_name, task_uid, target_list, parent_task=None, clear_fields=None)`
 
-Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "from": ..., "to": ..., "method": "MOVE" | "copied"}`.
+Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server rejects `MOVE` (HTTP 403/405/409/501/502). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "from": ..., "to": ..., "method": "MOVE" | "copied", "orphaned_subtask_links": ...}`.
+
+**Orphaned subtask links (`orphaned_subtask_links`):** Nextcloud Tasks resolves the
+subtask hierarchy (`RELATED-TO;RELTYPE=PARENT`) only *within* one task list. Moving one half
+of a parent/child pair therefore breaks the nesting without producing an error anywhere: the
+property survives the move and simply points at a UID its list no longer holds. `move_task`
+reports exactly those links — the moved task's own link to a parent left behind, and the
+links of any subtasks left behind pointing at it — as a list of
+`{"uid", "title", "list", "missing_parent_uid"}` entries, where `uid`/`list` name
+the task carrying the dangling link. `[]` means the call left the hierarchy intact; `null`
+means the check could not be run afterwards (the move itself still succeeded).
+
+The scan runs after this call's own `parent_task`/`clear_fields`, so it reports
+what the *call* leaves behind: re-parenting in the same call is not then warned about, while
+pointing a task at a parent in some third list is. The subtasks left behind are the half no
+move argument can reach — separate objects in the source list — so repair those by moving
+them along too, or with one `update_task` each.
 
 A list change almost always changes the hierarchy too, since the old parent stays behind in the source list. `parent_task` sets a new parent, or `clear_fields=["parent_task"]` detaches the task, in the same call — the write lands on the copy in the target list after the move succeeded, and the result then also carries `"hierarchy": "set" | "cleared"`. Only that one field is accepted here; everything else still goes through `update_task`.
 
@@ -304,7 +333,7 @@ the full reference.
 | `list_events(calendar_names=None, start=None, end=None, search_text=None, tag=None, limit=None, expand_recurrences=False, without_reminder=False, without_visibility=False, without_tags=False, uid_regex=None, fields=None, compact=False)` | Time-range query across one/several/all calendars, full-text, tag and cleanup filters (`without_*`, `uid_regex` — see `list_tasks`); optionally expands recurring events into single occurrences. `fields` whitelists result keys, `compact` drops empty fields and truncates `description`. Without calendars *and* bounds, a default window of today ±90 days applies |
 | `get_event(calendar_name, event_uid)` | Single event by UID |
 | `create_event(calendar_name, title, start, ...)` | Full event creation: all-day or timed, `location`, `description`, `tags`, `status` (`"confirmed"`/`"tentative"`/`"cancelled"`), `visibility`, recurrence (`recurrence` = raw RRULE), exceptions (`exception_dates` → EXDATE), reminders (`reminders` → VALARM), `url`, task link (`linked_task`) |
-| `create_birthday(name, date, year=None, calendar=None)` | One call for the fixed birthday convention: title `"🎂 <name> (<birth year>)"`, all-day on the birth date (so the age is readable from each occurrence), `FREQ=YEARLY`, tag `Birthday`, `visibility` `private`, reminders on the day and the day before. `date` is `"MM-DD"` or `"YYYY-MM-DD"`; the birth year is optional. Without `calendar` it writes to `Birthdays`, or to a pre-existing legacy `Geburtstage` calendar if that is the only one of the two |
+| `create_birthday(name, date, year=None, calendar=None)` | One call for the fixed birthday convention: title `"🎂 <name> (<birth year>)"`, all-day on the birth date (so the age is readable from each occurrence), `FREQ=YEARLY`, tag `Birthday`, `visibility` `private`, reminders on the day and the day before. `date` is `"MM-DD"` or `"YYYY-MM-DD"`; the birth year is optional. Without `calendar` it writes to `Birthdays`, or to a pre-existing legacy `Birthdays` calendar if that is the only one of the two |
 | `update_event(calendar_name, event_uid, ...)` | Partial update, same fields; `clear_fields` clears properties |
 | `update_events(calendar_name, event_uids, ...)` | Batch update up to 200 events with the same field patch; patch validated up front |
 | `update_exdates(calendar_name, event_uids, add=None, remove=None, ...)` | Add/remove single exception dates on up to 200 recurring events without rewriting the whole list |
