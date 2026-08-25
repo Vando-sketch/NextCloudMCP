@@ -1347,21 +1347,10 @@ def build_server(
             remove,
             ignore_non_occurrences,
         )
-        # `_batch_over_events` reports in the German shape the other batch
-        # tools return; this tool's surface is English throughout, so the
-        # three envelope keys and the per-event failure entry are renamed.
-        results: list[dict[str, Any]] = []
-        for entry in res["results"]:
-            if entry["status"] == "error":
-                results.append({"uid": entry["uid"], "status": "error", "error": entry["error"]})
-            else:
-                results.append(entry)
-        return {
-            "calendar_name": res["calendar_name"],
-            "succeeded": res["succeeded"],
-            "failed": res["failed"],
-            "results": results,
-        }
+        # `_batch_over_events` already reports in exactly this shape - the
+        # envelope keys and the per-event entries are the tool's surface as
+        # they come, so there is nothing to translate here.
+        return res
 
     @mcp.tool(annotations=_MODIFY)
     async def delete_events(calendar_name: str, event_uids: list[str]) -> dict[str, Any]:

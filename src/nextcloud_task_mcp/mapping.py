@@ -1,4 +1,4 @@
-"""Translation between the server's German task fields and iCalendar VTODO properties."""
+"""Translation between the server's task fields and iCalendar VTODO properties."""
 
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ VISIBILITY_LABELS: dict[str, str] = {
     "private": "PRIVATE",
     "confidential": "CONFIDENTIAL",
 }
-# Reverse of VISIBILITY_LABELS for parsing CLASS back to German; an unknown
+# Reverse of VISIBILITY_LABELS for parsing CLASS back to a label; an unknown
 # CLASS value (a foreign client's extension) reads as None, like a missing one.
 _ICAL_CLASS_TO_LABEL: dict[str, str] = {v: k for k, v in VISIBILITY_LABELS.items()}
-# RFC 5545 VTODO STATUS values <-> the German labels `update_task`'s `status`
+# RFC 5545 VTODO STATUS values <-> the status labels `update_task`'s `status`
 # parameter and `list_tasks`/`get_task`'s `status` result key use. "completed"
 # and "open" existed before this map did (as the two-valued collapse
 # `parse_vtodo` used to do); "in-progress"/"cancelled" are new. See
@@ -51,7 +51,7 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # compare equal.
 _TriggerKey = tuple[str, datetime] | tuple[str, timedelta]
 
-# Maps the German, LLM-facing `clear_fields` entry name to the
+# Maps the LLM-facing `clear_fields` entry name to the
 # (TaskFields attribute name, iCalendar property name) it clears. "title" is
 # deliberately absent - clearing the title is not a supported operation.
 # "reminders" has no single iCalendar property (it clears all VALARM
@@ -80,7 +80,7 @@ class TaskFields:
 
     This is the single definition of the (previously hand-copied five times,
     C3) task parameter list. The MCP tool functions in `server.py`
-    keep their own flat, German, umlaut-bearing parameter lists - that's the
+    keep their own flat parameter lists - that's the
     LLM-facing tool contract - and build a `TaskFields` internally; everything
     below that layer (`CalDavService`, `apply_task_fields`) works with this
     dataclass instead of a long kwarg list.
@@ -268,7 +268,7 @@ def local_midnight(day: date) -> datetime:
 
 
 def priority_label_to_ical(label: str) -> int:
-    """Map a German priority label to an RFC 5545 PRIORITY value (1-9)."""
+    """Map a priority label to an RFC 5545 PRIORITY value (1-9)."""
     try:
         return PRIORITY_LABELS[label]
     except KeyError:
@@ -278,7 +278,7 @@ def priority_label_to_ical(label: str) -> int:
 
 
 def ical_priority_to_label(value: int | None) -> str | None:
-    """Map an RFC 5545 PRIORITY value back to a German label.
+    """Map an RFC 5545 PRIORITY value back to a priority label.
 
     Follows the common client convention: 1-4 high, 5 medium, 6-9 low,
     0/absent undefined.
@@ -295,7 +295,7 @@ def ical_priority_to_label(value: int | None) -> str | None:
 
 
 def task_status_label_to_ical(label: str) -> str:
-    """Map a German task status label to an RFC 5545 VTODO STATUS value."""
+    """Map a task status label to an RFC 5545 VTODO STATUS value."""
     try:
         return TASK_STATUS_LABELS[label]
     except KeyError:
@@ -305,7 +305,7 @@ def task_status_label_to_ical(label: str) -> str:
 
 
 def visibility_label_to_ical(label: str) -> str:
-    """Map a German visibility label to an RFC 5545 CLASS value."""
+    """Map a visibility label to an RFC 5545 CLASS value."""
     try:
         return VISIBILITY_LABELS[label]
     except KeyError:
@@ -533,7 +533,7 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
 # The two helpers that reject bad input raise `InvalidTaskDataError` and are
 # re-raised as `InvalidEventDataError` by thin wrappers on the event side -
 # the same pattern `parse_datetime_input`/`parse_rrule_text` already follow.
-# The German field name (`exception_dates`) and the error wording are shared;
+# The field name (`exception_dates`) and the error wording are shared;
 # only the noun and the tools named in the hint differ per component kind,
 # which is what the `noun`/`reader` arguments carry.
 # ----------------------------------------------------------------------
@@ -1666,7 +1666,7 @@ def _trigger_zone(prop: Any) -> timezone | ZoneInfo | None:
 
 
 def parse_vtodo(component) -> dict[str, Any]:
-    """Parse an icalendar VTODO component into the server's German task dict.
+    """Parse an icalendar VTODO component into the server's task dict.
 
     "status" is one of `TASK_STATUS_LABELS` ("open"/"in-progress"/"completed"/
     "cancelled"). A missing STATUS property reads as "open" per RFC 5545's own
@@ -1752,7 +1752,9 @@ def _collation_key(value: str) -> tuple[str, str]:
     """A rough locale-independent collation key for a title.
 
     Raw codepoint order files every umlaut after "Z" ("Ärztin" behind
-    "Dentist"), which reads as no order at all in a German-facing listing.
+    "Dentist"), which reads as no order at all in a listing of
+    German-language titles - and the content this server serves is routinely
+    German even though its own vocabulary is English.
     Decomposing (NFKD) and dropping the combining marks sorts "Ä" with "A";
     case-folding sorts "ärztin" with "Ärztin" and "ß" with "ss", which is
     also DIN 5007 variant 1's rule. This is not full locale-aware collation -
@@ -1768,7 +1770,7 @@ def _fold(value: str) -> str:
 
     "ü" has two Unicode spellings (precomposed, or "u" plus a combining
     diaeresis) that no client is consistent about, and `.lower()` leaves "ß"
-    and "SS" different - both of which matter in a German-language API.
+    and "SS" different - both of which matter for German-language content.
     NFC-normalizing and case-*folding* (not lowercasing) makes either
     spelling of an umlaut, and either spelling of a sharp s, match.
     """

@@ -247,7 +247,7 @@ _CALDAV_NS = "urn:ietf:params:xml:ns:caldav"
 _ICAL_NS = "http://apple.com/ns/ical/"
 
 # Maps the {oc}invite-* child element found on an {oc}user share entry to
-# the German status vocabulary this server returns. Nextcloud's own server
+# the share-status vocabulary this server returns. Nextcloud's own server
 # currently always emits invite-accepted (shares are auto-accepted), but
 # other invite-* elements are part of the same sharing XML vocabulary (they
 # do appear for the closely related calendarserver.org CalDAV-sharing
@@ -1499,7 +1499,7 @@ class CalDavService:
         without_tags: bool = False,
         uid_regex: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
+        """Return tasks across one, several, or all VTODO task lists, parsed into task dicts.
 
         `list_names` is a display name, a list of them, or `None` for every
         task list on the account; an empty list is an empty scope (no request,
@@ -1711,7 +1711,7 @@ class CalDavService:
                 raise _translate(exc) from exc
 
     def get_task(self, list_name: str, task_uid: str) -> dict[str, Any]:
-        """Return a single task, parsed into the server's German task dict."""
+        """Return a single task, parsed into the server's task dict."""
         _reject_occurrence_uid(task_uid)
         with self._lock:
 
@@ -2232,7 +2232,7 @@ class CalDavService:
         return events
 
     def get_event(self, calendar_name: str, event_uid: str) -> dict[str, Any]:
-        """Return a single event, parsed into the server's German event dict."""
+        """Return a single event, parsed into the server's event dict."""
         with self._lock:
 
             def op(calendar: DAVCalendar):

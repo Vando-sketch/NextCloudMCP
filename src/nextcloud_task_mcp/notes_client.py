@@ -100,7 +100,7 @@ class NotesService:
         return response
 
     async def list_notes(self, category: str | None = None) -> list[dict[str, Any]]:
-        """Return all notes as German summary dicts (no `content`/content).
+        """Return all notes as summary dicts (no `content`).
 
         `category` filters server-side; `exclude=content` keeps the response
         cheap for a plain listing - `get_note` fetches a single note in full.

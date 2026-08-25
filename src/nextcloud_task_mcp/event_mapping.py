@@ -1,4 +1,4 @@
-"""Translation between the server's German event fields and iCalendar VEVENT properties."""
+"""Translation between the server's event fields and iCalendar VEVENT properties."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ STATUS_LABELS: dict[str, str] = {
 }
 _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
 
-# RFC 5545 RELTYPE -> German relation name used in the `linked_tasks`
+# RFC 5545 RELTYPE -> the relation name used in the `linked_tasks`
 # entries returned by `parse_vevent`. A RELATED-TO property without an
 # explicit RELTYPE parameter means PARENT per RFC 5545 (handled where the
 # parameter is read, in `_extract_related` and `add_relation`).
@@ -76,7 +76,7 @@ RELTYPE_LABELS: dict[str, str] = {
     "SIBLING": "sibling",
 }
 
-# RFC 5545 PARTSTAT -> German attendee-status label surfaced in `attendees`
+# RFC 5545 PARTSTAT -> the attendee-status label surfaced in `attendees`
 # entries (parse_vevent). A missing PARTSTAT parameter means NEEDS-ACTION per
 # RFC 5545.
 PARTSTAT_LABELS: dict[str, str] = {
@@ -98,7 +98,7 @@ RESPOND_PARTSTAT_LABELS: dict[str, str] = {
     "tentative": "TENTATIVE",
 }
 
-# RFC 5545 ROLE -> German label, surfaced in `attendees` entries and accepted
+# RFC 5545 ROLE -> the role label, surfaced in `attendees` entries and accepted
 # in `attendees` entries passed to create_event/update_event. A missing ROLE
 # parameter means REQ-PARTICIPANT per RFC 5545.
 ROLE_LABELS: dict[str, str] = {
@@ -109,7 +109,7 @@ ROLE_LABELS: dict[str, str] = {
 }
 _ICAL_ROLE_TO_LABEL: dict[str, str] = {v: k for k, v in ROLE_LABELS.items()}
 
-# Maps the German, LLM-facing `clear_fields` entry name to the
+# Maps the LLM-facing `clear_fields` entry name to the
 # (EventFields attribute name, iCalendar property name) it clears. "title"
 # and "start" are deliberately absent - clearing them is not a supported
 # operation (a VEVENT without DTSTART is not addressable in any useful way).
@@ -142,7 +142,7 @@ class EventFields:
     """The optional event fields shared by create_event/update_event, in one place.
 
     Mirrors `mapping.TaskFields`: the MCP tool functions keep their flat,
-    German, umlaut-bearing parameter lists - that's the LLM-facing tool
+    flat parameter lists - that's the LLM-facing tool
     contract - and build an `EventFields` internally; everything below that
     layer works with this dataclass instead of a long kwarg list.
 
@@ -421,7 +421,7 @@ def birthday_fields(
 
 
 def status_label_to_ical(label: str) -> str:
-    """Map a German event status label to an RFC 5545 STATUS value."""
+    """Map an event status label to an RFC 5545 STATUS value."""
     try:
         return STATUS_LABELS[label]
     except KeyError:
@@ -431,7 +431,7 @@ def status_label_to_ical(label: str) -> str:
 
 
 def ical_status_to_label(value: str | None) -> str | None:
-    """Map an RFC 5545 STATUS value back to a German label.
+    """Map an RFC 5545 STATUS value back to a status label.
 
     Unknown or missing values parse as None rather than raising - other
     clients may write statuses (or X- extensions) this server doesn't model.
@@ -442,7 +442,7 @@ def ical_status_to_label(value: str | None) -> str | None:
 
 
 def role_label_to_ical(label: str) -> str:
-    """Map a German attendee-role label to an RFC 5545 ATTENDEE ROLE value."""
+    """Map an attendee-role label to an RFC 5545 ATTENDEE ROLE value."""
     try:
         return ROLE_LABELS[label]
     except KeyError:
@@ -452,7 +452,7 @@ def role_label_to_ical(label: str) -> str:
 
 
 def ical_role_to_label(value: str | None) -> str:
-    """Map an RFC 5545 ROLE value back to a German label.
+    """Map an RFC 5545 ROLE value back to a role label.
 
     A missing ROLE means REQ-PARTICIPANT ("required") per RFC 5545.
     Unknown values (written by other CalDAV clients) pass through lowercased
@@ -465,7 +465,7 @@ def ical_role_to_label(value: str | None) -> str:
 
 
 def response_label_to_partstat(label: str) -> str:
-    """Map a German RSVP-reply label (respond_to_event's `response`) to PARTSTAT."""
+    """Map an RSVP-reply label (respond_to_event's `response`) to PARTSTAT."""
     try:
         return RESPOND_PARTSTAT_LABELS[label]
     except KeyError:
@@ -475,7 +475,7 @@ def response_label_to_partstat(label: str) -> str:
 
 
 def ical_partstat_to_label(value: str | None) -> str:
-    """Map an RFC 5545 PARTSTAT value back to a German label.
+    """Map an RFC 5545 PARTSTAT value back to an attendee-status label.
 
     A missing PARTSTAT means NEEDS-ACTION ("pending") per RFC 5545. Unknown
     values pass through lowercased rather than raising - same policy as
@@ -843,7 +843,7 @@ def _text(component, name: str) -> str | None:
 def _format_end(component, start_value: date | datetime | None) -> str | None:
     """Return the event's end as an ISO string, or None.
 
-    An all-day DTEND is exclusive per RFC 5545; the German `end` field is
+    An all-day DTEND is exclusive per RFC 5545; this server's `end` field is
     the inclusive last day, so one day is subtracted on the way out. When
     DTEND is absent but a DURATION is present, the end is computed as
     start + duration (RFC 5545 allows either form); with neither, None.
@@ -1043,7 +1043,7 @@ def _write_exdates(event, values, *, zone, all_day: bool) -> None:
 
 
 def parse_vevent(component) -> dict[str, Any]:
-    """Parse an icalendar VEVENT component into the server's German event dict.
+    """Parse an icalendar VEVENT component into the server's event dict.
 
     `all_day` is True when DTSTART is a bare date (all-day event);
     `recurrence_id` carries the RECURRENCE-ID of a materialized single
@@ -1269,7 +1269,7 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
     expanded to the full *local* day(s) they cover (the server's default
     timezone, matching every other day window), using the same DTEND/DURATION
     fallback as `_format_end` - but returning the *exclusive* end datetime
-    (unlike the German `end` field, which is inclusive), since that's the
+    (unlike this server's `end` field, which is inclusive), since that's the
     natural representation for an interval to be merged with others in
     `merge_busy_intervals`. An event with an end at or before its start
     collapses to a zero-length interval at its start rather than going

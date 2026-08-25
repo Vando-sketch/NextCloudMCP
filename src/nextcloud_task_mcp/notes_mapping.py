@@ -1,4 +1,4 @@
-"""Translation between the server's German note fields and the Notes API's JSON note objects."""
+"""Translation between the server's note fields and the Notes API's JSON note objects."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def _format_modified(modified: Any) -> str | None:
 
 
 def parse_note_summary(note: dict[str, Any]) -> dict[str, Any]:
-    """Parse a Notes API note object into the server's German summary dict.
+    """Parse a Notes API note object into the server's summary dict.
 
     Used for list_notes/search_notes, which deliberately omit `content`
     (content) to keep a listing cheap - `get_note` returns the full note.
@@ -73,7 +73,7 @@ def parse_note_summary(note: dict[str, Any]) -> dict[str, Any]:
 
 
 def parse_note(note: dict[str, Any]) -> dict[str, Any]:
-    """Parse a Notes API note object into the server's full German note dict."""
+    """Parse a Notes API note object into the server's full note dict."""
     result = parse_note_summary(note)
     result["content"] = note.get("content") or ""
     result["read_only"] = bool(note.get("readonly", False))

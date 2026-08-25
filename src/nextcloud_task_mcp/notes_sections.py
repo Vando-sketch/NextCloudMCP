@@ -1,7 +1,7 @@
 """Markdown section addressing for the update_note_section tool.
 
 Pure text transformation, deliberately separate from notes_client.py (HTTP)
-and notes_mapping.py (German <-> JSON field translation) so it can be tested
+and notes_mapping.py (field <-> JSON translation) so it can be tested
 without either.
 
 Only ATX headings are recognized, following CommonMark's shape: up to three
