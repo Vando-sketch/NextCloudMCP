@@ -7,7 +7,7 @@ src/nextcloud_task_mcp/
 ├── server.py         FastMCP app: tool definitions, error-to-ToolError translation, entrypoint
 ├── personal_auth.py  OAuth 2.1 provider (vendored from crumrine/fastmcp-personal-auth)
 ├── caldav_client.py  CalDavService: persistent CalDAV connection + task CRUD
-├── mapping.py        German task fields <-> iCalendar VTODO properties
+├── mapping.py        Task field vocabulary <-> iCalendar VTODO properties
 ├── config.py         Settings.from_env(): all configuration from environment variables
 └── errors.py         User-facing exception hierarchy (TaskMcpError + subclasses)
 ```
@@ -32,7 +32,7 @@ src/nextcloud_task_mcp/
    `threading.RLock` inside `CalDavService` serializes all actual CalDAV operations against
    the shared `DAVClient`/HTTP session - correctness over parallel Nextcloud access, while
    the event loop itself stays free.
-5. `mapping.py` converts between the tool-level German field names and raw iCalendar
+5. `mapping.py` converts between the tool-level field vocabulary and raw iCalendar
    properties in both directions.
 
 ## Design decisions
@@ -117,13 +117,20 @@ debugging.
 default 30s) into `DAVClient`, so a hung Nextcloud server can no longer hang this server
 forever.
 
-**German tool schema on purpose.** The tool parameters (`due_date`, `priority`,
-`parent_task`, ...) are the literal MCP schema field names. Since the server is
-operated in German via Claude, keeping the schema in German gives the model the most
-direct mapping from user language to tool arguments. The names are ASCII-transliterated
-(`ä`→`ae`, `ü`→`ue`) because the Anthropic API rejects tool schemas whose property names
+**English tool schema.** The tool parameters (`due_date`, `priority`, `parent_task`,
+...), result keys and enum values are all the literal MCP schema names, in English.
+Earlier revisions of this server mixed English tool names with German parameters,
+result keys and enum values - the schema was operated in German via Claude, on the
+theory that mapping tool arguments directly onto the primary operator's own language
+gave the model the shortest path from user intent to a correct call. That mix was
+translated to English throughout for a single, portable contract any client can read
+without a German glossary (see the changelog's "All German naming translated to
+English" entry for the full before/after vocabulary). Property names still have to be
+plain ASCII either way: the Anthropic API rejects tool schemas whose property names
 fall outside `^[a-zA-Z0-9_.-]{1,64}$` - literal umlauts in parameter names made the API
-refuse the entire tool list at connect time. Code, comments and docs stay English.
+refuse the entire tool list at connect time, which was the original reason German names
+were transliterated (`ä`→`ae`, `ü`→`ue`) rather than written verbatim. Code, comments
+and docs stay English.
 
 ## Testing strategy
 

@@ -68,7 +68,7 @@ def parse_note_summary(note: dict[str, Any]) -> dict[str, Any]:
         "title": note.get("title"),
         "category": note.get("category") or None,
         "favorite": bool(note.get("favorite", False)),
-        "changed": _format_modified(note.get("modified")),
+        "modified": _format_modified(note.get("modified")),
     }
 
 
@@ -76,5 +76,5 @@ def parse_note(note: dict[str, Any]) -> dict[str, Any]:
     """Parse a Notes API note object into the server's full German note dict."""
     result = parse_note_summary(note)
     result["content"] = note.get("content") or ""
-    result["schreibgeschuetzt"] = bool(note.get("readonly", False))
+    result["read_only"] = bool(note.get("readonly", False))
     return result

@@ -173,7 +173,7 @@ def test_calendar_lifecycle(live_service):
 
         calendars = live_service.list_calendars()
         entry = next(c for c in calendars if c["name"] == name_a)
-        assert "VEVENT" in entry["komponenten"]
+        assert "VEVENT" in entry["components"]
         assert entry["color"].upper().startswith("#FF7A66")
 
         renamed = live_service.update_calendar(name_a, new_display_name=name_b, color="#00679e")
@@ -193,11 +193,11 @@ def test_event_lifecycle(live_service, test_calendar):
     uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
-            title="Integrationstest-Event",
+            title="Integration-Test-Event",
             start="2026-09-01T14:00:00",
             end="2026-09-01T15:00:00",
-            location="Testort",
-            description="Vom Integrationstest erstellt; kann weg.",
+            location="Test location",
+            description="Created by the integration test; safe to delete.",
             tags=["MCP-Test"],
             status="confirmed",
             reminders=["-PT30M"],
@@ -205,7 +205,7 @@ def test_event_lifecycle(live_service, test_calendar):
     )
 
     fetched = live_service.get_event(test_calendar, uid)
-    assert fetched["title"] == "Integrationstest-Event"
+    assert fetched["title"] == "Integration-Test-Event"
     assert fetched["start"] == "2026-09-01T14:00:00+02:00"
     assert fetched["end"] == "2026-09-01T15:00:00+02:00"
     assert fetched["status"] == "confirmed"
@@ -217,10 +217,10 @@ def test_event_lifecycle(live_service, test_calendar):
     assert any(e["uid"] == uid for e in listed)
 
     live_service.update_event(
-        test_calendar, uid, event_mapping.EventFields(location="Neuer Location", status="tentative")
+        test_calendar, uid, event_mapping.EventFields(location="New location", status="tentative")
     )
     updated = live_service.get_event(test_calendar, uid)
-    assert updated["location"] == "Neuer Location"
+    assert updated["location"] == "New location"
     assert updated["status"] == "tentative"
 
     live_service.update_event(test_calendar, uid, event_mapping.EventFields(clear=("location",)))
@@ -255,7 +255,7 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
     series_uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
-            title="Wöchentlicher Test",
+            title="Weekly-Test",
             start="2026-09-07T10:00:00",
             end="2026-09-07T11:00:00",
             recurrence="FREQ=WEEKLY;BYDAY=MO;COUNT=4",
@@ -267,13 +267,13 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
     hits = live_service.list_events(
         calendar_names=[test_calendar], start="2026-09-20", end="2026-09-22"
     )
-    assert any(e["title"] == "Wöchentlicher Test" for e in hits)
+    assert any(e["title"] == "Weekly-Test" for e in hits)
 
     # Expansion yields the individual occurrences, minus the EXDATE one.
     expanded = live_service.list_events(
         calendar_names=[test_calendar], start="2026-09-01", end="2026-09-30", expand=True
     )
-    occurrences = [e for e in expanded if e["title"] == "Wöchentlicher Test"]
+    occurrences = [e for e in expanded if e["title"] == "Weekly-Test"]
     starts = sorted(e["start"] for e in occurrences)
     try:
         assert len(occurrences) == 3  # 4 occurrences minus 1 exception
@@ -288,9 +288,9 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
     task_uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            title="Verknüpfungstest-Task",
+            title="Link-Test-Task",
             due_date="2026-09-03T16:00:00",
-            notes="Vom Integrationstest erstellt; kann weg.",
+            notes="Created by the integration test; safe to delete.",
         ),
     )
     event_uid: str | None = None
@@ -301,7 +301,7 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
             test_list_name, task_uid, test_calendar, duration_minutes=45
         )
         event = live_service.get_event(test_calendar, event_uid)
-        assert event["title"] == "Verknüpfungstest-Task"
+        assert event["title"] == "Link-Test-Task"
         assert event["start"] == "2026-09-03T16:00:00+02:00"
         assert event["end"] == "2026-09-03T16:45:00+02:00"
         assert {"uid": task_uid, "relation": "time_block"} in event["linked_tasks"]
@@ -420,7 +420,7 @@ def test_move_task_keeps_uid_and_fields(live_service, test_list_name, move_targe
             due_date="2026-09-11",
             priority="high",
             tags=["MCP-Test"],
-            notes="Vom Integrationstest erstellt; kann weg.",
+            notes="Created by the integration test; safe to delete.",
         ),
     )
     before = live_service.get_task(test_list_name, uid)
@@ -445,14 +445,14 @@ def test_move_task_reparents_in_the_target_list(live_service, test_list_name, mo
     """The whole point of the hierarchy shortcut: one call, and the parent is the new one."""
     parent_uid = live_service.create_task(
         move_target_list,
-        mapping.TaskFields(title="Neue Eltern-Task", notes="Integrationstest; kann weg."),
+        mapping.TaskFields(title="New parent task", notes="Integration test; safe to delete."),
     )
     child_uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            title="Move-und-Umhaenge-Test",
-            parent_task="alter-parent-uid",
-            notes="Integrationstest; kann weg.",
+            title="Move-and-Reparent-Test",
+            parent_task="old-parent-uid",
+            notes="Integration test; safe to delete.",
         ),
     )
 
@@ -539,8 +539,8 @@ def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
             [*uids, "does-not-exist-mcp-test"],
             event_mapping.EventFields(location="Batch-Location", tags=["MCP-Test"]),
         )
-        assert result["erfolgreich"] == 3
-        assert result["fehlgeschlagen"] == 1
+        assert result["succeeded"] == 3
+        assert result["failed"] == 1
         assert result["results"][-1]["status"] == "error"
 
         for uid in uids:
@@ -550,7 +550,7 @@ def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
     finally:
         deleted = live_service.delete_events(test_calendar, uids)
 
-    assert deleted["erfolgreich"] == 3
+    assert deleted["succeeded"] == 3
     for uid in uids:
         with pytest.raises(EventNotFoundError):
             live_service.get_event(test_calendar, uid)
@@ -612,12 +612,12 @@ def test_notes_full_lifecycle() -> None:
             # emoji, a fenced code block, trailing spaces, a trailing newline -
             # since that is what a rules note actually contains.
             demanding_payload = (
-                "First Zeile mit Umlauten: ÄÖÜäöüß.\n"
-                "Zweite Zeile mit Emoji: 🚀 und 📝.\n"
-                "Dritte Zeile mit Leerzeichen am End:   \n"
+                "First line with umlauts: ÄÖÜäöüß.\n"
+                "Second line with emoji: 🚀 and 📝.\n"
+                "Third line with trailing spaces:   \n"
                 "```python\n"
                 "def hello_world():\n"
-                '    print("Hallo Welt!")\n'
+                '    print("Hello world!")\n'
                 "```\n"
             )
             updated = await service.update_note(note_id, NoteFields(content=demanding_payload))
@@ -628,7 +628,7 @@ def test_notes_full_lifecycle() -> None:
             # replacement untruncated - the whole point of this suite is that
             # the deployment's rules live in a note of roughly this size.
             large_payload = "\n".join(
-                f"{index:04d} Regelzeile mit Umlauten äöü und etwas Fülltext zur Länge."
+                f"{index:04d} Rule line with umlauts äöü and some filler text for length."
                 for index in range(300)
             )
             assert len(large_payload) > 12_000
@@ -649,8 +649,8 @@ def test_notes_full_lifecycle() -> None:
             assert after_rename["content"] == demanding_payload
 
             # 4. Appending twice keeps everything that was there before.
-            first_block = "Erster Anhang block-test"
-            second_block = "Zweiter Anhang block-test"
+            first_block = "First attachment block-test"
+            second_block = "Second attachment block-test"
             await service.append_note(note_id, first_block)
             await service.append_note(note_id, second_block)
             appended = await service.get_note(note_id)
@@ -669,7 +669,7 @@ def test_notes_full_lifecycle() -> None:
             # title is lower-case, so a hit proves the search folds case rather
             # than matching by accident.
             assert any(
-                note["id"] == note_id for note in await service.search_notes("erster anhang")
+                note["id"] == note_id for note in await service.search_notes("first attachment")
             )
             assert any(
                 note["id"] == note_id for note in await service.search_notes("MCP-NOTES-RENAMED")

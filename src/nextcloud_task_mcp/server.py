@@ -123,8 +123,8 @@ def _slim_rows(
         unknown = sorted(set(fields) - valid_keys)
         if unknown:
             raise ToolError(
-                f"Unknown fields-Entries: {', '.join(unknown)}. "
-                f"Gültige Field_names: {', '.join(sorted(valid_keys))}"
+                f"Unknown fields entries: {', '.join(unknown)}. "
+                f"Valid field names: {', '.join(sorted(valid_keys))}"
             )
         wanted = set(fields)
         rows = [{key: value for key, value in row.items() if key in wanted} for row in rows]
@@ -141,8 +141,8 @@ def _slim_rows(
                 continue
             if key == text_key and isinstance(value, str) and len(value) > _COMPACT_TEXT_LIMIT:
                 value = (
-                    value[:_COMPACT_TEXT_LIMIT]
-                    + f"… [truncated start {len(value)} Characters - Full_text über {detail_tool}]"
+                    value[:_COMPACT_TEXT_LIMIT] + f"… [truncated, {len(value)} characters total - "
+                    f"get the full text via {detail_tool}]"
                 )
             out[key] = value
         slimmed.append(out)
@@ -731,32 +731,29 @@ def build_server(
         parent_task: str | None = None,
         clear_fields: list[str] | None = None,
     ) -> dict[str, str]:
-        """Moves eine Task in eine andere Task_list, optional mit neuer Hierarchy.
+        """Move a task to a different task list, optionally re-parenting it too.
 
         Args:
-            list_name: Display-Name der Source-Task_list.
-            task_uid: UID der zu moving Task.
-            target_list: Display-Name der Target-Task_list.
-            parent_task: Optionale UID der neuen parent
-                Task, set in der Target-List nachdem das Move
-                geklappt hat - erspart den zweiten update_task-Call, denn
-                beim List_change wechselt fast immer auch die Hierarchy.
-                Wie bei update_task ersetzt das die existing Link
-                (RELATED-TO), es kommt keine dazu.
-            clear_fields: Optional ["parent_task"], um die Task
-                stattdessen aus ihrer Hierarchy zu loesen - der uebliche Fall,
-                wenn die parent Task in der Source-List back
-                bleibt. Andere Field_names sind hier nicht erlaubt (dafuer gibt es
-                update_task), ebenso wenig das concurrent Setzen und Leeren
-                desselben Field.
+            list_name: Display name of the source task list.
+            task_uid: UID of the task to move.
+            target_list: Display name of the target task list.
+            parent_task: Optional UID of the new parent task, set in the target list
+                after the move succeeds - this saves a second update_task call, since
+                changing the list almost always changes the hierarchy too. As with
+                update_task, this replaces the existing link (RELATED-TO); it does
+                not add to it.
+            clear_fields: Optional ["parent_task"], to detach the task from its
+                hierarchy instead - the usual case when the parent task stays
+                behind in the source list. No other field names are allowed here
+                (use update_task for that), and setting and clearing the same
+                field in the same call is not allowed either.
 
         Returns:
-            {"uid": ..., "from": Source-List, "to": Target-List,
+            {"uid": ..., "from": source list, "to": target list,
             "method": "MOVE" | "copied"}; additionally
-            "hierarchy": "set" | "cleared", wenn die parent
-            Task also_changed wurde. Schlaegt nur die Hierarchy-Change
-            fehl, meldet der Error explicitly, dass das Move selbst
-            bestand hat.
+            "hierarchy": "set" | "cleared" if the parent task was also changed.
+            If only the hierarchy change fails, the error explicitly states
+            that the move itself succeeded.
         """
 
         res: dict[str, str] = await _call(
@@ -775,7 +772,7 @@ def build_server(
 
         Returns:
             A list of {"name": display name, "url": internal CalDAV URL/ID,
-            "color": "#RRGGBB" color or None, "komponenten": supported
+            "color": "#RRGGBB" color or None, "components": supported
             component names (e.g. ["VEVENT"])} dicts.
         """
         return await _call(caldav_service.list_calendars)
@@ -956,7 +953,7 @@ def build_server(
                 event["exception_dates"] = {
                     "count": len(exdates),
                     "first": exdates[:5],
-                    "note": "truncated - full List über get_event abrufen",
+                    "note": "truncated - get the full list via get_event",
                 }
             processed_events.append(event)
         return _slim_rows(
@@ -1085,7 +1082,7 @@ def build_server(
         here, they are the convention every entry in the birthday calendar
         follows. What gets written:
 
-        - Title "🎂 <name> (<Birth_year>)" - without the parentheses when no
+        - Title "🎂 <name> (<birth year>)" - without the parentheses when no
           birth year is known.
         - An all-day, one-day event starting on the *birth* date, so each
           occurrence's year minus the start year is the age being celebrated.
@@ -1097,7 +1094,7 @@ def build_server(
         Args:
             name: The person's name, without the cake and without the year
                 (both are added). Passing a title read back from an existing
-                entry ("🎂 Papa (1975)") works too - the cake is not doubled
+                entry ("🎂 Dad (1975)") works too - the cake is not doubled
                 and the year in parentheses is read as the birth year.
             date: The birthday as "MM-DD" (e.g. "07-04"), or as a full
                 "YYYY-MM-DD" whose year is the year of BIRTH. Never fill in
@@ -1250,7 +1247,7 @@ def build_server(
                 clear_fields.
 
         Returns:
-            Dict containing calendar_name, erfolgreich count, fehlgeschlagen count,
+            Dict containing calendar_name, succeeded count, failed count,
             and results list with per-UID statuses.
         """
         fields = event_mapping.EventFields(
@@ -1344,8 +1341,8 @@ def build_server(
                 results.append(entry)
         return {
             "calendar_name": res["calendar_name"],
-            "succeeded": res["erfolgreich"],
-            "failed": res["fehlgeschlagen"],
+            "succeeded": res["succeeded"],
+            "failed": res["failed"],
             "results": results,
         }
 
@@ -1367,7 +1364,7 @@ def build_server(
                 preserving order.
 
         Returns:
-            Dict containing calendar_name, erfolgreich count, fehlgeschlagen count,
+            Dict containing calendar_name, "succeeded" count, "failed" count,
             and results list with per-UID statuses.
         """
         res: dict[str, Any] = await _call(caldav_service.delete_events, calendar_name, event_uids)
@@ -1381,31 +1378,28 @@ def build_server(
         linked_task: str | None = None,
         clear_fields: list[str] | None = None,
     ) -> dict[str, str]:
-        """Moves einen Calendar_entry in einen anderen Calendar, optional new_text linked.
+        """Move a calendar entry to a different calendar, optionally re-linking it too.
 
         Args:
-            calendar_name: Display-Name des Source-Calendar.
-            event_uid: UID des zu moving Calendar_entry.
-            target_calendar: Display-Name des Target-Calendar.
-            linked_task: Optionale UID der Task, mit der der Entry
-                linked werden soll, set im Target-Calendar nachdem das
-                Move geklappt hat - erspart den zweiten
-                update_event-Call. Wie bei update_event ersetzt das die
-                gesamte RELATED-TO-Menge des Entry (auch eine
-                "prerequisite"-Link); link_task_to_event ist die
-                additive Variante.
-            clear_fields: Optional ["linked_task"], um die
-                Tasks-Links des Entry stattdessen zu entfernen.
-                Andere Field_names sind hier nicht erlaubt (dafuer gibt es
-                update_event), ebenso wenig das concurrent Setzen und Leeren
-                desselben Field.
+            calendar_name: Display name of the source calendar.
+            event_uid: UID of the calendar entry to move.
+            target_calendar: Display name of the target calendar.
+            linked_task: Optional UID of the task to link the entry to, set in the
+                target calendar after the move succeeds - this saves a second
+                update_event call. As with update_event, this replaces the entry's
+                entire set of RELATED-TO links (including a "prerequisite" link);
+                link_task_to_event is the additive variant.
+            clear_fields: Optional ["linked_task"], to remove the entry's task
+                links instead. No other field names are allowed here (use
+                update_event for that), and setting and clearing the same field
+                in the same call is not allowed either.
 
         Returns:
-            {"uid": ..., "from": Source-Calendar, "to": Target-Calendar,
+            {"uid": ..., "from": source calendar, "to": target calendar,
             "method": "MOVE" | "copied"}; additionally
-            "hierarchy": "set" | "cleared", wenn die Link
-            also_changed wurde. Schlaegt nur die Link fehl, meldet der
-            Error explicitly, dass das Move selbst bestand hat.
+            "hierarchy": "set" | "cleared" if the link was also changed.
+            If only the link change fails, the error explicitly states that
+            the move itself succeeded.
         """
 
         res: dict[str, str] = await _call(
@@ -1624,25 +1618,25 @@ def build_server(
         calendar_names: list[str] | None = None,
         list_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Aggregated Tags (CATEGORIES) und Frequency über Collections abrufen.
+        """Get aggregated tags (CATEGORIES) and their frequency across collections.
 
-        Liest alle VEVENT-Events und VTODO-Tasks (including completed Tasks)
-        aus den angegebenen Calendars und Lists. Die Zusammenfassung erfolgt
-        case-insensitiv; als Tag-Name wird die häufigste Schreibweise gemeldet, bei
-        Tie die alphabetisch first - damit zwei gleiche Calls nicht
-        unterschiedlich antworten, nur weil der Server anders sortiert hat.
+        Reads all VEVENT events and VTODO tasks (including completed tasks) from
+        the given calendars and lists. Aggregation is case-insensitive; the
+        reported tag name is the most frequent spelling, with ties broken
+        alphabetically first - so two identical calls don't answer differently
+        just because the server happened to sort differently.
 
-        NOTE: Dies ist eine aufwendige Operation, da die Collections vollständig
-        ohne Time_window ausgelesen werden; solange sie läuft, warten andere
-        Calls auf dieselbe CalDAV-Verbindung.
+        NOTE: This is an expensive operation, since the collections are read in
+        full with no time window; other calls on the same CalDAV connection wait
+        while it runs.
 
         Args:
-            calendar_names: List start Calendar_names. None = alle Calendar, [] = keine Calendar.
-            list_names: List start Task_lists-Names. None = alle Lists, [] = keine Lists.
+            calendar_names: List of calendar names. None = all calendars, [] = none.
+            list_names: List of task list names. None = all lists, [] = none.
 
         Returns:
-            Eine List start {"tag": Tag-Name, "count": Count} Dicts, sortiert to
-            count absteigend, bei Tie alphabetisch to tag.
+            A list of {"tag": tag name, "count": count} dicts, sorted by count
+            descending, ties broken alphabetically by tag.
         """
         return await _call(
             caldav_service.list_tags,
@@ -1676,7 +1670,7 @@ def build_server(
 
         Returns:
             {"start": range start, "end": range end, "user": user,
-            "belegt": merged, sorted busy intervals as a list of
+            "busy": merged, sorted busy intervals as a list of
             {"start": iso, "end": iso} dicts}. Cancelled and "transparent"
             (does-not-block-time) events are excluded from your own
             availability; overlapping/back-to-back busy blocks are merged
@@ -1748,7 +1742,7 @@ def build_server(
         Returns:
             A list of {"recipient": user/group id, "type": "user" or
             "group", "write_access": bool, "status": invite status, e.g.
-            "akzeptiert"/"pending"/"abgelehnt" (an unrecognized raw status
+            "accepted"/"pending"/"declined" (an unrecognized raw status
             from the server comes back lowercased instead of being dropped)}
             dicts.
         """
@@ -1815,8 +1809,8 @@ def build_server(
                 VEVENT or VTODO.
 
         Returns:
-            {"calendar_name", "importiert": number of calendar objects
-            created, "uebersprungen": number skipped because the target
+            {"calendar_name", "imported": number of calendar objects
+            created, "skipped": number skipped because the target
             calendar doesn't support that component kind}.
         """
         return await _call(caldav_service.import_ics, calendar_name, ics)
@@ -1834,7 +1828,7 @@ def build_server(
 
         Returns:
             A list of {"id": note id, "title": title, "category": category
-            name or None, "favorite": bool, "changed": ISO 8601 last-modified
+            name or None, "favorite": bool, "modified": ISO 8601 last-modified
             timestamp or None} dicts. Note content is not included here - use
             get_note to read a specific note's content.
         """
@@ -1849,8 +1843,8 @@ def build_server(
 
         Returns:
             {"id", "title", "category" (or None), "content": full content,
-            "favorite": bool, "changed": ISO 8601 last-modified timestamp or
-            None, "schreibgeschuetzt": True if the note is read-only}.
+            "favorite": bool, "modified": ISO 8601 last-modified timestamp or
+            None, "read_only": True if the note is read-only}.
         """
         return await _call_notes(notes_svc.get_note(note_id))
 

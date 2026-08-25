@@ -103,7 +103,7 @@ def test_list_notes_excludes_content_and_parses_summaries():
             "category": None,
             "favorite": False,
             # Output timestamps carry the server's default timezone.
-            "changed": "1970-01-01T01:00:00+01:00",
+            "modified": "1970-01-01T01:00:00+01:00",
         }
     ]
     assert captured[0].url.params["exclude"] == "content"
@@ -147,7 +147,7 @@ def test_get_note_parses_full_note():
 
     assert result["id"] == 42
     assert result["content"] == "Body"
-    assert result["schreibgeschuetzt"] is False
+    assert result["read_only"] is False
 
 
 def test_get_note_not_found_raises():
@@ -357,33 +357,33 @@ def test_replace_in_note_replaces_single_occurrence():
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         if request.method == "GET":
-            return _json_response(200, _note_body("Anfang\n\nAlter Absatz.\n\nEnde"))
-        return _json_response(200, _note_body("Anfang\n\nNeuer Absatz.\n\nEnde"))
+            return _json_response(200, _note_body("Beginning\n\nOld paragraph.\n\nEnd"))
+        return _json_response(200, _note_body("Beginning\n\nNew paragraph.\n\nEnd"))
 
     service = _service(handler)
-    result = _run(service.replace_in_note(1, "Alter Absatz.", "Neuer Absatz."))
+    result = _run(service.replace_in_note(1, "Old paragraph.", "New paragraph."))
 
     put_call = next(c for c in calls if c.method == "PUT")
-    assert json.loads(put_call.content) == {"content": "Anfang\n\nNeuer Absatz.\n\nEnde"}
-    assert result["content"] == "Anfang\n\nNeuer Absatz.\n\nEnde"
+    assert json.loads(put_call.content) == {"content": "Beginning\n\nNew paragraph.\n\nEnd"}
+    assert result["content"] == "Beginning\n\nNew paragraph.\n\nEnd"
 
 
 def test_replace_in_note_handles_multiline_markdown_passages():
     calls: list[httpx.Request] = []
-    old = "- [Link](https://a.example)\n- **fett** und *kursiv*"
-    new = "- [Link](https://b.example)\n- nur noch Text"
+    old = "- [Link](https://a.example)\n- **bold** and *italic*"
+    new = "- [Link](https://b.example)\n- just text now"
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         if request.method == "GET":
-            return _json_response(200, _note_body(f"Kopf\n\n{old}\n\nFuss"))
-        return _json_response(200, _note_body("egal"))
+            return _json_response(200, _note_body(f"Header\n\n{old}\n\nFooter"))
+        return _json_response(200, _note_body("whatever"))
 
     service = _service(handler)
     _run(service.replace_in_note(1, old, new))
 
     put_call = next(c for c in calls if c.method == "PUT")
-    assert json.loads(put_call.content) == {"content": f"Kopf\n\n{new}\n\nFuss"}
+    assert json.loads(put_call.content) == {"content": f"Header\n\n{new}\n\nFooter"}
 
 
 def test_replace_in_note_rejects_zero_matches_without_writing():
@@ -395,7 +395,7 @@ def test_replace_in_note_rejects_zero_matches_without_writing():
 
     service = _service(handler)
     with pytest.raises(InvalidNoteDataError, match="not found"):
-        _run(service.replace_in_note(1, "fehlt", "new_text"))
+        _run(service.replace_in_note(1, "missing", "new_text"))
     assert all(c.method == "GET" for c in calls)
 
 
@@ -404,11 +404,11 @@ def test_replace_in_note_rejects_multiple_matches_without_writing():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return _json_response(200, _note_body("x doppelt y doppelt z"))
+        return _json_response(200, _note_body("x double y double z"))
 
     service = _service(handler)
     with pytest.raises(InvalidNoteDataError, match="occurs 2 times"):
-        _run(service.replace_in_note(1, "doppelt", "einfach"))
+        _run(service.replace_in_note(1, "double", "single"))
     assert all(c.method == "GET" for c in calls)
 
 

@@ -66,7 +66,7 @@ _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
 # `linked_task`/`create_event_from_task`, both "time_block"), never by
 # a task-side operation. So the labels here reuse `link_task_to_event`'s own
 # `relation` vocabulary ("time_block"/"prerequisite") instead of the
-# generic "parent"/"untergeordnet" used on the VTODO side
+# generic "parent"/"child" used on the VTODO side
 # (mapping.py's `parent_task`) - a link written as "time_block"
 # must read back as "time_block", not a different word for the same relation.
 RELTYPE_LABELS: dict[str, str] = {
@@ -230,8 +230,8 @@ def _birthday_name_and_year(name: str) -> tuple[str, int | None]:
     """Split a birthday `name` into the bare name and a year it spells out.
 
     Strips a leading cake and a trailing "(1975)" so that passing a title read
-    back from an existing entry ("🎂 Papa (1975)") produces the same name as
-    passing "Papa" - not "🎂 🎂 Papa (1975) (1975)".
+    back from an existing entry ("🎂 Dad (1975)") produces the same name as
+    passing "Dad" - not "🎂 🎂 Dad (1975) (1975)".
     """
     cleaned = name.strip()
     while cleaned.startswith(BIRTHDAY_TITLE_PREFIX):

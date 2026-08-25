@@ -54,9 +54,9 @@ def test_apply_and_parse_round_trip():
         title="Team meeting",
         start="2026-07-20T14:00:00",
         end="2026-07-20T15:30:00",
-        location="Konferenzraum",
-        description="Sprint-Planung",
-        tags=["Work", "Wichtig"],
+        location="Conference room",
+        description="Sprint planning",
+        tags=["Work", "Important"],
         status="confirmed",
         visibility="private",
         url="https://example.com/meeting",
@@ -69,9 +69,9 @@ def test_apply_and_parse_round_trip():
     assert parsed["start"] == "2026-07-20T14:00:00+02:00"
     assert parsed["end"] == "2026-07-20T15:30:00+02:00"
     assert parsed["all_day"] is False
-    assert parsed["location"] == "Konferenzraum"
-    assert parsed["description"] == "Sprint-Planung"
-    assert set(parsed["tags"]) == {"Work", "Wichtig"}
+    assert parsed["location"] == "Conference room"
+    assert parsed["description"] == "Sprint planning"
+    assert set(parsed["tags"]) == {"Work", "Important"}
     assert parsed["reminders"] == []
     assert parsed["status"] == "confirmed"
     assert parsed["visibility"] == "private"
@@ -254,7 +254,7 @@ def test_z_suffix_datetime_input_formatted_in_default_timezone():
 
 def test_all_day_single_day_round_trip():
     event = _new_event()
-    _apply(event, title="Feiertag", start="2026-08-01", end="2026-08-01")
+    _apply(event, title="Holiday", start="2026-08-01", end="2026-08-01")
     assert _dt(event["dtend"]) == date(2026, 8, 2)  # stored exclusive
     parsed = event_mapping.parse_vevent(event)
     assert parsed["start"] == "2026-08-01"
@@ -309,7 +309,7 @@ def test_rrule_round_trip():
 def test_invalid_rrule_rejected():
     event = _new_event()
     with pytest.raises(InvalidEventDataError, match="RRULE"):
-        _apply(event, title="T", start="2026-07-20T14:00:00", recurrence="kaputt")
+        _apply(event, title="T", start="2026-07-20T14:00:00", recurrence="broken")
 
 
 def test_exdate_set_parse_and_clear():
@@ -802,12 +802,12 @@ def test_status_labels():
 
 def test_unknown_status_rejected():
     with pytest.raises(InvalidEventDataError, match="status"):
-        _apply(_new_event(), title="T", start="2026-07-20T14:00:00", status="vielleicht")
+        _apply(_new_event(), title="T", start="2026-07-20T14:00:00", status="maybe")
 
 
 def test_unknown_visibility_raises_event_error():
     with pytest.raises(InvalidEventDataError, match="visibility"):
-        _apply(_new_event(), title="T", start="2026-07-20T14:00:00", visibility="geheim")
+        _apply(_new_event(), title="T", start="2026-07-20T14:00:00", visibility="secret")
 
 
 def test_unknown_ical_status_parses_as_none():
@@ -821,7 +821,7 @@ def test_unknown_ical_status_parses_as_none():
 
 def test_clear_unknown_field_rejected():
     with pytest.raises(InvalidEventDataError, match="clear_fields"):
-        _apply(_new_event(), clear=("unbekannt",))
+        _apply(_new_event(), clear=("unknown",))
 
 
 @pytest.mark.parametrize("name", ["title", "start"])
@@ -832,7 +832,7 @@ def test_title_and_start_not_clearable(name):
 
 def test_set_and_clear_same_field_rejected():
     with pytest.raises(InvalidEventDataError, match="both set and clear"):
-        _apply(_new_event(), location="Büro", clear=("location",))
+        _apply(_new_event(), location="Office", clear=("location",))
 
 
 def test_clear_removes_properties():
@@ -842,7 +842,7 @@ def test_clear_removes_properties():
         title="T",
         start="2026-07-20T14:00:00",
         end="2026-07-20T15:00:00",
-        location="Büro",
+        location="Office",
         reminders=["-PT30M"],
     )
     _apply(event, clear=("end", "location", "reminders"))
@@ -1003,7 +1003,7 @@ def test_attendees_unknown_role_rejected():
             _new_event(),
             title="T",
             start="2026-07-20T14:00:00",
-            attendees=[{"email": "a@example.com", "role": "irgendwas"}],
+            attendees=[{"email": "a@example.com", "role": "nonsense"}],
         )
 
 
@@ -1121,10 +1121,10 @@ def test_apply_own_attendee_response_writes_comment():
     event.add("attendee", "mailto:me@example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
 
     event_mapping.apply_own_attendee_response(
-        event, ["mailto:me@example.com"], "TENTATIVE", comment="Vielleicht"
+        event, ["mailto:me@example.com"], "TENTATIVE", comment="Maybe"
     )
 
-    assert str(event.get("comment")) == "Vielleicht"
+    assert str(event.get("comment")) == "Maybe"
 
 
 def test_apply_own_attendee_response_not_an_attendee_raises():
@@ -1188,7 +1188,7 @@ def test_filter_events_search_text_matches_title_description_location():
 def test_filter_events_tag_exact_case_insensitive():
     events = [
         _event_dict(title="A", tags=["Work"], start="2026-07-20"),
-        _event_dict(title="B", tags=["Arbeitsamt"], start="2026-07-21"),
+        _event_dict(title="B", tags=["Job Center"], start="2026-07-21"),
     ]
     result = event_mapping.filter_events(events, tag="work")
     assert [e["title"] for e in result] == ["A"]
@@ -1196,13 +1196,13 @@ def test_filter_events_tag_exact_case_insensitive():
 
 def test_filter_events_sorts_dates_and_datetimes_chronologically():
     events = [
-        _event_dict(title="spät", start="2026-07-20T18:00:00"),
+        _event_dict(title="late", start="2026-07-20T18:00:00"),
         _event_dict(title="all_day", start="2026-07-20"),
-        _event_dict(title="ohne start"),
-        _event_dict(title="früher Tag", start="2026-07-19T23:00:00"),
+        _event_dict(title="no start"),
+        _event_dict(title="earlier day", start="2026-07-19T23:00:00"),
     ]
     result = event_mapping.filter_events(events)
-    assert [e["title"] for e in result] == ["früher Tag", "all_day", "spät", "ohne start"]
+    assert [e["title"] for e in result] == ["earlier day", "all_day", "late", "no start"]
 
 
 def test_filter_events_limit_returns_earliest():
@@ -1221,29 +1221,29 @@ def test_filter_events_limit_must_be_positive():
 
 def test_filter_events_without_reminder_keeps_only_events_without_reminders():
     events = [
-        dict(_event_dict(title="nackt", start="2026-07-20"), reminders=[]),
+        dict(_event_dict(title="bare", start="2026-07-20"), reminders=[]),
         dict(_event_dict(title="reminded", start="2026-07-21"), reminders=["-PT30M"]),
     ]
     res = event_mapping.filter_events(events, without_reminder=True)
-    assert [e["title"] for e in res] == ["nackt"]
+    assert [e["title"] for e in res] == ["bare"]
 
 
 def test_filter_events_without_visibility_keeps_only_events_without_class():
     events = [
-        dict(_event_dict(title="nackt", start="2026-07-20"), visibility=None),
+        dict(_event_dict(title="bare", start="2026-07-20"), visibility=None),
         dict(_event_dict(title="private", start="2026-07-21"), visibility="private"),
     ]
     res = event_mapping.filter_events(events, without_visibility=True)
-    assert [e["title"] for e in res] == ["nackt"]
+    assert [e["title"] for e in res] == ["bare"]
 
 
 def test_filter_events_without_tags_keeps_only_untagged_events():
     events = [
-        _event_dict(title="nackt", start="2026-07-20"),
-        _event_dict(title="getaggt", start="2026-07-21", tags=["Work"]),
+        _event_dict(title="bare", start="2026-07-20"),
+        _event_dict(title="tagged", start="2026-07-21", tags=["Work"]),
     ]
     res = event_mapping.filter_events(events, without_tags=True)
-    assert [e["title"] for e in res] == ["nackt"]
+    assert [e["title"] for e in res] == ["bare"]
 
 
 def test_filter_events_uid_regex_is_case_sensitive_search():
@@ -1340,7 +1340,7 @@ def test_events_in_window_keeps_what_it_cannot_judge():
     events: list[dict[str, Any]] = [
         {"uid": "series", "start": "2020-01-06T09:00:00+01:00", "recurrence": "FREQ=WEEKLY"},
         {"uid": "no-start", "start": None},
-        {"uid": "unparseable", "start": "irgendwann"},
+        {"uid": "unparseable", "start": "sometime"},
         {"uid": "elsewhere", "start": "2026-09-01T09:00:00+02:00"},
     ]
     assert _in_day(events) == ["series", "no-start", "unparseable"]
@@ -1619,7 +1619,7 @@ def test_exdate_add_of_a_whole_day_cancels_every_occurrence_on_it():
     event = _new_event()
     _apply(
         event,
-        title="Zwei am Tag",
+        title="Twice a day",
         start="2026-07-20T09:00:00",
         recurrence="FREQ=HOURLY;INTERVAL=4;BYHOUR=9,13",
     )
@@ -1712,7 +1712,7 @@ def test_exdate_remove_is_applied_before_add():
 
 def test_exdate_add_on_an_all_day_series_takes_days():
     event = _new_event()
-    _apply(event, title="Urlaubstag", start="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
+    _apply(event, title="Vacation day", start="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
 
@@ -1722,7 +1722,7 @@ def test_exdate_add_on_an_all_day_series_takes_days():
 
 def test_exdate_add_of_a_datetime_to_an_all_day_series_is_reported():
     event = _new_event()
-    _apply(event, title="Urlaubstag", start="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
+    _apply(event, title="Vacation day", start="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T09:00:00"])
 
@@ -1797,7 +1797,7 @@ def test_exdate_garbage_still_raises():
     event = _recurring()
 
     with pytest.raises(InvalidEventDataError):
-        event_mapping.apply_exdate_changes(event, add=["kein date"])
+        event_mapping.apply_exdate_changes(event, add=["not a date"])
 
 
 def test_exdate_add_reads_a_foreign_floating_exdate_in_the_default_zone():
@@ -1934,9 +1934,9 @@ def test_birthday_fields_starts_in_the_birth_year_so_the_age_is_readable():
 
 
 def test_birthday_fields_takes_the_year_from_a_full_date():
-    fields = _birthday("Mama", "1981-02-05")
+    fields = _birthday("Mom", "1981-02-05")
 
-    assert (fields.title, fields.start) == ("🎂 Mama (1981)", "1981-02-05")
+    assert (fields.title, fields.start) == ("🎂 Mom (1981)", "1981-02-05")
 
 
 def test_birthday_fields_takes_the_year_from_a_title_read_back():
@@ -1963,10 +1963,10 @@ def test_birthday_fields_rejects_conflicting_years():
 def test_birthday_fields_without_a_year_omits_it_and_starts_at_the_next_occurrence():
     # 07-02 already passed in 2026 (today is 2026-08-24), so the series starts
     # next year rather than in the past.
-    fields = _birthday("Oma Walli", "07-02")
+    fields = _birthday("Grandma Walli", "07-02")
 
     assert (fields.title, fields.start, fields.end) == (
-        "🎂 Oma Walli",
+        "🎂 Grandma Walli",
         "2027-07-02",
         "2027-07-02",
     )
@@ -1981,19 +1981,19 @@ def test_birthday_fields_without_a_year_counts_today_as_upcoming():
 
 
 def test_birthday_fields_without_a_year_finds_the_next_real_leap_day():
-    assert _birthday("Schaltjahr", "02-29").start == "2028-02-29"
+    assert _birthday("Leap Year", "02-29").start == "2028-02-29"
 
 
 def test_birthday_fields_rejects_a_leap_day_in_a_non_leap_birth_year():
     with pytest.raises(InvalidEventDataError, match="1997 is not a leap year"):
-        _birthday("Schaltjahr", "02-29", 1997)
+        _birthday("Leap Year", "02-29", 1997)
 
 
 def test_birthday_fields_keeps_a_leap_day_birth_year():
-    assert _birthday("Schaltjahr", "02-29", 1996).start == "1996-02-29"
+    assert _birthday("Leap Year", "02-29", 1996).start == "1996-02-29"
 
 
-@pytest.mark.parametrize("date", ["4.7.", "07/04", "2026-07", "07-04-1975", "Juli"])
+@pytest.mark.parametrize("date", ["4.7.", "07/04", "2026-07", "07-04-1975", "July"])
 def test_birthday_fields_rejects_unparseable_date(date):
     with pytest.raises(InvalidEventDataError, match="Could not parse date"):
         _birthday("Dad", date)

@@ -254,11 +254,11 @@ _ICAL_NS = "http://apple.com/ns/ical/"
 # elements some clients/servers use) - handled liberally rather than assumed
 # absent.
 _INVITE_STATUS_MAP = {
-    "invite-accepted": "akzeptiert",
-    "invite-declined": "abgelehnt",
+    "invite-accepted": "accepted",
+    "invite-declined": "declined",
     "invite-noresponse": "pending",
-    "invite-invalid": "ungueltig",
-    "invite-deleted": "geloescht",
+    "invite-invalid": "invalid",
+    "invite-deleted": "deleted",
 }
 
 # A trashbin object's resource name is "<numeric id>.ics" (see Nextcloud's
@@ -457,7 +457,7 @@ def _parse_invite_response(tree: Any) -> list[dict[str, Any]]:
             read_write = access_el is not None and any(
                 _local_name(child.tag) == "read-write" for child in access_el
             )
-            status = "akzeptiert"
+            status = "accepted"
             for child in user_el:
                 local = _local_name(child.tag)
                 if local.startswith("invite-"):
@@ -1917,10 +1917,10 @@ class CalDavService:
         return result
 
     def list_calendars(self) -> list[dict[str, Any]]:
-        """Return all VEVENT-supporting calendars as {"name", "url", "color", "komponenten"}.
+        """Return all VEVENT-supporting calendars as {"name", "url", "color", "components"}.
 
         Task-only lists (VTODO) are excluded - `list_task_lists` is their
-        counterpart. `komponenten` reports the full advertised component set
+        counterpart. `components` reports the full advertised component set
         so a mixed VEVENT+VTODO collection is recognizable as both.
         """
         with self._lock:
@@ -1953,7 +1953,7 @@ class CalDavService:
                         "name": name,
                         "url": str(calendar.url),
                         "color": color,
-                        "komponenten": sorted(components),
+                        "components": sorted(components),
                     }
                 )
                 if sum(1 for entry in result if entry["name"] == name) == 1:
@@ -2488,8 +2488,8 @@ class CalDavService:
 
             return {
                 "calendar_name": calendar_name,
-                "erfolgreich": succeeded,
-                "fehlgeschlagen": failed,
+                "succeeded": succeeded,
+                "failed": failed,
                 "results": results,
             }
 
@@ -3282,7 +3282,7 @@ class CalDavService:
             "start": mapping.format_datetime_output(start_bound),
             "end": mapping.format_datetime_output(end_bound),
             "user": user,
-            "belegt": [
+            "busy": [
                 {
                     "start": mapping.format_datetime_output(start),
                     "end": mapping.format_datetime_output(end),
@@ -3678,11 +3678,11 @@ class CalDavService:
         with self._lock:
             calendar = self._resolve_collection_any(calendar_name)
 
-            importiert = 0
-            uebersprungen = 0
+            imported = 0
+            skipped = 0
             for (_uid, kind), components in groups.items():
                 if not self._supports_component(calendar, kind):
-                    uebersprungen += 1
+                    skipped += 1
                     continue
 
                 sub_calendar = Calendar()
@@ -3703,10 +3703,10 @@ class CalDavService:
                     raise
                 except Exception as exc:
                     raise _translate(exc) from exc
-                importiert += 1
+                imported += 1
 
         return {
             "calendar_name": calendar_name,
-            "importiert": importiert,
-            "uebersprungen": uebersprungen,
+            "imported": imported,
+            "skipped": skipped,
         }
