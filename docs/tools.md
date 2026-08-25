@@ -143,6 +143,12 @@ Two things about the strings themselves:
 
 - Durations come back in their canonical spelling, so `"-P1W"` reads back as `"-P7D"` and
   `"-PT90M"` as `"-PT1H30M"` — the same trigger, a different string.
+- A zero-length trigger (a reminder firing exactly at the anchor date) has exactly one
+  reported spelling: `"-PT0M"`. `"P0D"`, `"PT0S"` and `"-PT0M"` are all accepted on the way
+  in and all read back as `"-PT0M"`. This is worth spelling out because the wire form varies
+  by writer — this server's iCalendar library serializes a zero trigger as `P0D`, the
+  Nextcloud Tasks UI writes `-PT0M` — so before normalization the same reminder read back
+  differently depending on which client last touched the alarm.
 - Absolute values are rendered in the server's default timezone regardless of the zone (or
   offset) they were written or stored in — the same convention `start_date`/`due_date`
   follow — and `"...Z"` input reads back with the local offset — again the same instant, not
@@ -303,8 +309,29 @@ you passed in.
 | `parent_task` | string (UID) | no | `RELATED-TO;RELTYPE=PARENT` |
 | `recurrence` | string (raw RRULE) | no | `RRULE`, e.g. `"FREQ=WEEKLY;BYDAY=MO"` |
 | `exception_dates` | list of strings (ISO 8601) | no | one `EXDATE` holding every entry |
+| `status` | string enum | no | `STATUS` (see below) |
 
 Returns `{"uid": "<new task uid>"}`.
+
+### Creating a task that is not open (`status`)
+
+Omitting `status` creates an open task, and writes no `STATUS` property at all — which
+RFC 5545 reads as `NEEDS-ACTION` anyway. Passing one of `"open"` / `"in-progress"` /
+`"completed"` / `"cancelled"` creates the task in that state instead, so importing an
+already-finished task is a single call rather than a `create_task` followed by a
+`complete_task`.
+
+The labels behave exactly as they do in `update_task`:
+
+- `"completed"` writes `STATUS:COMPLETED`, `PERCENT-COMPLETE:100` and a `COMPLETED`
+  timestamp. That timestamp is *now*, not the task's real completion time — nothing in the
+  call carries the latter, and inventing one would be worse than recording when it was
+  imported.
+- `"in-progress"` and `"cancelled"` write only `STATUS`.
+- An explicit `progress_percent` in the same call wins over the percentage `status`
+  would otherwise derive, so a task can be imported as completed while recording the
+  progress it actually had.
+- An unknown label is a speaking error naming the four accepted values; nothing is written.
 
 ### Recurrence (`recurrence`)
 
@@ -396,14 +423,14 @@ must be in the same task list.
 
 ## `update_task(list_name, task_uid, ...)`
 
-Same optional fields as `create_task` (minus `list_name`/`title`'s "required" status,
-plus):
+Same optional fields as `create_task` — `status` included (it means the same thing here,
+with the one addition that `"open"` is also the **reopen** path; see below) — minus
+`list_name`/`title`'s "required" status, plus:
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `list_name` | string | yes | Task list containing the task |
 | `task_uid` | string | yes | UID of the task to change |
-| `status` | string enum | no | `"open"` / `"in-progress"` / `"completed"` / `"cancelled"` -> `STATUS` (see below) |
 | `clear_fields` | list of strings | no | Field names to clear (see below) |
 
 Only fields explicitly present in the call are modified; everything else on the task
@@ -580,11 +607,61 @@ Result shape:
   "from": "Private",
   "to": "Work",
   "method": "MOVE",
-  "hierarchy": "set"
+  "hierarchy": "set",
+  "orphaned_subtask_links": [
+    {
+      "uid": "0f8ba4a4-...",
+      "title": "Request a quote",
+      "list": "Work",
+      "missing_parent_uid": "c1d2e3f4-..."
+    }
+  ]
 }
 ```
 
 (`"method"` is `"MOVE"` if CalDAV MOVE was used, or `"copied"` if copy+delete fallback was executed. `"hierarchy"` is only present when the parent was changed: `"set"` for a new `parent_task`, `"cleared"` for `clear_fields`.)
+
+### Orphaned subtask links (`orphaned_subtask_links`)
+
+Nextcloud Tasks resolves the subtask hierarchy — a VTODO's
+`RELATED-TO;RELTYPE=PARENT` — only *within* one task list. A move carries that property
+along unchanged, so moving one half of a parent/child pair leaves a link pointing at a UID
+its list no longer holds. Nothing about that is an error: the move succeeds, the property is
+valid, and the only visible effect is that the task silently stops being nested. `move_task`
+reports those links rather than leaving them to be discovered later.
+
+Two cases are reported, and both are the same thing seen from the child (`RELATED-TO` always
+sits on the child, never the parent):
+
+- the moved task itself, when its parent stayed behind — reported against the **target** list;
+- each subtask left behind in the **source** list that still points at the task that moved.
+
+Each entry is `{"uid", "title", "list", "fehlende_parent_uid"}`, where `uid`,
+`title` and `list` name the task *carrying* the dangling link and
+`fehlende_parent_uid` is the parent UID that is not in that list.
+
+- `[]` — the call left the hierarchy intact.
+- `null` — the check could not be run after the move. The move itself still succeeded;
+  "could not tell" is deliberately not reported as "no orphaned links".
+
+The scan runs **after** the hierarchy shortcut above, so what it reports is the state this
+*call* leaves behind rather than the one a bare move would have:
+
+- re-parenting with `parent_task` repairs the first case as it happens, so such a
+  call is not warned about the link it just fixed — nor is one that detached with
+  `clear_fields`;
+- pointing a task at a parent that lives in neither list *is* reported, because the call
+  created that dangling link;
+- a same-list call leaves no subtask behind (nothing moved), so only its own parent link is
+  checked.
+
+The second case — subtasks left behind — is the half no argument to a move can reach: each is
+a separate object in the source list. Repair those by moving them along too, or with one
+`update_task` each (`parent_task` to re-point, `clear_fields:
+["parent_task"]` to make them top-level).
+
+Completed subtasks are included in the scan: a done subtask is still nested under its
+parent.
 
 ---
 
@@ -842,7 +919,7 @@ calendar looks like:
 | `title` | `"🎂 <name> (<birth year>)"` — without the parentheses if no birth year is known |
 | `start` / `end` | The **birth** date, all-day, one day (`end` = `start`) |
 | `recurrence` | `"FREQ=YEARLY"` |
-| `tags` | `["Birthday"]` — `["Geburtstag"]` for entries written to the legacy `"Geburtstage"` calendar, so one tag still covers all of it |
+| `tags` | `["Birthday"]` — `["Birthday"]` for entries written to the legacy `"Birthdays"` calendar, so one tag still covers all of it |
 | `visibility` | `"private"` |
 | `reminders` | `["-PT0M", "-P1D"]` — on the day itself and one day before |
 
@@ -885,15 +962,15 @@ actually has, rather than assuming a fixed name:
 | Calendars present | Target | Tag written |
 |---|---|---|
 | `Birthdays` | `Birthdays` | `Birthday` |
-| `Geburtstage` only | `Geburtstage` | `Geburtstag` |
+| `Birthdays` only | `Birthdays` | `Birthday` |
 | both | `Birthdays` | `Birthday` |
 | neither | `Birthdays` | `Birthday` |
 
-`Geburtstage` is what this calendar was called before the tool vocabulary was
+`Birthdays` is what this calendar was called before the tool vocabulary was
 translated to English. A server that already files birthdays there keeps
 filing them there, so the rename does not split one person's birthdays across
 two calendars. Display names are compared **exactly** — a calendar named
-`geburtstage` is not this calendar, the same rule every other tool resolves a
+`birthdays` is not this calendar, the same rule every other tool resolves a
 calendar name by.
 
 This costs one extra calendar listing per call, and only when `calendar` is

@@ -204,7 +204,7 @@ BIRTHDAY_CALENDAR = "Birthdays"
 #: A caller who names no calendar gets `BIRTHDAY_CALENDAR`, unless only this
 #: one exists - see `resolve_birthday_calendar`. Renaming the tool vocabulary
 #: must not strand the birthdays an earlier version already filed.
-LEGACY_BIRTHDAY_CALENDAR = "Geburtstage"
+LEGACY_BIRTHDAY_CALENDAR = "Birthdays"
 
 #: Title prefix; the birth year, when known, follows the name in parentheses.
 BIRTHDAY_TITLE_PREFIX = "🎂"
@@ -214,7 +214,7 @@ BIRTHDAY_TAG = "Birthday"
 #: The tag entries in `LEGACY_BIRTHDAY_CALENDAR` were written with. The tag
 #: follows the calendar (`birthday_tag_for`) so a legacy calendar keeps one
 #: tag across all its entries instead of ending up half-tagged either way.
-LEGACY_BIRTHDAY_TAG = "Geburtstag"
+LEGACY_BIRTHDAY_TAG = "Birthday"
 BIRTHDAY_RRULE = "FREQ=YEARLY"
 BIRTHDAY_VISIBILITY = "private"
 #: On the day itself (00:00 of the all-day event) and one day before.
@@ -332,7 +332,7 @@ def resolve_birthday_calendar(existing_names: Iterable[str]) -> str:
     name is returned, so a fresh install creates the English calendar.
 
     Names are compared exactly, matching how `_resolve_collection` resolves a
-    display name to a collection - a differently-cased "geburtstage" would not
+    display name to a collection - a differently-cased "birthdays" would not
     be resolvable by this name either, so treating it as a match would only
     turn a clean "not found" into a confusing one.
     """

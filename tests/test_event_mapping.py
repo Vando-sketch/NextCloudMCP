@@ -1914,31 +1914,31 @@ def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account():
 
 
 def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar():
-    """A server set up before the rename already files birthdays in "Geburtstage"."""
-    assert event_mapping.resolve_birthday_calendar(["Work", "Geburtstage"]) == "Geburtstage"
+    """A server set up before the rename already files birthdays in "Birthdays"."""
+    assert event_mapping.resolve_birthday_calendar(["Work", "Birthdays"]) == "Birthdays"
 
 
 def test_resolve_birthday_calendar_prefers_english_when_both_exist():
-    assert event_mapping.resolve_birthday_calendar(["Geburtstage", "Birthdays"]) == "Birthdays"
+    assert event_mapping.resolve_birthday_calendar(["Birthdays", "Birthdays"]) == "Birthdays"
 
 
 def test_resolve_birthday_calendar_matches_the_name_exactly():
     """Resolution elsewhere compares display names exactly, so a differently
     cased calendar is not this calendar - claiming it would only turn a clean
     "not found" into a confusing one."""
-    assert event_mapping.resolve_birthday_calendar(["geburtstage"]) == "Birthdays"
+    assert event_mapping.resolve_birthday_calendar(["birthdays"]) == "Birthdays"
 
 
 def test_birthday_tag_follows_the_calendar():
-    assert event_mapping.birthday_tag_for("Geburtstage") == "Geburtstag"
+    assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
     assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
     assert event_mapping.birthday_tag_for("Family") == "Birthday"
 
 
 def test_birthday_fields_tags_with_the_given_tag():
-    fields = event_mapping.birthday_fields("Dad", "07-04", 1975, today=_TODAY, tag="Geburtstag")
+    fields = event_mapping.birthday_fields("Dad", "07-04", 1975, today=_TODAY, tag="Birthday")
 
-    assert fields.tags == ["Geburtstag"]
+    assert fields.tags == ["Birthday"]
     # Everything else about the convention is unchanged by the tag.
     assert fields.title == "🎂 Dad (1975)"
     assert fields.recurrence == "FREQ=YEARLY"
@@ -2093,6 +2093,7 @@ def test_birthday_fields_round_trip_through_a_vevent():
     assert parsed["recurrence"] == "FREQ=YEARLY"
     assert parsed["tags"] == ["Birthday"]
     assert parsed["visibility"] == "private"
-    # "-PT0M" is a zero-length trigger; icalendar spells that "P0D" on the way
-    # back out, which is the same moment and what the calendar already holds.
-    assert sorted(parsed["reminders"]) == ["-P1D", "P0D"]
+    # Both reminders read back exactly as BIRTHDAY_REMINDERS spells them. The
+    # zero-length one used to come back as icalendar's "P0D" - same moment,
+    # different string - until reminder output was normalized on "-PT0M".
+    assert sorted(parsed["reminders"]) == ["-P1D", "-PT0M"]

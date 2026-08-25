@@ -108,6 +108,10 @@ This project does not yet follow Semantic Versioning releases.
     `imported`/`skipped`, and `get_free_busy`'s `belegt`->`busy`.
   - Note dicts: `geaendert`->`modified`, `schreibgeschuetzt`->`read_only`.
   - `list_calendars` entries: `komponenten`->`components`.
+  - `move_task`'s dangling-link report: `verwaiste_verknuepfungen`->
+    `orphaned_subtask_links`, whose entries are
+    `{"uid", "title", "list", "missing_parent_uid"}` (was
+    `{"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}`).
   - `list_calendar_shares` invite statuses: `akzeptiert`->`accepted`,
     `abgelehnt`->`declined`, `ungueltig`->`invalid`, `geloescht`->`deleted`
     (`pending` was already English).
@@ -153,6 +157,38 @@ This project does not yet follow Semantic Versioning releases.
   blocks or a leading YAML front matter block are ignored; setext headings
   are not recognized. Both are read-then-write like `append_to_note` (the
   Notes API has no server-side patch), with the same concurrent-edit caveat.
+
+- **`create_task` takes a `status`.** Importing a task that is already done
+  took two calls - a `create_task` followed by a `complete_task` - because a
+  task could only ever be created open. `create_task` now accepts the same
+  `"offen"` / `"in-arbeit"` / `"erledigt"` / `"abgesagt"` labels `update_task`
+  does, with the same behaviour: `"erledigt"` also writes
+  `PERCENT-COMPLETE:100` and a `COMPLETED` timestamp (of the import, since the
+  real completion time is not in the call to record), `"in-arbeit"` and
+  `"abgesagt"` write only `STATUS`, and an explicit `fortschritt_prozent` in
+  the same call still wins over the percentage `status` would derive. Omitting
+  it is unchanged: no `STATUS` property is written, which is an open task.
+
+- **`move_task` reports the subtask links a move leaves dangling.** Nextcloud
+  Tasks resolves the `RELATED-TO;RELTYPE=PARENT` hierarchy only within one task
+  list, so moving one half of a parent/child pair silently un-nests it: the
+  property survives the move and points at a UID its list no longer holds, and
+  nothing anywhere reports an error. The result now carries
+  `orphaned_subtask_links`, listing both directions - the moved task's own
+  link to a parent left behind, and the links of subtasks left behind pointing
+  at it - as `{"uid", "title", "list", "missing_parent_uid"}` entries
+  naming the task that carries each dangling link. `[]` means the hierarchy
+  came through intact; `null` means the check itself could not be run
+  afterwards, which is deliberately not reported as "nothing orphaned".
+  It reports the state the *call* leaves behind, not the bare move's: the
+  `parent_task`/`clear_fields` above runs first, so a caller that
+  re-parented is not warned about the link it just repaired, and one that
+  re-pointed a task at a parent in a third list is warned about the link it
+  just created. What those arguments cannot reach is the subtasks left behind -
+  separate objects in the source list, one `update_task` each - which is
+  exactly what this warning is for.
+  The move's own outcome is unaffected either way, and `move_event`'s result
+  shape is unchanged.
 
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
@@ -399,6 +435,16 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Fixed
 
+- **A reminder firing exactly at the due date has one spelling again.** The
+  wire form of a zero-length `VALARM` trigger depends on who wrote it - this
+  server's iCalendar library serializes it as `P0D`, the Nextcloud Tasks UI
+  writes `-PT0M` - and the read path passed that difference straight through.
+  The same reminder therefore came back as `P0D` on one task and `-PT0M` on
+  another, for no reason a caller could see. Every spelling of zero
+  (`P0D`, `PT0S`, `-PT0M`, ...) is still accepted on input and now reads back
+  as `-PT0M`, joining the normalization the other durations already had
+  (`-P1W` reads back as `-P7D`, `-PT90M` as `-PT1H30M`). Non-zero reminders
+  are untouched.
 - **`move_task` rejects an expanded occurrence's UID** instead of acting on the
   whole series. Every other task tool taking a UID already refused those
   synthetic per-occurrence UIDs with an error naming the series' own UID;
