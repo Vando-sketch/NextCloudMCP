@@ -1219,6 +1219,80 @@ def test_filter_events_limit_must_be_positive():
         event_mapping.filter_events([], limit=0)
 
 
+def test_filter_events_ohne_erinnerung_keeps_only_events_without_reminders():
+    events = [
+        dict(_event_dict(titel="nackt", start="2026-07-20"), erinnerungen=[]),
+        dict(_event_dict(titel="erinnert", start="2026-07-21"), erinnerungen=["-PT30M"]),
+    ]
+    res = event_mapping.filter_events(events, ohne_erinnerung=True)
+    assert [e["titel"] for e in res] == ["nackt"]
+
+
+def test_filter_events_ohne_sichtbarkeit_keeps_only_events_without_class():
+    events = [
+        dict(_event_dict(titel="nackt", start="2026-07-20"), sichtbarkeit=None),
+        dict(_event_dict(titel="privat", start="2026-07-21"), sichtbarkeit="privat"),
+    ]
+    res = event_mapping.filter_events(events, ohne_sichtbarkeit=True)
+    assert [e["titel"] for e in res] == ["nackt"]
+
+
+def test_filter_events_ohne_tags_keeps_only_untagged_events():
+    events = [
+        _event_dict(titel="nackt", start="2026-07-20"),
+        _event_dict(titel="getaggt", start="2026-07-21", tags=["Arbeit"]),
+    ]
+    res = event_mapping.filter_events(events, ohne_tags=True)
+    assert [e["titel"] for e in res] == ["nackt"]
+
+
+def test_filter_events_uid_regex_is_case_sensitive_search():
+    events = [
+        dict(_event_dict(titel="phone", start="2026-07-20"), uid="5D3A2F00-90AB-4CDE-9AAF-01"),
+        dict(_event_dict(titel="server", start="2026-07-21"), uid="5d3a2f00-90ab-4cde-9aaf-02"),
+    ]
+    res = event_mapping.filter_events(events, uid_regex=r"^[A-F0-9-]+$")
+    assert [e["titel"] for e in res] == ["phone"]
+
+
+def test_filter_events_uid_regex_empty_string_is_no_filter():
+    events = [
+        dict(_event_dict(titel="a", start="2026-07-20"), uid="x"),
+        dict(_event_dict(titel="b", start="2026-07-21"), uid="y"),
+    ]
+    assert [e["titel"] for e in event_mapping.filter_events(events, uid_regex="")] == ["a", "b"]
+
+
+def test_filter_events_invalid_uid_regex_raises():
+    with pytest.raises(InvalidEventDataError, match="uid_regex"):
+        event_mapping.filter_events([], uid_regex="[unclosed")
+
+
+def test_filter_events_cleanup_filters_combined_shortlist_phone_created_events():
+    """The cleanup sweep these filters exist for: hand-created phone events carry
+    uppercase UUIDs and no reminders/visibility/tags."""
+    phone = dict(
+        _event_dict(titel="Zahnarzt", start="2026-07-20"),
+        uid="5D3A2F00-90AB-4CDE-9AAF-01",
+        erinnerungen=[],
+        sichtbarkeit=None,
+    )
+    curated = dict(
+        _event_dict(titel="Team-Meeting", start="2026-07-21", tags=["Arbeit"]),
+        uid="gepflegt-1",
+        erinnerungen=["-PT15M"],
+        sichtbarkeit="öffentlich",
+    )
+    res = event_mapping.filter_events(
+        [phone, curated],
+        ohne_erinnerung=True,
+        ohne_sichtbarkeit=True,
+        ohne_tags=True,
+        uid_regex=r"^[A-F0-9-]+$",
+    )
+    assert [e["titel"] for e in res] == ["Zahnarzt"]
+
+
 # --- local day window (get_agenda) ---
 
 

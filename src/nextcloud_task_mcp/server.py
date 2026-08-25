@@ -71,6 +71,7 @@ _TASK_RESULT_KEYS = frozenset(
         "prioritaet",
         "fortschritt_prozent",
         "status",
+        "sichtbarkeit",
         "ort",
         "url",
         "tags",
@@ -347,6 +348,10 @@ def build_server(
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
+        ohne_erinnerung: bool = False,
+        ohne_sichtbarkeit: bool = False,
+        ohne_tags: bool = False,
+        uid_regex: str | None = None,
         felder: list[str] | None = None,
         kompakt: bool = False,
         list_name: str | None = None,
@@ -379,6 +384,22 @@ def build_server(
             suchtext: Optional substring filter over title (titel) and notes
                 (notizen). Both it and `tag` ignore case and Unicode spelling
                 ("STRASSE" matches "Straße").
+            ohne_erinnerung: If True, only return tasks with no reminders
+                (empty `erinnerungen`).
+            ohne_sichtbarkeit: If True, only return tasks with no visibility
+                set (`sichtbarkeit` is None, i.e. no readable CLASS property).
+            ohne_tags: If True, only return tasks with no tags.
+            uid_regex: Optional regular expression; only return tasks whose
+                uid contains a match (`re.search`, case-sensitive - anchor
+                with ^...$ for a full match, e.g. "^[A-F0-9-]+$" for the
+                all-uppercase UUIDs iOS-created items carry). An invalid
+                pattern is an error. It matches the stored uid: for a
+                recurring task that is the series uid, never the synthetic
+                "<uid>#<occurrence>" of an expanded row.
+                These four filters exist for cleanup sweeps - items created
+                by hand on a phone are recognizable by uppercase UUIDs and
+                missing reminders/visibility/tags, and combining them
+                shortlists those in one call.
             felder: Optional whitelist of result keys (see Returns for the
                 vocabulary); every other key is omitted from each task dict.
                 Unknown names error, an empty list means "no whitelist" (unlike
@@ -395,7 +416,7 @@ def build_server(
                 is an error.
 
         An empty string is "no filter" for every filter that takes one -
-        prioritaet, tag, suchtext, faellig_vor and faellig_nach alike. (`limit`
+        prioritaet, tag, suchtext, uid_regex, faellig_vor and faellig_nach alike. (`limit`
         still rejects 0: omit it rather than ask for zero results.) An empty
         `listen_namen` list is an empty scope and returns nothing.
 
@@ -426,7 +447,9 @@ def build_server(
             A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
             prioritaet, fortschritt_prozent, status ("offen"/"in-arbeit"/
             "erledigt"/"abgesagt" - see create_task/update_task's status
-            parameter to set it), ort, url, tags, erinnerungen
+            parameter to set it), sichtbarkeit ("öffentlich"/"privat"/
+            "vertraulich" or None - see create_task's sichtbarkeit parameter),
+            ort, url, tags, erinnerungen
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
@@ -463,6 +486,10 @@ def build_server(
             prioritaet=prioritaet,
             tag=tag,
             suchtext=suchtext,
+            ohne_erinnerung=ohne_erinnerung,
+            ohne_sichtbarkeit=ohne_sichtbarkeit,
+            ohne_tags=ohne_tags,
+            uid_regex=uid_regex,
             limit=limit,
         )
         return _slim_rows(
@@ -487,8 +514,8 @@ def build_server(
             A task dict holding what one entry from list_tasks holds, minus its
             "liste" key (the list is `list_name`, which you passed): uid, titel,
             start_datum, faellig_datum, prioritaet, fortschritt_prozent, status,
-            ort, url, tags, erinnerungen, notizen, uebergeordnete_uid,
-            wiederholung.
+            sichtbarkeit, ort, url, tags, erinnerungen, notizen,
+            uebergeordnete_uid, wiederholung.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 
@@ -855,6 +882,10 @@ def build_server(
         tag: str | None = None,
         limit: int | None = None,
         wiederholungen_aufloesen: bool = False,
+        ohne_erinnerung: bool = False,
+        ohne_sichtbarkeit: bool = False,
+        ohne_tags: bool = False,
+        uid_regex: str | None = None,
         felder: list[str] | None = None,
         kompakt: bool = False,
     ) -> list[dict[str, Any]]:
@@ -875,6 +906,24 @@ def build_server(
             wiederholungen_aufloesen: If True, expand recurring events into
                 their individual occurrences within [von, bis] (both bounds
                 required); each occurrence carries wiederholung_von.
+            ohne_erinnerung: If True, only return events with no reminders
+                (empty `erinnerungen`).
+            ohne_sichtbarkeit: If True, only return events with no visibility
+                set (`sichtbarkeit` is None, i.e. no readable CLASS property).
+            ohne_tags: If True, only return events with no tags.
+            uid_regex: Optional regular expression; only return events whose
+                uid contains a match (`re.search`, case-sensitive - anchor
+                with ^...$ for a full match, e.g. "^[A-F0-9-]+$" for the
+                all-uppercase UUIDs iOS-created events carry). An invalid
+                pattern is an error, an empty string is no filter.
+                These four filters exist for cleanup sweeps - events created
+                by hand on a phone are recognizable by uppercase UUIDs and
+                missing reminders/visibility/tags, and combining them
+                shortlists those in one call. They narrow an already-queried
+                window rather than widening it: with neither `kalender_namen`
+                nor a bound, the default window below still applies, so a
+                sweep over older events needs `von`/`bis` (or a calendar name)
+                as well.
             felder: Optional whitelist of result keys (see Returns for the
                 vocabulary); every other key is omitted from each event dict.
                 Unknown names error, an empty list means "no whitelist". Use
@@ -933,6 +982,10 @@ def build_server(
             tag=tag,
             limit=limit,
             expand=wiederholungen_aufloesen,
+            ohne_erinnerung=ohne_erinnerung,
+            ohne_sichtbarkeit=ohne_sichtbarkeit,
+            ohne_tags=ohne_tags,
+            uid_regex=uid_regex,
         )
         processed_events: list[dict[str, Any]] = []
         for event in events:
