@@ -1325,8 +1325,7 @@ def test_update_exdates_delegates(tools, fake_service):
         )
     )
 
-    # The tool's surface is English end to end, unlike the German batch shape
-    # `_batch_over_events` returns underneath it.
+    # The envelope is `_batch_over_events`' own shape, passed straight through.
     assert res["calendar_name"] == "Events"
     assert (res["succeeded"], res["failed"]) == (2, 0)
     assert res["results"][0] == {

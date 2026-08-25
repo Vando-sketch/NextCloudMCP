@@ -1,4 +1,4 @@
-"""Unit tests for the German field <-> Notes API JSON translation, no HTTP involved."""
+"""Unit tests for the note field <-> Notes API JSON translation, no HTTP involved."""
 
 from __future__ import annotations
 
