@@ -27,63 +27,63 @@ logger = logging.getLogger(__name__)
 
 _EXDATE_COMPACT_THRESHOLD = 10
 
-#: `kompakt=True` truncates free text (beschreibung/notizen) to this many chars.
+#: `compact=True` truncates free text (description/notes) to this many chars.
 _COMPACT_TEXT_LIMIT = 200
 
 #: Window applied when list_events is called with neither calendars nor bounds.
 _DEFAULT_EVENT_WINDOW_DAYS = 90
 
-#: Every key a list_events entry can carry - the vocabulary `felder` validates
-#: against. Must track `event_mapping.parse_vevent` plus the "kalender" key the
+#: Every key a list_events entry can carry - the vocabulary `fields` validates
+#: against. Must track `event_mapping.parse_vevent` plus the "calendar" key the
 #: client layer adds.
 _EVENT_RESULT_KEYS = frozenset(
     {
         "uid",
-        "titel",
+        "title",
         "start",
-        "ende",
-        "ganztaegig",
-        "ort",
-        "beschreibung",
+        "end",
+        "all_day",
+        "location",
+        "description",
         "tags",
-        "erinnerungen",
+        "reminders",
         "status",
-        "sichtbarkeit",
-        "wiederholung",
-        "ausnahme_daten",
+        "visibility",
+        "recurrence",
+        "exception_dates",
         "url",
-        "verknuepfte_aufgaben",
-        "wiederholung_von",
-        "kalender",
-        "organisator",
-        "teilnehmer",
+        "linked_tasks",
+        "recurrence_id",
+        "calendar",
+        "organizer",
+        "attendees",
     }
 )
 
 #: Every key a list_tasks entry can carry - tracks `mapping.parse_vtodo` plus
-#: the "liste"/"liste_url" keys the client layer adds.
+#: the "list"/"list_url" keys the client layer adds.
 _TASK_RESULT_KEYS = frozenset(
     {
         "uid",
-        "titel",
-        "start_datum",
-        "faellig_datum",
-        "prioritaet",
-        "fortschritt_prozent",
+        "title",
+        "start_date",
+        "due_date",
+        "priority",
+        "progress_percent",
         "status",
-        "sichtbarkeit",
-        "ort",
+        "visibility",
+        "location",
         "url",
         "tags",
-        "erinnerungen",
-        "notizen",
-        "uebergeordnete_uid",
-        "wiederholung",
-        "ausnahme_daten",
-        "wiederholung_von",
-        "serie_uid",
-        "liste",
-        "liste_url",
+        "reminders",
+        "notes",
+        "parent_uid",
+        "recurrence",
+        "exception_dates",
+        "recurrence_id",
+        "series_uid",
+        "list",
+        "list_url",
     }
 )
 
@@ -91,58 +91,58 @@ _TASK_RESULT_KEYS = frozenset(
 def _slim_rows(
     rows: list[dict[str, Any]],
     *,
-    felder: list[str] | None,
-    kompakt: bool,
+    fields: list[str] | None,
+    compact: bool,
     valid_keys: frozenset[str],
     text_key: str,
     detail_tool: str,
-    kompakt_drop: frozenset[str] = frozenset(),
+    compact_drop: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Apply the `felder` whitelist and/or `kompakt` mode to listing results.
+    """Apply the `fields` whitelist and/or `compact` mode to listing results.
 
-    `felder` keeps only the named keys (validated against `valid_keys`, so a
-    typo errors instead of silently returning nothing). `kompakt` then drops
-    keys whose value is None/[]/"" plus everything in `kompakt_drop`, and
+    `fields` keeps only the named keys (validated against `valid_keys`, so a
+    typo errors instead of silently returning nothing). `compact` then drops
+    keys whose value is None/[]/"" plus everything in `compact_drop`, and
     truncates `text_key` to `_COMPACT_TEXT_LIMIT` characters. A key the caller
-    whitelisted explicitly is exempt from `kompakt_drop` - asking for it wins.
+    whitelisted explicitly is exempt from `compact_drop` - asking for it wins.
 
-    An empty `felder` list means "no whitelist", not "no keys": the only other
+    An empty `fields` list means "no whitelist", not "no keys": the only other
     reading returns a row of nothing per result, which no caller can want, and
     MCP clients routinely send `[]` for an array parameter they mean to leave
-    unset. (`listen_namen=[]` reads the other way - an empty *scope* returns
+    unset. (`list_names=[]` reads the other way - an empty *scope* returns
     no rows, which is a coherent answer - so the two differ deliberately.)
 
     Falsy-but-real values survive: the emptiness test is `== []`/`== ""`
-    against those two literals only, so `fortschritt_prozent=0` and
-    `ganztaegig=False` are kept, and `ausnahme_daten` already summarized into
+    against those two literals only, so `progress_percent=0` and
+    `all_day=False` are kept, and `exception_dates` already summarized into
     a dict by `list_events` is kept too.
     """
-    if isinstance(felder, str):
-        felder = [felder]
-    if felder:
-        unknown = sorted(set(felder) - valid_keys)
+    if isinstance(fields, str):
+        fields = [fields]
+    if fields:
+        unknown = sorted(set(fields) - valid_keys)
         if unknown:
             raise ToolError(
-                f"Unbekannte felder-Einträge: {', '.join(unknown)}. "
-                f"Gültige Feldnamen: {', '.join(sorted(valid_keys))}"
+                f"Unknown fields entries: {', '.join(unknown)}. "
+                f"Valid field names: {', '.join(sorted(valid_keys))}"
             )
-        wanted = set(felder)
+        wanted = set(fields)
         rows = [{key: value for key, value in row.items() if key in wanted} for row in rows]
-        kompakt_drop = kompakt_drop - wanted
-    if not kompakt:
+        compact_drop = compact_drop - wanted
+    if not compact:
         return rows
     slimmed: list[dict[str, Any]] = []
     for row in rows:
         out: dict[str, Any] = {}
         for key, value in row.items():
-            if key in kompakt_drop:
+            if key in compact_drop:
                 continue
             if value is None or value == [] or value == "":
                 continue
             if key == text_key and isinstance(value, str) and len(value) > _COMPACT_TEXT_LIMIT:
                 value = (
-                    value[:_COMPACT_TEXT_LIMIT]
-                    + f"… [gekürzt von {len(value)} Zeichen - Volltext über {detail_tool}]"
+                    value[:_COMPACT_TEXT_LIMIT] + f"… [truncated, {len(value)} characters total - "
+                    f"get the full text via {detail_tool}]"
                 )
             out[key] = value
         slimmed.append(out)
@@ -339,56 +339,56 @@ def build_server(
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_tasks(
-        listen_namen: list[str] | None = None,
-        nur_offene: bool = True,
-        faellig_vor: str | None = None,
-        faellig_nach: str | None = None,
+        list_names: list[str] | None = None,
+        only_open: bool = True,
+        due_before: str | None = None,
+        due_after: str | None = None,
         limit: int | None = None,
         *,
-        prioritaet: str | None = None,
+        priority: str | None = None,
         tag: str | None = None,
-        suchtext: str | None = None,
-        ohne_erinnerung: bool = False,
-        ohne_sichtbarkeit: bool = False,
-        ohne_tags: bool = False,
+        search_text: str | None = None,
+        without_reminder: bool = False,
+        without_visibility: bool = False,
+        without_tags: bool = False,
         uid_regex: str | None = None,
-        felder: list[str] | None = None,
-        kompakt: bool = False,
+        fields: list[str] | None = None,
+        compact: bool = False,
         list_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """List tasks across one, several, or all Nextcloud task lists.
 
         Args:
-            listen_namen: Optional list of task list display names to query;
+            list_names: Optional list of task list display names to query;
                 None queries **every** task list on the account. That is one
                 request per list and returns every open task in the account
-                unless something narrows it - pass `listen_namen`, a due-date
+                unless something narrows it - pass `list_names`, a due-date
                 bound, or `limit` unless you really want the lot.
-            nur_offene: If True (default), only return tasks that are not
+            only_open: If True (default), only return tasks that are not
                 completed - "not completed" here means STATUS is neither
                 COMPLETED nor CANCELLED (and no COMPLETED timestamp is set):
-                a task with status="abgesagt" is excluded just like one with
-                status="erledigt", it is not treated as "still open". This is
+                a task with status="cancelled" is excluded just like one with
+                status="completed", it is not treated as "still open". This is
                 the caldav library's own three-way "pending" query
                 (`Calendar.todos(include_completed=...)`), not something this
                 server layers on top.
-            faellig_vor: Optional ISO 8601 date/datetime; only return tasks due at or
+            due_before: Optional ISO 8601 date/datetime; only return tasks due at or
                 before this point. A date-only bound (e.g. "2026-07-20") includes
                 tasks due at any time on that day.
-            faellig_nach: Optional ISO 8601 date/datetime; only return tasks due at or
+            due_after: Optional ISO 8601 date/datetime; only return tasks due at or
                 after this point. A date-only bound includes tasks due from the start
                 of that day onward.
             limit: Optional maximum number of results to return (must be > 0).
-            prioritaet: Optional priority filter ("hoch", "mittel", "niedrig").
+            priority: Optional priority filter ("high", "medium", "low").
             tag: Optional category/tag filter (exact match).
-            suchtext: Optional substring filter over title (titel) and notes
-                (notizen). Both it and `tag` ignore case and Unicode spelling
+            search_text: Optional substring filter over title (title) and notes
+                (notes). Both it and `tag` ignore case and Unicode spelling
                 ("STRASSE" matches "Straße").
-            ohne_erinnerung: If True, only return tasks with no reminders
-                (empty `erinnerungen`).
-            ohne_sichtbarkeit: If True, only return tasks with no visibility
-                set (`sichtbarkeit` is None, i.e. no readable CLASS property).
-            ohne_tags: If True, only return tasks with no tags.
+            without_reminder: If True, only return tasks with no reminders
+                (empty `reminders`).
+            without_visibility: If True, only return tasks with no visibility
+                set (`visibility` is None, i.e. no readable CLASS property).
+            without_tags: If True, only return tasks with no tags.
             uid_regex: Optional regular expression; only return tasks whose
                 uid contains a match (`re.search`, case-sensitive - anchor
                 with ^...$ for a full match, e.g. "^[A-F0-9-]+$" for the
@@ -400,106 +400,106 @@ def build_server(
                 by hand on a phone are recognizable by uppercase UUIDs and
                 missing reminders/visibility/tags, and combining them
                 shortlists those in one call.
-            felder: Optional whitelist of result keys (see Returns for the
+            fields: Optional whitelist of result keys (see Returns for the
                 vocabulary); every other key is omitted from each task dict.
                 Unknown names error, an empty list means "no whitelist" (unlike
-                an empty `listen_namen`, which is an empty scope). Use this to
+                an empty `list_names`, which is an empty scope). Use this to
                 keep payloads small when you only need a few fields.
-            kompakt: If True, omit keys whose value is None, [] or "" plus the
-                rarely useful liste_url (unless whitelisted via `felder`), and
-                truncate notizen to 200 characters (marked with "… [gekürzt
+            compact: If True, omit keys whose value is None, [] or "" plus the
+                rarely useful list_url (unless whitelisted via `fields`), and
+                truncate notes to 200 characters (marked with "… [truncated
                 ...]"; get_task returns the full text). Values are otherwise
                 unchanged - an absent key just means empty/None. Combines with
-                `felder` (whitelist first, then compaction).
-            list_name: Deprecated alias for `listen_namen` (takes a single list display name).
-                Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
+                `fields` (whitelist first, then compaction).
+            list_name: Deprecated alias for `list_names` (takes a single list display name).
+                Pass `list_names` instead. Passing both `list_name` and `list_names`
                 is an error.
 
         An empty string is "no filter" for every filter that takes one -
-        prioritaet, tag, suchtext, uid_regex, faellig_vor and faellig_nach alike. (`limit`
+        priority, tag, search_text, uid_regex, due_before and due_after alike. (`limit`
         still rejects 0: omit it rather than ask for zero results.) An empty
-        `listen_namen` list is an empty scope and returns nothing.
+        `list_names` list is an empty scope and returns nothing.
 
-        If `faellig_vor` and/or `faellig_nach` is given, tasks with no readable
-        faellig_datum (due date) are excluded - they can't be judged "before"/"after"
-        anything. Results are sorted by faellig_datum ascending (those tasks last),
-        then by titel. `limit` is applied last, after merging across lists.
+        If `due_before` and/or `due_after` is given, tasks with no readable
+        due_date (due date) are excluded - they can't be judged "before"/"after"
+        anything. Results are sorted by due_date ascending (those tasks last),
+        then by title. `limit` is applied last, after merging across lists.
 
-        Recurring tasks (wiederholung) and `faellig_vor`: a recurring task is
-        stored once but is due many times, so when `faellig_vor` is given it is
+        Recurring tasks (recurrence) and `due_before`: a recurring task is
+        stored once but is due many times, so when `due_before` is given it is
         expanded into one row per occurrence due inside the window - that is the
         only way "what is due next week" can include a weekly task started in
-        March. Without `faellig_vor` there is no window to expand into and the
-        series is returned as the single row it is stored as, wiederholung
+        March. Without `due_before` there is no window to expand into and the
+        series is returned as the single row it is stored as, recurrence
         intact. At most 100 occurrences per task are produced.
 
         What an expanded row is, and is not: it is a read-only view of one date
-        in a series. `wiederholung_von` names its occurrence, `wiederholung` is
-        None, `serie_uid` is the stored task's uid, and its own `uid` is a
-        synthetic "<serie_uid>#<occurrence>" that update_task, complete_task,
+        in a series. `recurrence_id` names its occurrence, `recurrence` is
+        None, `series_uid` is the stored task's uid, and its own `uid` is a
+        synthetic "<series_uid>#<occurrence>" that update_task, complete_task,
         delete_task and get_task all reject with an explanation. To act on the
-        series, pass `serie_uid` - but note that update_task changes every
+        series, pass `series_uid` - but note that update_task changes every
         occurrence and complete_task ends the whole series (it does not roll it
         forward). To make the series skip one date, add that date to its
-        ausnahme_daten via update_task.
+        exception_dates via update_task.
 
         Returns:
-            A list of task dicts with keys: uid, titel, start_datum, faellig_datum,
-            prioritaet, fortschritt_prozent, status ("offen"/"in-arbeit"/
-            "erledigt"/"abgesagt" - see create_task/update_task's status
-            parameter to set it), sichtbarkeit ("öffentlich"/"privat"/
-            "vertraulich" or None - see create_task's sichtbarkeit parameter),
-            ort, url, tags, erinnerungen
+            A list of task dicts with keys: uid, title, start_date, due_date,
+            priority, progress_percent, status ("open"/"in-progress"/
+            "completed"/"cancelled" - see create_task/update_task's status
+            parameter to set it), visibility ("public"/"private"/
+            "confidential" or None - see create_task's visibility parameter),
+            location, url, tags, reminders
             (list of reminder strings, each either a relative RFC 5545 duration
             like "-PT30M" or an absolute ISO 8601 datetime like
             "2026-08-07T09:00:00+00:00", exactly what create_task/update_task
             accepts; alarms whose trigger this form cannot express are omitted,
-            and update_task leaves those untouched), notizen,
-            uebergeordnete_uid (None unless the task is a
-            subtask), wiederholung (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
+            and update_task leaves those untouched), notes,
+            parent_uid (None unless the task is a
+            subtask), recurrence (raw RRULE text, e.g. "FREQ=WEEKLY;BYDAY=MO",
             or None if the task doesn't recur or is an expanded occurrence -
-            see create_task/update_task to set it), ausnahme_daten (the
-            occurrences the series skips, [] if none), wiederholung_von and
-            serie_uid (both None unless the row is an expanded occurrence, see
-            above), liste (the display name of the task list
-            containing the task), and liste_url (the collection URL of the task
+            see create_task/update_task to set it), exception_dates (the
+            occurrences the series skips, [] if none), recurrence_id and
+            series_uid (both None unless the row is an expanded occurrence, see
+            above), list (the display name of the task list
+            containing the task), and list_url (the collection URL of the task
             list, which tells same-named lists apart, though no tool accepts a
             URL to act on them - an ambiguous name still must be renamed).
         """
-        if list_name is not None and listen_namen is not None:
-            raise ToolError("list_name is the deprecated alias of listen_namen; pass only one")
+        if list_name is not None and list_names is not None:
+            raise ToolError("list_name is the deprecated alias of list_names; pass only one")
 
         target_list_names: list[str] | None
         if list_name is not None:
             target_list_names = [list_name]
-        elif isinstance(listen_namen, str):
-            target_list_names = [listen_namen]
+        elif isinstance(list_names, str):
+            target_list_names = [list_names]
         else:
-            target_list_names = listen_namen
+            target_list_names = list_names
 
         tasks: list[dict[str, Any]] = await _call(
             caldav_service.list_tasks,
             list_names=target_list_names,
-            only_open=nur_offene,
-            due_before=faellig_vor,
-            due_after=faellig_nach,
-            prioritaet=prioritaet,
+            only_open=only_open,
+            due_before=due_before,
+            due_after=due_after,
+            priority=priority,
             tag=tag,
-            suchtext=suchtext,
-            ohne_erinnerung=ohne_erinnerung,
-            ohne_sichtbarkeit=ohne_sichtbarkeit,
-            ohne_tags=ohne_tags,
+            search_text=search_text,
+            without_reminder=without_reminder,
+            without_visibility=without_visibility,
+            without_tags=without_tags,
             uid_regex=uid_regex,
             limit=limit,
         )
         return _slim_rows(
             tasks,
-            felder=felder,
-            kompakt=kompakt,
+            fields=fields,
+            compact=compact,
             valid_keys=_TASK_RESULT_KEYS,
-            text_key="notizen",
+            text_key="notes",
             detail_tool="get_task",
-            kompakt_drop=frozenset({"liste_url"}),
+            compact_drop=frozenset({"list_url"}),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -512,79 +512,79 @@ def build_server(
 
         Returns:
             A task dict holding what one entry from list_tasks holds, minus its
-            "liste" key (the list is `list_name`, which you passed): uid, titel,
-            start_datum, faellig_datum, prioritaet, fortschritt_prozent, status,
-            sichtbarkeit, ort, url, tags, erinnerungen, notizen,
-            uebergeordnete_uid, wiederholung.
+            "list" key (the list is `list_name`, which you passed): uid, title,
+            start_date, due_date, priority, progress_percent, status,
+            visibility, location, url, tags, reminders, notes,
+            parent_uid, recurrence.
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 
     @mcp.tool(annotations=_CREATE)
     async def create_task(
         list_name: str,
-        titel: str,
-        start_datum: str | None = None,
-        faellig_datum: str | None = None,
-        prioritaet: str | None = None,
-        fortschritt_prozent: int | None = None,
-        ort: str | None = None,
+        title: str,
+        start_date: str | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
+        progress_percent: int | None = None,
+        location: str | None = None,
         url: str | None = None,
         tags: list[str] | None = None,
-        erinnerungen: list[str] | None = None,
-        notizen: str | None = None,
-        sichtbarkeit: str | None = None,
-        uebergeordnete_aufgabe: str | None = None,
-        wiederholung: str | None = None,
-        ausnahme_daten: list[str] | None = None,
+        reminders: list[str] | None = None,
+        notes: str | None = None,
+        visibility: str | None = None,
+        parent_task: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
         status: str | None = None,
     ) -> dict[str, str]:
         """Create a new task in a Nextcloud task list.
 
         Args:
             list_name: Display name of the target task list.
-            titel: Task title (VTODO SUMMARY).
-            start_datum: Optional ISO 8601 date/datetime -> DTSTART.
-            faellig_datum: Optional ISO 8601 date/datetime -> DUE.
-            prioritaet: Optional "hoch" / "mittel" / "niedrig" -> PRIORITY (1/5/9).
-            fortschritt_prozent: Optional 0-100 -> PERCENT-COMPLETE.
-            ort: Optional location -> LOCATION.
+            title: Task title (VTODO SUMMARY).
+            start_date: Optional ISO 8601 date/datetime -> DTSTART.
+            due_date: Optional ISO 8601 date/datetime -> DUE.
+            priority: Optional "high" / "medium" / "low" -> PRIORITY (1/5/9).
+            progress_percent: Optional 0-100 -> PERCENT-COMPLETE.
+            location: Optional location -> LOCATION.
             url: Optional URL -> URL.
             tags: Optional list of category strings -> CATEGORIES.
-            erinnerungen: Optional list of reminders, each either a relative RFC 5545
-                duration (e.g. "-P1D", "-PT1H", relative to faellig_datum, falling
-                back to start_datum) or an absolute ISO 8601 datetime -> VALARM.
+            reminders: Optional list of reminders, each either a relative RFC 5545
+                duration (e.g. "-P1D", "-PT1H", relative to due_date, falling
+                back to start_date) or an absolute ISO 8601 datetime -> VALARM.
                 The leading "-" is what makes a relative reminder fire *before*
                 that date; a positive duration ("PT30M") is valid and means 30
                 minutes *after* it. Reading a task back normalizes equivalent
                 spellings of the same trigger to one form ("-P1W" reads back as
                 "-P7D", and "P0D"/"PT0S"/"-PT0M" - a reminder firing exactly at
                 that date - all read back as "-PT0M").
-            notizen: Optional notes -> DESCRIPTION.
-            sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
-            uebergeordnete_aufgabe: Optional UID of an existing task to link this
+            notes: Optional notes -> DESCRIPTION.
+            visibility: Optional "public" / "private" / "confidential" -> CLASS.
+            parent_task: Optional UID of an existing task to link this
                 task to as a subtask -> RELATED-TO (RELTYPE=PARENT).
-            wiederholung: Optional recurrence rule as raw RFC 5545 RRULE text,
+            recurrence: Optional recurrence rule as raw RFC 5545 RRULE text,
                 e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE. Requires the task to
-                have a start_datum or faellig_datum (in this same call) to
+                have a start_date or due_date (in this same call) to
                 recur from - a task with neither is rejected.
-            ausnahme_daten: Optional ISO 8601 dates/datetimes of skipped
+            exception_dates: Optional ISO 8601 dates/datetimes of skipped
                 occurrences of a recurring task -> EXDATE. Each entry must be
-                the same value kind as the task's start_datum (date-only for an
+                the same value kind as the task's start_date (date-only for an
                 all-day task, a full datetime otherwise) and must name an
-                occurrence the wiederholung actually produces; an entry that
+                occurrence the recurrence actually produces; an entry that
                 would cancel nothing is rejected rather than stored.
-            status: Optional "offen" / "in-arbeit" / "erledigt" / "abgesagt" ->
+            status: Optional "open" / "in-progress" / "completed" / "cancelled" ->
                 STATUS, for creating a task that is not simply open - importing
                 an already-finished task, say, which otherwise took a
                 create_task plus a complete_task. Omitted (the default) creates
-                an open task. "erledigt" behaves like complete_task (also sets
+                an open task. "completed" behaves like complete_task (also sets
                 PERCENT-COMPLETE=100 and a COMPLETED timestamp of *now*, since
                 the real completion time is not recorded anywhere to recover);
-                "in-arbeit" and "abgesagt" only set STATUS. An explicit
-                fortschritt_prozent in the same call wins over the percentage
+                "in-progress" and "cancelled" only set STATUS. An explicit
+                progress_percent in the same call wins over the percentage
                 status would otherwise derive.
 
-        Date/time semantics for start_datum and faellig_datum: a value that is
+        Date/time semantics for start_date and due_date: a value that is
         exactly "YYYY-MM-DD" (e.g. "2026-07-20") creates an all-day entry
         (iCalendar VALUE=DATE). Any other ISO 8601 value is stored as a
         datetime; a *naive* datetime (no UTC offset, e.g.
@@ -600,20 +600,20 @@ def build_server(
             {"uid": the new task's UID}.
         """
         fields = mapping.TaskFields(
-            titel=titel,
-            start_datum=start_datum,
-            faellig_datum=faellig_datum,
-            prioritaet=prioritaet,
-            fortschritt_prozent=fortschritt_prozent,
-            ort=ort,
+            title=title,
+            start_date=start_date,
+            due_date=due_date,
+            priority=priority,
+            progress_percent=progress_percent,
+            location=location,
             url=url,
             tags=tags,
-            erinnerungen=erinnerungen,
-            notizen=notizen,
-            sichtbarkeit=sichtbarkeit,
-            uebergeordnete_aufgabe=uebergeordnete_aufgabe,
-            wiederholung=wiederholung,
-            ausnahme_daten=ausnahme_daten,
+            reminders=reminders,
+            notes=notes,
+            visibility=visibility,
+            parent_task=parent_task,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
             status=status,
         )
         new_uid = await _call(caldav_service.create_task, list_name, fields)
@@ -623,22 +623,22 @@ def build_server(
     async def update_task(
         list_name: str,
         task_uid: str,
-        titel: str | None = None,
-        start_datum: str | None = None,
-        faellig_datum: str | None = None,
-        prioritaet: str | None = None,
-        fortschritt_prozent: int | None = None,
-        ort: str | None = None,
+        title: str | None = None,
+        start_date: str | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
+        progress_percent: int | None = None,
+        location: str | None = None,
         url: str | None = None,
         tags: list[str] | None = None,
-        erinnerungen: list[str] | None = None,
-        notizen: str | None = None,
-        sichtbarkeit: str | None = None,
-        uebergeordnete_aufgabe: str | None = None,
-        wiederholung: str | None = None,
-        ausnahme_daten: list[str] | None = None,
+        reminders: list[str] | None = None,
+        notes: str | None = None,
+        visibility: str | None = None,
+        parent_task: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
         status: str | None = None,
-        felder_leeren: list[str] | None = None,
+        clear_fields: list[str] | None = None,
     ) -> dict[str, str]:
         """Update an existing task. Only fields that are explicitly given are changed.
 
@@ -650,29 +650,29 @@ def build_server(
                 semantics also match create_task: a "YYYY-MM-DD" value creates an
                 all-day entry, and naive datetimes are interpreted in the
                 server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin).
-                wiederholung's anchor requirement (start_datum or faellig_datum)
+                recurrence's anchor requirement (start_date or due_date)
                 is checked against the task's final state, so setting only
-                wiederholung succeeds as long as the task already has a
-                start_datum or faellig_datum from before this call.
-            status: Optional "offen" / "in-arbeit" / "erledigt" / "abgesagt" ->
-                STATUS. "erledigt" behaves like complete_task (also sets
-                PERCENT-COMPLETE=100 and the COMPLETED timestamp); "offen" is
+                recurrence succeeds as long as the task already has a
+                start_date or due_date from before this call.
+            status: Optional "open" / "in-progress" / "completed" / "cancelled" ->
+                STATUS. "completed" behaves like complete_task (also sets
+                PERCENT-COMPLETE=100 and the COMPLETED timestamp); "open" is
                 the reopen path for a task completed by mistake (removes
-                COMPLETED and resets PERCENT-COMPLETE to 0); "in-arbeit" and
-                "abgesagt" only set STATUS. If this call also passes
-                fortschritt_prozent, that explicit value wins over whatever
+                COMPLETED and resets PERCENT-COMPLETE to 0); "in-progress" and
+                "cancelled" only set STATUS. If this call also passes
+                progress_percent, that explicit value wins over whatever
                 percentage status would otherwise derive. An unknown value is
                 a speaking error naming the accepted labels; nothing is
                 written to the task in that case. Not accepted in
-                felder_leeren - set status="offen" to reopen a task instead.
-            felder_leeren: Optional list of field names to clear (remove the
+                clear_fields - set status="open" to reopen a task instead.
+            clear_fields: Optional list of field names to clear (remove the
                 property from the task entirely) instead of changing them.
-                Accepted values: "start_datum", "faellig_datum", "prioritaet",
-                "fortschritt_prozent", "ort", "url", "tags", "erinnerungen",
-                "notizen", "sichtbarkeit", "uebergeordnete_aufgabe",
-                "wiederholung", "ausnahme_daten". Clearing "wiederholung" also
-                drops the task's ausnahme_daten (EXDATE) and any RDATE, which
-                cancel and add nothing once the series is gone. "titel" cannot
+                Accepted values: "start_date", "due_date", "priority",
+                "progress_percent", "location", "url", "tags", "reminders",
+                "notes", "visibility", "parent_task",
+                "recurrence", "exception_dates". Clearing "recurrence" also
+                drops the task's exception_dates (EXDATE) and any RDATE, which
+                cancel and add nothing once the series is gone. "title" cannot
                 be cleared. Naming an unknown
                 field, or naming a field here that is *also* given a new
                 value in the same call, is an error.
@@ -681,22 +681,22 @@ def build_server(
             {"uid": task_uid} on success.
         """
         fields = mapping.TaskFields(
-            titel=titel,
-            start_datum=start_datum,
-            faellig_datum=faellig_datum,
-            prioritaet=prioritaet,
-            fortschritt_prozent=fortschritt_prozent,
-            ort=ort,
+            title=title,
+            start_date=start_date,
+            due_date=due_date,
+            priority=priority,
+            progress_percent=progress_percent,
+            location=location,
             url=url,
             tags=tags,
-            erinnerungen=erinnerungen,
-            notizen=notizen,
-            sichtbarkeit=sichtbarkeit,
-            uebergeordnete_aufgabe=uebergeordnete_aufgabe,
-            wiederholung=wiederholung,
-            ausnahme_daten=ausnahme_daten,
+            reminders=reminders,
+            notes=notes,
+            visibility=visibility,
+            parent_task=parent_task,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
             status=status,
-            clear=tuple(felder_leeren) if felder_leeren else (),
+            clear=tuple(clear_fields) if clear_fields else (),
         )
         await _call(caldav_service.update_task, list_name, task_uid, fields)
         return {"uid": task_uid}
@@ -709,10 +709,10 @@ def build_server(
         UI) does not automatically roll the series forward to the next
         occurrence; instead, it hard-ends the series by marking the entire
         recurring task as done. To advance a series instead, use
-        `update_task` on its `faellig_datum`.
+        `update_task` on its `due_date`.
 
         A task completed by mistake can be reopened afterwards with
-        update_task's status="offen" (removes COMPLETED, resets
+        update_task's status="open" (removes COMPLETED, resets
         PERCENT-COMPLETE to 0) - there is no separate "uncomplete" tool.
 
         Args:
@@ -743,68 +743,61 @@ def build_server(
     async def move_task(
         list_name: str,
         task_uid: str,
-        ziel_liste: str,
-        uebergeordnete_aufgabe: str | None = None,
-        felder_leeren: list[str] | None = None,
+        target_list: str,
+        parent_task: str | None = None,
+        clear_fields: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Verschiebt eine Aufgabe in eine andere Aufgabenliste, optional mit neuer Hierarchie.
+        """Move a task to a different task list, optionally re-parenting it too.
 
-        Nextcloud Tasks loest die Unteraufgaben-Hierarchie (RELATED-TO) nur
-        innerhalb *einer* Liste auf. Wird nur eine Haelfte eines
-        Eltern/Kind-Paares verschoben, bleibt die Verknuepfung als Eigenschaft
-        erhalten, zeigt in ihrer Liste aber ins Leere - ohne dass irgendwo ein
-        Fehler entsteht. Fuer die verschobene Aufgabe selbst erledigen
-        `uebergeordnete_aufgabe` bzw. `felder_leeren` das gleich mit; was
-        danach noch ins Leere zeigt, meldet `verwaiste_verknuepfungen`
-        (siehe Returns).
+        Nextcloud Tasks resolves the subtask hierarchy (RELATED-TO) only
+        *within* one list. Moving just one half of a parent/child pair leaves
+        the link in place as a property, but pointing nowhere in its own list
+        - without raising an error anywhere. For the moved task itself,
+        `parent_task` and `clear_fields` take care of that in the same call;
+        whatever still points nowhere afterwards is reported in
+        `orphaned_subtask_links` (see Returns).
 
         Args:
-            list_name: Anzeige-Name der Quell-Aufgabenliste.
-            task_uid: UID der zu verschiebenden Aufgabe.
-            ziel_liste: Anzeige-Name der Ziel-Aufgabenliste.
-            uebergeordnete_aufgabe: Optionale UID der neuen uebergeordneten
-                Aufgabe, gesetzt in der Ziel-Liste nachdem das Verschieben
-                geklappt hat - erspart den zweiten update_task-Aufruf, denn
-                beim Listenwechsel wechselt fast immer auch die Hierarchie.
-                Wie bei update_task ersetzt das die bestehende Verknuepfung
-                (RELATED-TO), es kommt keine dazu.
-            felder_leeren: Optional ["uebergeordnete_aufgabe"], um die Aufgabe
-                stattdessen aus ihrer Hierarchie zu loesen - der uebliche Fall,
-                wenn die uebergeordnete Aufgabe in der Quell-Liste zurueck
-                bleibt. Andere Feldnamen sind hier nicht erlaubt (dafuer gibt es
-                update_task), ebenso wenig das gleichzeitige Setzen und Leeren
-                desselben Feldes.
+            list_name: Display name of the source task list.
+            task_uid: UID of the task to move.
+            target_list: Display name of the target task list.
+            parent_task: Optional UID of the new parent task, set in the target list
+                after the move succeeds - this saves a second update_task call, since
+                changing the list almost always changes the hierarchy too. As with
+                update_task, this replaces the existing link (RELATED-TO); it does
+                not add to it.
+            clear_fields: Optional ["parent_task"], to detach the task from its
+                hierarchy instead - the usual case when the parent task stays
+                behind in the source list. No other field names are allowed here
+                (use update_task for that), and setting and clearing the same
+                field in the same call is not allowed either.
 
         Returns:
-            {"uid": ..., "von": Quell-Liste, "nach": Ziel-Liste,
-            "methode": "MOVE" | "kopiert" | "bereits_dort"}; zusaetzlich
-            "hierarchie": "gesetzt" | "geleert", wenn die uebergeordnete
-            Aufgabe mitgeaendert wurde. Schlaegt nur die Hierarchie-Aenderung
-            fehl, meldet der Fehler ausdruecklich, dass das Verschieben selbst
-            bestand hat.
-            Immer dabei ist "verwaiste_verknuepfungen": die
-            Unteraufgaben-Verknuepfungen, die nach diesem Aufruf ins Leere
-            zeigen - je Eintrag {"uid", "titel", "liste",
-            "fehlende_uebergeordnete_uid"}, wobei "uid"/"liste" die Aufgabe
-            benennen, die die Verknuepfung traegt, und
-            "fehlende_uebergeordnete_uid" die uebergeordnete Aufgabe, die in
-            dieser Liste nicht (mehr) liegt. Geprueft wird der Endzustand, also
-            nach einer Hierarchie-Aenderung aus demselben Aufruf; uebrig
-            bleiben typischerweise die Unteraufgaben, die in der Quell-Liste
-            zurueckgeblieben sind (die erreicht kein Parameter dieses Tools -
-            dafuer update_task je Unteraufgabe). [] heisst "keine verwaisten
-            Verknuepfungen", None heisst "konnte nach dem Verschieben nicht
-            geprueft werden" - das Verschieben selbst war in beiden Faellen
-            erfolgreich.
+            {"uid": ..., "from": source list, "to": target list,
+            "method": "MOVE" | "copied" | "already_there"}; additionally
+            "hierarchy": "set" | "cleared" if the parent task was also changed.
+            If only the hierarchy change fails, the error explicitly states
+            that the move itself succeeded.
+            Always included is "orphaned_subtask_links": the subtask links
+            that point nowhere after this call - one entry per link, as
+            {"uid", "title", "list", "missing_parent_uid"}, where "uid"/"list"
+            name the task carrying the link and "missing_parent_uid" the
+            parent task that is not (or no longer) in that list. The final
+            state is what gets checked, i.e. after any hierarchy change made
+            in the same call; what typically remains are the subtasks left
+            behind in the source list (no parameter of this tool reaches
+            those - use update_task per subtask). [] means "no orphaned
+            links", None means "could not be checked after the move" - the
+            move itself succeeded in both cases.
         """
 
         res: dict[str, Any] = await _call(
             caldav_service.move_task,
             list_name,
             task_uid,
-            ziel_liste,
-            uebergeordnete_aufgabe,
-            tuple(felder_leeren) if felder_leeren else (),
+            target_list,
+            parent_task,
+            tuple(clear_fields) if clear_fields else (),
         )
         return res
 
@@ -812,22 +805,22 @@ def build_server(
     async def update_tasks(
         list_name: str,
         task_uids: list[str],
-        titel: str | None = None,
-        start_datum: str | None = None,
-        faellig_datum: str | None = None,
-        prioritaet: str | None = None,
-        fortschritt_prozent: int | None = None,
-        ort: str | None = None,
+        title: str | None = None,
+        start_date: str | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
+        progress_percent: int | None = None,
+        location: str | None = None,
         url: str | None = None,
         tags: list[str] | None = None,
-        erinnerungen: list[str] | None = None,
-        notizen: str | None = None,
-        sichtbarkeit: str | None = None,
-        uebergeordnete_aufgabe: str | None = None,
-        wiederholung: str | None = None,
-        ausnahme_daten: list[str] | None = None,
+        reminders: list[str] | None = None,
+        notes: str | None = None,
+        visibility: str | None = None,
+        parent_task: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
         status: str | None = None,
-        felder_leeren: list[str] | None = None,
+        clear_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         """Update multiple tasks in a list with the same field patch.
 
@@ -836,7 +829,7 @@ def build_server(
 
         Use this rather than a loop of `update_task` calls whenever the same
         change applies to several tasks - retagging, rescheduling a due date,
-        marking a set done via status="erledigt". A single failure (unknown UID,
+        marking a set done via status="completed". A single failure (unknown UID,
         a conflicting edit, a patch that doesn't fit one task) is reported
         against that UID instead of stopping the rest, and a request that fails
         transiently is retried before it is reported at all.
@@ -845,33 +838,33 @@ def build_server(
             list_name: Display name of the task list containing the tasks.
             task_uids: List of task UIDs to update. Max 200 UIDs per call.
                 Empty list is rejected. Duplicate UIDs are deduplicated while
-                preserving order. An occurrence UID ("<serie_uid>#<date>") is
+                preserving order. An occurrence UID ("<series_uid>#<date>") is
                 rejected for its own entry only, like in update_task.
             (all other args): Same meaning and mapping as in update_task; fields left
                 as None are left unchanged. To clear fields, pass their names in
-                felder_leeren.
+                clear_fields.
 
         Returns:
-            Dict containing list_name, erfolgreich count, fehlgeschlagen count,
-            and ergebnisse list with per-UID statuses.
+            Dict containing list_name, succeeded count, failed count,
+            and results list with per-UID statuses.
         """
         fields = mapping.TaskFields(
-            titel=titel,
-            start_datum=start_datum,
-            faellig_datum=faellig_datum,
-            prioritaet=prioritaet,
-            fortschritt_prozent=fortschritt_prozent,
-            ort=ort,
+            title=title,
+            start_date=start_date,
+            due_date=due_date,
+            priority=priority,
+            progress_percent=progress_percent,
+            location=location,
             url=url,
             tags=tags,
-            erinnerungen=erinnerungen,
-            notizen=notizen,
-            sichtbarkeit=sichtbarkeit,
-            uebergeordnete_aufgabe=uebergeordnete_aufgabe,
-            wiederholung=wiederholung,
-            ausnahme_daten=ausnahme_daten,
+            reminders=reminders,
+            notes=notes,
+            visibility=visibility,
+            parent_task=parent_task,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
             status=status,
-            clear=tuple(felder_leeren) if felder_leeren else (),
+            clear=tuple(clear_fields) if clear_fields else (),
         )
         res: dict[str, Any] = await _call(caldav_service.update_tasks, list_name, task_uids, fields)
         return res
@@ -894,42 +887,42 @@ def build_server(
                 preserving order.
 
         Returns:
-            Dict containing list_name, erfolgreich count, fehlgeschlagen count,
-            and ergebnisse list with per-UID statuses.
+            Dict containing list_name, succeeded count, failed count,
+            and results list with per-UID statuses.
         """
         res: dict[str, Any] = await _call(caldav_service.delete_tasks, list_name, task_uids)
         return res
 
     @mcp.tool(annotations=_MODIFY)
-    async def move_tasks(list_name: str, task_uids: list[str], ziel_liste: str) -> dict[str, Any]:
-        """Verschiebt mehrere Aufgaben in eine andere Aufgabenliste.
+    async def move_tasks(list_name: str, task_uids: list[str], target_list: str) -> dict[str, Any]:
+        """Move several tasks to a different task list.
 
-        Die Liste zum Umräumen: beide Listen werden einmal aufgelöst, danach
-        wird jede Aufgabe wie in `move_task` verschoben (CalDAV MOVE, sonst
-        kopieren-und-löschen). Ein Fehlschlag bei einer Aufgabe landet als
-        Eintrag in `ergebnisse`, die übrigen werden weiter verschoben - genau
-        dafür gibt es den Batch statt 13 Einzelaufrufen.
+        The tool for reorganizing a list: both lists are resolved once, then
+        each task is moved exactly as `move_task` does it (CalDAV MOVE, else
+        copy-and-delete). A failure on one task becomes an entry in `results`
+        and the rest are still moved - which is the whole point of the batch
+        over thirteen individual calls.
 
-        Antwortet der Server gar nicht (502/503/504), wird die Verschiebung
-        wiederholt statt sie als Fehler zu melden. Der Aufruf lässt sich mit
-        denselben UIDs gefahrlos wiederholen: eine Aufgabe, die schon in der
-        Zielliste liegt, wird als "bereits_dort" gemeldet.
+        If the server does not answer at all (502/503/504), the move is
+        retried rather than reported as an error. The call is safe to repeat
+        with the same UIDs: a task already in the target list is reported as
+        "already_there".
 
         Args:
-            list_name: Anzeige-Name der Quell-Aufgabenliste.
-            task_uids: UIDs der zu verschiebenden Aufgaben. Maximal 200 pro
-                Aufruf; eine leere Liste wird abgelehnt, Duplikate werden unter
-                Beibehaltung der Reihenfolge entfernt.
-            ziel_liste: Anzeige-Name der Ziel-Aufgabenliste.
+            list_name: Display name of the source task list.
+            task_uids: UIDs of the tasks to move. At most 200 per call; an
+                empty list is rejected, and duplicates are removed while
+                preserving order.
+            target_list: Display name of the target task list.
 
         Returns:
-            {"list_name", "erfolgreich", "fehlgeschlagen", "ergebnisse"}, wobei
-            jeder Eintrag {"uid", "status": "ok"|"fehler"} ist, bei "ok"
-            zusätzlich {"von", "nach", "methode": "MOVE" | "kopiert" |
-            "bereits_dort"} und bei "fehler" {"fehler": Begründung}.
+            {"list_name", "succeeded", "failed", "results"}, where each entry
+            is {"uid", "status": "ok"|"error"}, plus for "ok"
+            {"from", "to", "method": "MOVE" | "copied" | "already_there"},
+            and for "error" {"error": reason}.
         """
         res: dict[str, Any] = await _call(
-            caldav_service.move_tasks, list_name, task_uids, ziel_liste
+            caldav_service.move_tasks, list_name, task_uids, target_list
         )
         return res
 
@@ -939,13 +932,13 @@ def build_server(
 
         Returns:
             A list of {"name": display name, "url": internal CalDAV URL/ID,
-            "farbe": "#RRGGBB" color or None, "komponenten": supported
+            "color": "#RRGGBB" color or None, "components": supported
             component names (e.g. ["VEVENT"])} dicts.
         """
         return await _call(caldav_service.list_calendars)
 
     @mcp.tool(annotations=_CREATE)
-    async def create_calendar(display_name: str, farbe: str | None = None) -> dict[str, Any]:
+    async def create_calendar(display_name: str, color: str | None = None) -> dict[str, Any]:
         """Create a new Nextcloud event calendar (a CalDAV collection supporting VEVENT).
 
         Args:
@@ -953,12 +946,12 @@ def build_server(
                 collection id is generated from it automatically; a collision
                 with an existing calendar (by display name or generated id)
                 fails instead of silently reusing the existing one.
-            farbe: Optional calendar color as "#RRGGBB" (or "#RRGGBBAA").
+            color: Optional calendar color as "#RRGGBB" (or "#RRGGBBAA").
 
         Returns:
-            {"name", "url", "farbe"} for the new calendar.
+            {"name", "url", "color"} for the new calendar.
         """
-        return await _call(caldav_service.create_calendar, display_name, farbe)
+        return await _call(caldav_service.create_calendar, display_name, color)
 
     @mcp.tool(annotations=_MODIFY)
     async def delete_calendar(calendar_name: str) -> dict[str, str]:
@@ -981,7 +974,7 @@ def build_server(
     async def update_calendar(
         calendar_name: str,
         new_display_name: str | None = None,
-        farbe: str | None = None,
+        color: str | None = None,
     ) -> dict[str, Any]:
         """Rename an event calendar and/or change its color. The URL/id stays stable.
 
@@ -989,53 +982,53 @@ def build_server(
             calendar_name: Current display name of the calendar.
             new_display_name: Optional new display name; fails if another
                 event calendar already has this exact name.
-            farbe: Optional new color as "#RRGGBB" (or "#RRGGBBAA").
+            color: Optional new color as "#RRGGBB" (or "#RRGGBBAA").
 
-        At least one of new_display_name / farbe must be given.
+        At least one of new_display_name / color must be given.
 
         Returns:
-            {"name", "url", "farbe"} for the updated calendar.
+            {"name", "url", "color"} for the updated calendar.
         """
-        return await _call(caldav_service.update_calendar, calendar_name, new_display_name, farbe)
+        return await _call(caldav_service.update_calendar, calendar_name, new_display_name, color)
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_events(
-        kalender_namen: list[str] | None = None,
-        von: str | None = None,
-        bis: str | None = None,
-        suchtext: str | None = None,
+        calendar_names: list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        search_text: str | None = None,
         tag: str | None = None,
         limit: int | None = None,
-        wiederholungen_aufloesen: bool = False,
-        ohne_erinnerung: bool = False,
-        ohne_sichtbarkeit: bool = False,
-        ohne_tags: bool = False,
+        expand_recurrences: bool = False,
+        without_reminder: bool = False,
+        without_visibility: bool = False,
+        without_tags: bool = False,
         uid_regex: str | None = None,
-        felder: list[str] | None = None,
-        kompakt: bool = False,
+        fields: list[str] | None = None,
+        compact: bool = False,
     ) -> list[dict[str, Any]]:
         """List calendar events, across one, several, or all event calendars.
 
         Args:
-            kalender_namen: Optional list of calendar display names to query;
+            calendar_names: Optional list of calendar display names to query;
                 None queries every event calendar on the account.
-            von: Optional ISO 8601 date/datetime lower bound. Recurring events
+            start: Optional ISO 8601 date/datetime lower bound. Recurring events
                 with an occurrence inside the window are included. A date-only
                 value means the start of that day.
-            bis: Optional ISO 8601 date/datetime upper bound. A date-only
+            end: Optional ISO 8601 date/datetime upper bound. A date-only
                 value includes that entire day.
-            suchtext: Optional case-insensitive substring filter over title,
+            search_text: Optional case-insensitive substring filter over title,
                 description and location.
             tag: Optional category/tag filter (exact, case-insensitive match).
             limit: Optional maximum number of results (must be > 0).
-            wiederholungen_aufloesen: If True, expand recurring events into
-                their individual occurrences within [von, bis] (both bounds
-                required); each occurrence carries wiederholung_von.
-            ohne_erinnerung: If True, only return events with no reminders
-                (empty `erinnerungen`).
-            ohne_sichtbarkeit: If True, only return events with no visibility
-                set (`sichtbarkeit` is None, i.e. no readable CLASS property).
-            ohne_tags: If True, only return events with no tags.
+            expand_recurrences: If True, expand recurring events into
+                their individual occurrences within [start, end] (both bounds
+                required); each occurrence carries recurrence_id.
+            without_reminder: If True, only return events with no reminders
+                (empty `reminders`).
+            without_visibility: If True, only return events with no visibility
+                set (`visibility` is None, i.e. no readable CLASS property).
+            without_tags: If True, only return events with no tags.
             uid_regex: Optional regular expression; only return events whose
                 uid contains a match (`re.search`, case-sensitive - anchor
                 with ^...$ for a full match, e.g. "^[A-F0-9-]+$" for the
@@ -1045,129 +1038,129 @@ def build_server(
                 by hand on a phone are recognizable by uppercase UUIDs and
                 missing reminders/visibility/tags, and combining them
                 shortlists those in one call. They narrow an already-queried
-                window rather than widening it: with neither `kalender_namen`
+                window rather than widening it: with neither `calendar_names`
                 nor a bound, the default window below still applies, so a
-                sweep over older events needs `von`/`bis` (or a calendar name)
+                sweep over older events needs `start`/`end` (or a calendar name)
                 as well.
-            felder: Optional whitelist of result keys (see Returns for the
+            fields: Optional whitelist of result keys (see Returns for the
                 vocabulary); every other key is omitted from each event dict.
                 Unknown names error, an empty list means "no whitelist". Use
                 this to keep payloads small when you only need a few fields.
-            kompakt: If True, omit keys whose value is None, [] or "" (e.g.
-                teilnehmer, organisator, wiederholung on most events) and
-                truncate beschreibung to 200 characters (marked with
-                "… [gekürzt ...]"; get_event returns the full text). Values
+            compact: If True, omit keys whose value is None, [] or "" (e.g.
+                attendees, organizer, recurrence on most events) and
+                truncate description to 200 characters (marked with
+                "… [truncated ...]"; get_event returns the full text). Values
                 are otherwise unchanged - an absent key just means empty/None.
-                Combines with `felder` (whitelist first, then compaction).
+                Combines with `fields` (whitelist first, then compaction).
 
-        Called with neither `kalender_namen` nor a time bound, this would scan
+        Called with neither `calendar_names` nor a time bound, this would scan
         every event in the account; instead a default window of today ±90 days
-        (in the server's default timezone) is applied. Pass `von` and/or `bis`
+        (in the server's default timezone) is applied. Pass `start` and/or `end`
         explicitly - or name a calendar - to query outside that window. Naming
         a calendar is a scoping decision, so it turns the default window off
-        rather than narrowing it: `kalender_namen` plus
-        `wiederholungen_aufloesen=True` and no bounds still fails with
-        "requires both von and bis", the same as before this default existed.
+        rather than narrowing it: `calendar_names` plus
+        `expand_recurrences=True` and no bounds still fails with
+        "requires both start and end", the same as before this default existed.
 
         Naive datetimes (no UTC offset) are interpreted in the server's default
         timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin), like everywhere else
         in this server.
 
         Returns:
-            Event dicts sorted by start, each with keys: uid, titel, start,
-            ende (all-day: inclusive last day), ganztaegig, ort, beschreibung,
-            tags, erinnerungen (list of reminder strings, each either a relative
+            Event dicts sorted by start, each with keys: uid, title, start,
+            end (all-day: inclusive last day), all_day, location, description,
+            tags, reminders (list of reminder strings, each either a relative
             RFC 5545 duration like "-PT30M" or an absolute ISO 8601 datetime
             like "2026-08-07T09:00:00+00:00", exactly what create_event/update_event
             accepts; alarms whose trigger this form cannot express - an
             end-anchored one, say - are omitted, and update_event leaves those
-            untouched), status ("bestätigt"/"vorläufig"/"abgesagt" or None),
-            sichtbarkeit, wiederholung (raw RRULE text or None), ausnahme_daten
+            untouched), status ("confirmed"/"tentative"/"cancelled" or None),
+            visibility, recurrence (raw RRULE text or None), exception_dates
             (list of EXDATE strings, or if >10 entries, a summary dict
-            {"anzahl", "erste", "hinweis"}; call get_event for full list),
-            url, verknuepfte_aufgaben (RELATED-TO links; each entry's
-            "beziehung" uses the same values as link_task_to_event's
-            beziehung parameter - "zeitblock"/"voraussetzung" - plus
-            "gleichrangig" or a raw lowercased RELTYPE for links written by
-            other CalDAV clients), wiederholung_von, kalender (the calendar's
-            display name), organisator ({"email", "name"} or None), teilnehmer
-            (list of {"email", "name", "status", "rolle", "rsvp"}; "status" is
-            "ausstehend"/"zugesagt"/"abgesagt"/"vorläufig"/"delegiert").
+            {"count", "first", "note"}; call get_event for full list),
+            url, linked_tasks (RELATED-TO links; each entry's
+            "relation" uses the same values as link_task_to_event's
+            relation parameter - "time_block"/"prerequisite" - plus
+            "sibling" or a raw lowercased RELTYPE for links written by
+            other CalDAV clients), recurrence_id, calendar (the calendar's
+            display name), organizer ({"email", "name"} or None), attendees
+            (list of {"email", "name", "status", "role", "rsvp"}; "status" is
+            "pending"/"accepted"/"cancelled"/"tentative"/"delegated").
         """
-        if kalender_namen is None and not von and not bis:
+        if calendar_names is None and not start and not end:
             today = datetime.now(mapping.get_default_timezone()).date()
-            von = (today - timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
-            bis = (today + timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
+            start = (today - timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
+            end = (today + timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
         events: list[dict[str, Any]] = await _call(
             caldav_service.list_events,
-            calendar_names=kalender_namen,
-            von=von,
-            bis=bis,
-            suchtext=suchtext,
+            calendar_names=calendar_names,
+            start=start,
+            end=end,
+            search_text=search_text,
             tag=tag,
             limit=limit,
-            expand=wiederholungen_aufloesen,
-            ohne_erinnerung=ohne_erinnerung,
-            ohne_sichtbarkeit=ohne_sichtbarkeit,
-            ohne_tags=ohne_tags,
+            expand=expand_recurrences,
+            without_reminder=without_reminder,
+            without_visibility=without_visibility,
+            without_tags=without_tags,
             uid_regex=uid_regex,
         )
         processed_events: list[dict[str, Any]] = []
         for event in events:
-            exdates = event.get("ausnahme_daten")
+            exdates = event.get("exception_dates")
             if isinstance(exdates, list) and len(exdates) > _EXDATE_COMPACT_THRESHOLD:
                 event = dict(event)
-                event["ausnahme_daten"] = {
-                    "anzahl": len(exdates),
-                    "erste": exdates[:5],
-                    "hinweis": "gekürzt - vollständige Liste über get_event abrufen",
+                event["exception_dates"] = {
+                    "count": len(exdates),
+                    "first": exdates[:5],
+                    "note": "truncated - get the full list via get_event",
                 }
             processed_events.append(event)
         return _slim_rows(
             processed_events,
-            felder=felder,
-            kompakt=kompakt,
+            fields=fields,
+            compact=compact,
             valid_keys=_EVENT_RESULT_KEYS,
-            text_key="beschreibung",
+            text_key="description",
             detail_tool="get_event",
         )
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def get_event(kalender_name: str, event_uid: str) -> dict[str, Any]:
+    async def get_event(calendar_name: str, event_uid: str) -> dict[str, Any]:
         """Fetch a single event by UID.
 
         Args:
-            kalender_name: Display name of the calendar containing the event.
+            calendar_name: Display name of the calendar containing the event.
             event_uid: UID of the event to fetch.
 
         Returns:
             An event dict with the same shape as one entry from list_events.
         """
-        return await _call(caldav_service.get_event, kalender_name, event_uid)
+        return await _call(caldav_service.get_event, calendar_name, event_uid)
 
     @mcp.tool(annotations=_CREATE)
     async def create_event(
-        kalender_name: str,
-        titel: str,
+        calendar_name: str,
+        title: str,
         start: str,
-        ende: str | None = None,
-        ort: str | None = None,
-        beschreibung: str | None = None,
+        end: str | None = None,
+        location: str | None = None,
+        description: str | None = None,
         tags: list[str] | None = None,
         status: str | None = None,
-        sichtbarkeit: str | None = None,
-        wiederholung: str | None = None,
-        ausnahme_daten: list[str] | None = None,
-        erinnerungen: list[str] | None = None,
+        visibility: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
+        reminders: list[str] | None = None,
         url: str | None = None,
-        verknuepfte_aufgabe: str | None = None,
-        teilnehmer: list[dict[str, Any]] | None = None,
+        linked_task: str | None = None,
+        attendees: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Create a new calendar event.
 
         Args:
-            kalender_name: Display name of the target event calendar.
-            titel: Event title (VEVENT SUMMARY).
+            calendar_name: Display name of the target event calendar.
+            title: Event title (VEVENT SUMMARY).
             start: ISO 8601 start -> DTSTART. Exactly "YYYY-MM-DD" creates an
                 all-day event; naive datetimes are interpreted in the server's default
                 timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin). A
@@ -1176,34 +1169,34 @@ def build_server(
                 have the correct standard/daylight offset resolved for that
                 date automatically; combining a numeric offset with a
                 timezone name is rejected.
-            ende: Optional ISO 8601 end -> DTEND. For all-day events this is
+            end: Optional ISO 8601 end -> DTEND. For all-day events this is
                 the last day INCLUSIVE (e.g. start="2026-07-20",
-                ende="2026-07-21" spans two days). start and ende must both be
+                end="2026-07-21" spans two days). start and end must both be
                 dates or both be datetimes.
-            ort: Optional location -> LOCATION.
-            beschreibung: Optional description -> DESCRIPTION.
+            location: Optional location -> LOCATION.
+            description: Optional description -> DESCRIPTION.
             tags: Optional list of category strings -> CATEGORIES.
-            status: Optional "bestätigt" / "vorläufig" / "abgesagt" -> STATUS.
-            sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" -> CLASS.
-            wiederholung: Optional recurrence rule as raw RFC 5545 RRULE text,
+            status: Optional "confirmed" / "tentative" / "cancelled" -> STATUS.
+            visibility: Optional "public" / "private" / "confidential" -> CLASS.
+            recurrence: Optional recurrence rule as raw RFC 5545 RRULE text,
                 e.g. "FREQ=WEEKLY;BYDAY=MO" -> RRULE.
-            ausnahme_daten: Optional ISO 8601 dates/datetimes of skipped
+            exception_dates: Optional ISO 8601 dates/datetimes of skipped
                 occurrences of a recurring event -> EXDATE.
-            erinnerungen: Optional reminders, each either a relative RFC 5545
+            reminders: Optional reminders, each either a relative RFC 5545
                 duration before the start (e.g. "-PT30M", "-P1D") or an
                 absolute ISO 8601 datetime -> VALARM. The leading "-" is what
                 makes a relative reminder fire *before* the start; a positive
                 duration ("PT30M") is valid and means 30 minutes *after* it.
             url: Optional URL -> URL.
-            verknuepfte_aufgabe: Optional UID of an existing task this event
+            linked_task: Optional UID of an existing task this event
                 reserves time for -> RELATED-TO;RELTYPE=PARENT on the event
-                (the "zeitblock" semantics of link_task_to_event; reading the
+                (the "time_block" semantics of link_task_to_event; reading the
                 event back via list_events/get_event surfaces this as a
-                verknuepfte_aufgaben entry with beziehung "zeitblock").
-            teilnehmer: Optional list of attendees -> ATTENDEE. Each entry:
-                {"email": required, "name": optional, "rolle": optional
-                "leitung"/"erforderlich"/"optional"/"keine-teilnahme" (default
-                "erforderlich"), "rsvp": optional bool (default True)}. The
+                linked_tasks entry with relation "time_block").
+            attendees: Optional list of attendees -> ATTENDEE. Each entry:
+                {"email": required, "name": optional, "role": optional
+                "chair"/"required"/"optional"/"non-participant" (default
+                "required"), "rsvp": optional bool (default True)}. The
                 first time attendees are added to an event with none yet,
                 ORGANIZER is set to your own account's address automatically.
                 IMPORTANT: Nextcloud's CalDAV server does server-side
@@ -1216,31 +1209,31 @@ def build_server(
             value (see get_event's docstring for the full key list).
         """
         fields = event_mapping.EventFields(
-            titel=titel,
+            title=title,
             start=start,
-            ende=ende,
-            ort=ort,
-            beschreibung=beschreibung,
+            end=end,
+            location=location,
+            description=description,
             tags=tags,
             status=status,
-            sichtbarkeit=sichtbarkeit,
-            wiederholung=wiederholung,
-            ausnahme_daten=ausnahme_daten,
-            erinnerungen=erinnerungen,
+            visibility=visibility,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
+            reminders=reminders,
             url=url,
-            verknuepfte_aufgabe=verknuepfte_aufgabe,
-            teilnehmer=teilnehmer,
+            linked_task=linked_task,
+            attendees=attendees,
         )
-        new_uid = await _call(caldav_service.create_event, kalender_name, fields)
-        event: dict[str, Any] = await _call(caldav_service.get_event, kalender_name, new_uid)
+        new_uid = await _call(caldav_service.create_event, calendar_name, fields)
+        event: dict[str, Any] = await _call(caldav_service.get_event, calendar_name, new_uid)
         return event
 
     @mcp.tool(annotations=_CREATE)
     async def create_birthday(
         name: str,
-        datum: str,
-        jahr: int | None = None,
-        kalender: str = event_mapping.BIRTHDAY_CALENDAR,
+        date: str,
+        year: int | None = None,
+        calendar: str | None = None,
     ) -> dict[str, Any]:
         """Create a birthday entry, with the whole birthday convention filled in.
 
@@ -1249,21 +1242,23 @@ def build_server(
         here, they are the convention every entry in the birthday calendar
         follows. What gets written:
 
-        - Title "🎂 <name> (<Geburtsjahr>)" - without the parentheses when no
+        - Title "🎂 <name> (<birth year>)" - without the parentheses when no
           birth year is known.
         - An all-day, one-day event starting on the *birth* date, so each
           occurrence's year minus the start year is the age being celebrated.
           Without a birth year it starts on the next upcoming occurrence.
-        - wiederholung "FREQ=YEARLY", tags ["Geburtstag"], sichtbarkeit
-          "privat", erinnerungen ["-PT0M", "-P1D"] (on the day itself and the
-          day before).
+        - recurrence "FREQ=YEARLY", tags ["Birthday"], visibility
+          "private", reminders ["-PT0M", "-P1D"] (on the day itself and the
+          day before). Entries written to the legacy "Birthdays" calendar
+          are tagged "Birthday" instead, matching the entries already in
+          it, so one tag still covers the whole calendar.
 
         Args:
             name: The person's name, without the cake and without the year
                 (both are added). Passing a title read back from an existing
-                entry ("🎂 Papa (1975)") works too - the cake is not doubled
+                entry ("🎂 Dad (1975)") works too - the cake is not doubled
                 and the year in parentheses is read as the birth year.
-            datum: The birthday as "MM-DD" (e.g. "07-04"), or as a full
+            date: The birthday as "MM-DD" (e.g. "07-04"), or as a full
                 "YYYY-MM-DD" whose year is the year of BIRTH. Never fill in
                 the current (or next) year to turn "on the 4th of July" into
                 a full date - that is the year of the next celebration, not a
@@ -1272,57 +1267,72 @@ def build_server(
                 stays 02-29, and a yearly rule then only fires in leap years -
                 pass 02-28 or 03-01 instead if the entry should show up every
                 year.
-            jahr: Optional year of birth (e.g. 1975), only ever a year the
-                person was actually born in. May instead come from `datum` or
+            year: Optional year of birth (e.g. 1975), only ever a year the
+                person was actually born in. May instead come from `date` or
                 from a trailing "(1975)" in `name`; naming it twice is fine as
                 long as the values agree, and conflicting values are an error.
                 An unknown birth year is fine - leave it out and the title
                 carries no year. A birth date that is still ahead is rejected.
-            kalender: Display name of the target calendar, "Geburtstage" by
-                default.
+            calendar: Display name of the target calendar. Left out, it is
+                "Birthdays", except on a server that still has the
+                "Birthdays" calendar an earlier version of this tool wrote
+                to and no "Birthdays" - there the existing calendar is used,
+                so birthdays stay in one place instead of being split across
+                two. Naming a calendar explicitly always uses that one.
 
         Returns:
             The created event dict, same shape as get_event's return value
             (see get_event's docstring for the full key list).
         """
+        target = calendar
+        if target is None:
+            # One extra listing, only when the caller named no calendar: which
+            # of the two conventions this server is on is a property of the
+            # account, not something the caller can be expected to know.
+            calendars = await _call(caldav_service.list_calendars)
+            target = event_mapping.resolve_birthday_calendar(
+                str(entry["name"]) for entry in calendars
+            )
         try:
-            fields = event_mapping.birthday_fields(name, datum, jahr)
+            fields = event_mapping.birthday_fields(
+                name, date, year, tag=event_mapping.birthday_tag_for(target)
+            )
         except TaskMcpError as exc:
             raise ToolError(str(exc)) from exc
-        new_uid = await _call(caldav_service.create_event, kalender, fields)
-        event: dict[str, Any] = await _call(caldav_service.get_event, kalender, new_uid)
+        new_uid = await _call(caldav_service.create_event, target, fields)
+        event: dict[str, Any] = await _call(caldav_service.get_event, target, new_uid)
         return event
 
     @mcp.tool(annotations=_MODIFY)
     async def update_event(
-        kalender_name: str,
+        calendar_name: str,
         event_uid: str,
-        titel: str | None = None,
+        title: str | None = None,
         start: str | None = None,
-        ende: str | None = None,
-        ort: str | None = None,
-        beschreibung: str | None = None,
+        end: str | None = None,
+        location: str | None = None,
+        description: str | None = None,
         tags: list[str] | None = None,
         status: str | None = None,
-        sichtbarkeit: str | None = None,
-        wiederholung: str | None = None,
-        ausnahme_daten: list[str] | None = None,
-        erinnerungen: list[str] | None = None,
+        visibility: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
+        reminders: list[str] | None = None,
         url: str | None = None,
-        verknuepfte_aufgabe: str | None = None,
-        teilnehmer: list[dict[str, Any]] | None = None,
-        felder_leeren: list[str] | None = None,
+        linked_task: str | None = None,
+        attendees: list[dict[str, Any]] | None = None,
+        clear_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         """Update an existing event. Only fields that are explicitly given are changed.
 
         Args:
-            kalender_name: Display name of the calendar containing the event.
+            calendar_name: Display name of the calendar containing the event.
             event_uid: UID of the event to update.
             (all other args): Same meaning and mapping as in create_event; a
                 field left as None is left unchanged. To move a single
                 occurrence of a recurring event, add its original date to
-                ausnahme_daten and create a separate replacement event.
-            teilnehmer: Optional, same shape as in create_event. Setting this
+                exception_dates and create a separate replacement event.
+            attendees: Optional, same shape as in create_event. Setting this
                 REPLACES the event's entire attendee list (it is not an
                 append). As in create_event, ORGANIZER is set to your own
                 account's address the first time attendees are added to an
@@ -1330,13 +1340,13 @@ def build_server(
                 mails server-side once the event is saved, not this tool. To
                 respond to an event you were invited to (set your own RSVP
                 status), use respond_to_event instead of this tool.
-            felder_leeren: Optional list of field names to clear (remove the
-                property entirely). Accepted values: "ende", "ort",
-                "beschreibung", "tags", "status", "sichtbarkeit",
-                "wiederholung", "ausnahme_daten", "erinnerungen", "url",
-                "verknuepfte_aufgabe", "teilnehmer" (clearing "teilnehmer"
+            clear_fields: Optional list of field names to clear (remove the
+                property entirely). Accepted values: "end", "location",
+                "description", "tags", "status", "visibility",
+                "recurrence", "exception_dates", "reminders", "url",
+                "linked_task", "attendees" (clearing "attendees"
                 removes every attendee and, if none remain, ORGANIZER too).
-                "titel" and "start" cannot be cleared. Naming an unknown
+                "title" and "start" cannot be cleared. Naming an unknown
                 field, or naming a field that is also given a new value in
                 the same call, is an error.
 
@@ -1345,59 +1355,59 @@ def build_server(
             value (see get_event's docstring for the full key list).
         """
         fields = event_mapping.EventFields(
-            titel=titel,
+            title=title,
             start=start,
-            ende=ende,
-            ort=ort,
-            beschreibung=beschreibung,
+            end=end,
+            location=location,
+            description=description,
             tags=tags,
             status=status,
-            sichtbarkeit=sichtbarkeit,
-            wiederholung=wiederholung,
-            ausnahme_daten=ausnahme_daten,
-            erinnerungen=erinnerungen,
+            visibility=visibility,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
+            reminders=reminders,
             url=url,
-            verknuepfte_aufgabe=verknuepfte_aufgabe,
-            teilnehmer=teilnehmer,
-            clear=tuple(felder_leeren) if felder_leeren else (),
+            linked_task=linked_task,
+            attendees=attendees,
+            clear=tuple(clear_fields) if clear_fields else (),
         )
-        await _call(caldav_service.update_event, kalender_name, event_uid, fields)
-        event: dict[str, Any] = await _call(caldav_service.get_event, kalender_name, event_uid)
+        await _call(caldav_service.update_event, calendar_name, event_uid, fields)
+        event: dict[str, Any] = await _call(caldav_service.get_event, calendar_name, event_uid)
         return event
 
     @mcp.tool(annotations=_MODIFY)
-    async def delete_event(kalender_name: str, event_uid: str) -> dict[str, str]:
+    async def delete_event(calendar_name: str, event_uid: str) -> dict[str, str]:
         """Permanently delete an event.
 
         Args:
-            kalender_name: Display name of the calendar containing the event.
+            calendar_name: Display name of the calendar containing the event.
             event_uid: UID of the event to delete.
 
         Returns:
             {"uid": event_uid} on success.
         """
-        await _call(caldav_service.delete_event, kalender_name, event_uid)
+        await _call(caldav_service.delete_event, calendar_name, event_uid)
         return {"uid": event_uid}
 
     @mcp.tool(annotations=_MODIFY)
     async def update_events(
-        kalender_name: str,
+        calendar_name: str,
         event_uids: list[str],
-        titel: str | None = None,
+        title: str | None = None,
         start: str | None = None,
-        ende: str | None = None,
-        ort: str | None = None,
-        beschreibung: str | None = None,
+        end: str | None = None,
+        location: str | None = None,
+        description: str | None = None,
         tags: list[str] | None = None,
         status: str | None = None,
-        sichtbarkeit: str | None = None,
-        wiederholung: str | None = None,
-        ausnahme_daten: list[str] | None = None,
-        erinnerungen: list[str] | None = None,
+        visibility: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
+        reminders: list[str] | None = None,
         url: str | None = None,
-        verknuepfte_aufgabe: str | None = None,
-        teilnehmer: list[dict[str, Any]] | None = None,
-        felder_leeren: list[str] | None = None,
+        linked_task: str | None = None,
+        attendees: list[dict[str, Any]] | None = None,
+        clear_fields: list[str] | None = None,
     ) -> dict[str, Any]:
         """Update multiple events in a calendar with the same field patch.
 
@@ -1405,37 +1415,37 @@ def build_server(
         is invalid or empty, the call fails immediately and no events are changed.
 
         Args:
-            kalender_name: Display name of the calendar containing the events.
+            calendar_name: Display name of the calendar containing the events.
             event_uids: List of event UIDs to update. Max 200 UIDs per call.
                 Empty list is rejected. Duplicate UIDs are deduplicated while
                 preserving order.
             (all other args): Same meaning and mapping as in update_event; fields left
                 as None are left unchanged. To clear fields, pass their names in
-                felder_leeren.
+                clear_fields.
 
         Returns:
-            Dict containing kalender_name, erfolgreich count, fehlgeschlagen count,
-            and ergebnisse list with per-UID statuses.
+            Dict containing calendar_name, succeeded count, failed count,
+            and results list with per-UID statuses.
         """
         fields = event_mapping.EventFields(
-            titel=titel,
+            title=title,
             start=start,
-            ende=ende,
-            ort=ort,
-            beschreibung=beschreibung,
+            end=end,
+            location=location,
+            description=description,
             tags=tags,
             status=status,
-            sichtbarkeit=sichtbarkeit,
-            wiederholung=wiederholung,
-            ausnahme_daten=ausnahme_daten,
-            erinnerungen=erinnerungen,
+            visibility=visibility,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
+            reminders=reminders,
             url=url,
-            verknuepfte_aufgabe=verknuepfte_aufgabe,
-            teilnehmer=teilnehmer,
-            clear=tuple(felder_leeren) if felder_leeren else (),
+            linked_task=linked_task,
+            attendees=attendees,
+            clear=tuple(clear_fields) if clear_fields else (),
         )
         res: dict[str, Any] = await _call(
-            caldav_service.update_events, kalender_name, event_uids, fields
+            caldav_service.update_events, calendar_name, event_uids, fields
         )
         return res
 
@@ -1449,8 +1459,8 @@ def build_server(
     ) -> dict[str, Any]:
         """Add or remove single exception dates on recurring events, without rewriting the rest.
 
-        Use this - not update_event's ausnahme_daten - whenever the goal is
-        "also skip these dates" or "no longer skip these dates". ausnahme_daten
+        Use this - not update_event's exception_dates - whenever the goal is
+        "also skip these dates" or "no longer skip these dates". exception_dates
         REPLACES an event's whole exception list, so it has to be handed every
         date the series already skips, which means reading each event first and
         writing dozens of dates back. This tool merges server-side: one call
@@ -1497,24 +1507,13 @@ def build_server(
             remove,
             ignore_non_occurrences,
         )
-        # `_batch_over_events` reports in the German shape the other batch
-        # tools return; this tool's surface is English throughout, so the
-        # three envelope keys and the per-event failure entry are renamed.
-        results: list[dict[str, Any]] = []
-        for entry in res["ergebnisse"]:
-            if entry["status"] == "fehler":
-                results.append({"uid": entry["uid"], "status": "error", "error": entry["fehler"]})
-            else:
-                results.append(entry)
-        return {
-            "calendar_name": res["kalender_name"],
-            "succeeded": res["erfolgreich"],
-            "failed": res["fehlgeschlagen"],
-            "results": results,
-        }
+        # `_batch_over_events` already reports in exactly this shape - the
+        # envelope keys and the per-event entries are the tool's surface as
+        # they come, so there is nothing to translate here.
+        return res
 
     @mcp.tool(annotations=_MODIFY)
-    async def delete_events(kalender_name: str, event_uids: list[str]) -> dict[str, Any]:
+    async def delete_events(calendar_name: str, event_uids: list[str]) -> dict[str, Any]:
         """Permanently delete multiple events from a calendar.
 
         WARNING: this is irreversible from this server's point of view, and a
@@ -1525,69 +1524,66 @@ def build_server(
         events are still deleted.
 
         Args:
-            kalender_name: Display name of the calendar containing the events.
+            calendar_name: Display name of the calendar containing the events.
             event_uids: List of event UIDs to delete. Max 200 UIDs per call.
                 Empty list is rejected. Duplicate UIDs are deduplicated while
                 preserving order.
 
         Returns:
-            Dict containing kalender_name, erfolgreich count, fehlgeschlagen count,
-            and ergebnisse list with per-UID statuses.
+            Dict containing calendar_name, "succeeded" count, "failed" count,
+            and results list with per-UID statuses.
         """
-        res: dict[str, Any] = await _call(caldav_service.delete_events, kalender_name, event_uids)
+        res: dict[str, Any] = await _call(caldav_service.delete_events, calendar_name, event_uids)
         return res
 
     @mcp.tool(annotations=_MODIFY)
     async def move_event(
-        kalender_name: str,
+        calendar_name: str,
         event_uid: str,
-        ziel_kalender: str,
-        verknuepfte_aufgabe: str | None = None,
-        felder_leeren: list[str] | None = None,
+        target_calendar: str,
+        linked_task: str | None = None,
+        clear_fields: list[str] | None = None,
     ) -> dict[str, str]:
-        """Verschiebt einen Kalendereintrag in einen anderen Kalender, optional neu verknuepft.
+        """Move a calendar entry to a different calendar, optionally re-linking it too.
 
         Args:
-            kalender_name: Anzeige-Name des Quell-Kalenders.
-            event_uid: UID des zu verschiebenden Kalendereintrags.
-            ziel_kalender: Anzeige-Name des Ziel-Kalenders.
-            verknuepfte_aufgabe: Optionale UID der Aufgabe, mit der der Eintrag
-                verknuepft werden soll, gesetzt im Ziel-Kalender nachdem das
-                Verschieben geklappt hat - erspart den zweiten
-                update_event-Aufruf. Wie bei update_event ersetzt das die
-                gesamte RELATED-TO-Menge des Eintrags (auch eine
-                "voraussetzung"-Verknuepfung); link_task_to_event ist die
-                additive Variante.
-            felder_leeren: Optional ["verknuepfte_aufgabe"], um die
-                Aufgaben-Verknuepfungen des Eintrags stattdessen zu entfernen.
-                Andere Feldnamen sind hier nicht erlaubt (dafuer gibt es
-                update_event), ebenso wenig das gleichzeitige Setzen und Leeren
-                desselben Feldes.
+            calendar_name: Display name of the source calendar.
+            event_uid: UID of the calendar entry to move.
+            target_calendar: Display name of the target calendar.
+            linked_task: Optional UID of the task to link the entry to, set in the
+                target calendar after the move succeeds - this saves a second
+                update_event call. As with update_event, this replaces the entry's
+                entire set of RELATED-TO links (including a "prerequisite" link);
+                link_task_to_event is the additive variant.
+            clear_fields: Optional ["linked_task"], to remove the entry's task
+                links instead. No other field names are allowed here (use
+                update_event for that), and setting and clearing the same field
+                in the same call is not allowed either.
 
         Returns:
-            {"uid": ..., "von": Quell-Kalender, "nach": Ziel-Kalender,
-            "methode": "MOVE" | "kopiert" | "bereits_dort"}; zusaetzlich
-            "hierarchie": "gesetzt" | "geleert", wenn die Verknuepfung
-            mitgeaendert wurde. Schlaegt nur die Verknuepfung fehl, meldet der
-            Fehler ausdruecklich, dass das Verschieben selbst bestand hat.
+            {"uid": ..., "from": source calendar, "to": target calendar,
+            "method": "MOVE" | "copied" | "already_there"}; additionally
+            "hierarchy": "set" | "cleared" if the link was also changed.
+            If only the link change fails, the error explicitly states that
+            the move itself succeeded.
         """
 
         res: dict[str, str] = await _call(
             caldav_service.move_event,
-            kalender_name,
+            calendar_name,
             event_uid,
-            ziel_kalender,
-            verknuepfte_aufgabe,
-            tuple(felder_leeren) if felder_leeren else (),
+            target_calendar,
+            linked_task,
+            tuple(clear_fields) if clear_fields else (),
         )
         return res
 
     @mcp.tool(annotations=_MODIFY)
     async def respond_to_event(
-        kalender_name: str,
+        calendar_name: str,
         event_uid: str,
-        antwort: str,
-        kommentar: str | None = None,
+        response: str,
+        comment: str | None = None,
     ) -> dict[str, str]:
         """Reply to a calendar invitation - set your own RSVP status on an event.
 
@@ -1599,132 +1595,132 @@ def build_server(
         automatically - this tool does not send any mail itself.
 
         Args:
-            kalender_name: Display name of the calendar containing the event
+            calendar_name: Display name of the calendar containing the event
                 (typically the calendar the invitation landed in).
             event_uid: UID of the event to respond to.
-            antwort: One of "zugesagt" (accept), "abgesagt" (decline),
-                "vorläufig" (tentative) -> ATTENDEE PARTSTAT.
-            kommentar: Optional comment to attach to the reply -> COMMENT.
+            response: One of "accepted" (accept), "cancelled" (decline),
+                "tentative" (tentative) -> ATTENDEE PARTSTAT.
+            comment: Optional comment to attach to the reply -> COMMENT.
 
         Returns:
-            {"uid": event_uid, "antwort": antwort} on success.
+            {"uid": event_uid, "response": response} on success.
         """
-        await _call(caldav_service.respond_to_event, kalender_name, event_uid, antwort, kommentar)
-        return {"uid": event_uid, "antwort": antwort}
+        await _call(caldav_service.respond_to_event, calendar_name, event_uid, response, comment)
+        return {"uid": event_uid, "response": response}
 
     @mcp.tool(annotations=_ADD)
     async def link_task_to_event(
         list_name: str,
         task_uid: str,
-        kalender_name: str,
+        calendar_name: str,
         event_uid: str,
-        beziehung: str = "zeitblock",
+        relation: str = "time_block",
     ) -> dict[str, str]:
         """Link an existing task to an existing calendar event (RELATED-TO).
 
         The link is stored on the event (the Nextcloud Tasks UI would
         misrender a task-side link as a broken subtask), and shows up in the
-        event's verknuepfte_aufgaben with a "beziehung" equal to the
-        `beziehung` value passed here - the request and response vocabulary
-        is identical ("zeitblock"/"voraussetzung"), so a link written as
-        "zeitblock" reads back as "zeitblock", never "uebergeordnet" or
+        event's linked_tasks with a "relation" equal to the
+        `relation` value passed here - the request and response vocabulary
+        is identical ("time_block"/"prerequisite"), so a link written as
+        "time_block" reads back as "time_block", never "parent" or
         similar internal RELTYPE naming.
 
         Args:
             list_name: Display name of the task list containing the task.
             task_uid: UID of the task to link.
-            kalender_name: Display name of the calendar containing the event.
+            calendar_name: Display name of the calendar containing the event.
             event_uid: UID of the event to link.
-            beziehung: "zeitblock" (default) - the event reserves time to work
-                on the task; or "voraussetzung" - the event must happen before
+            relation: "time_block" (default) - the event reserves time to work
+                on the task; or "prerequisite" - the event must happen before
                 the task can be completed.
 
         Returns:
-            {"task_uid", "event_uid", "beziehung"} on success.
+            {"task_uid", "event_uid", "relation"} on success.
         """
         await _call(
             caldav_service.link_task_to_event,
             list_name,
             task_uid,
-            kalender_name,
+            calendar_name,
             event_uid,
-            beziehung,
+            relation,
         )
-        return {"task_uid": task_uid, "event_uid": event_uid, "beziehung": beziehung}
+        return {"task_uid": task_uid, "event_uid": event_uid, "relation": relation}
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_events_for_task(
         list_name: str,
         task_uid: str,
-        kalender_namen: list[str] | None = None,
+        calendar_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Find events linked to a task - the task-side counterpart of link_task_to_event.
 
         link_task_to_event stores the RELATED-TO link on the event only (see
         its docstring for why), so there is normally no way to discover a
         link starting from the task; this tool does the reverse lookup by
-        scanning the queried calendars' events for a verknuepfte_aufgaben
+        scanning the queried calendars' events for a linked_tasks
         entry pointing at task_uid.
 
         Args:
             list_name: Display name of the task list containing the task.
             task_uid: UID of the task to find linked events for.
-            kalender_namen: Optional list of calendar display names to
+            calendar_names: Optional list of calendar display names to
                 search; None searches every event calendar on the account.
 
         Returns:
             Event dicts (same shape as list_events entries, each with an
-            added "kalender_name" key), sorted by start.
+            added "calendar_name" key), sorted by start.
         """
         return await _call(
             caldav_service.list_events_for_task,
             list_name,
             task_uid,
-            calendar_names=kalender_namen,
+            calendar_names=calendar_names,
         )
 
     @mcp.tool(annotations=_CREATE)
     async def create_event_from_task(
         list_name: str,
         task_uid: str,
-        kalender_name: str,
+        calendar_name: str,
         start: str | None = None,
-        dauer_minuten: int | None = None,
-        ende: str | None = None,
-        beschreibung: str | None = None,
-        erinnerungen: list[str] | None = None,
-        sichtbarkeit: str | None = None,
+        duration_minutes: int | None = None,
+        end: str | None = None,
+        description: str | None = None,
+        reminders: list[str] | None = None,
+        visibility: str | None = None,
     ) -> dict[str, str]:
         """Create a calendar event from an existing task (timeboxing) and link them.
 
         Title, location and tags are copied from the task. The event is
-        linked back to the task via RELATED-TO (the "zeitblock" semantics of
+        linked back to the task via RELATED-TO (the "time_block" semantics of
         link_task_to_event); the task itself is not modified. The new event's
-        verknuepfte_aufgaben will show this task with beziehung "zeitblock",
+        linked_tasks will show this task with relation "time_block",
         same as if link_task_to_event had been called explicitly.
 
         Args:
             list_name: Display name of the task list containing the task.
             task_uid: UID of the task to convert.
-            kalender_name: Display name of the calendar for the new event.
+            calendar_name: Display name of the calendar for the new event.
             start: Optional ISO 8601 start for the event; defaults to the
-                task's faellig_datum (due date). Fails if neither is given. A
+                task's due_date (due date). Fails if neither is given. A
                 date-only start produces a one-day all-day event, and then
-                ende (if given) must also be a date - see create_event's
-                start/ende consistency rule.
-            dauer_minuten: Event duration in minutes; ignored for all-day
-                events. Mutually exclusive with ende - giving both is an
+                end (if given) must also be a date - see create_event's
+                start/end consistency rule.
+            duration_minutes: Event duration in minutes; ignored for all-day
+                events. Mutually exclusive with end - giving both is an
                 error naming both. With neither given, the event runs 60
                 minutes.
-            ende: Optional explicit ISO 8601 end for the event, as an
-                alternative to dauer_minuten (giving both is an error).
-            beschreibung: Optional event description. Left as None (the
-                default), the task's notizen are copied as before; an
+            end: Optional explicit ISO 8601 end for the event, as an
+                alternative to duration_minutes (giving both is an error).
+            description: Optional event description. Left as None (the
+                default), the task's notes are copied as before; an
                 explicit "" sets an empty description instead of inheriting
-                notizen.
-            erinnerungen: Optional reminders for the new event, same format
-                as create_event's erinnerungen -> VALARM.
-            sichtbarkeit: Optional "öffentlich" / "privat" / "vertraulich" for
+                notes.
+            reminders: Optional reminders for the new event, same format
+                as create_event's reminders -> VALARM.
+            visibility: Optional "public" / "private" / "confidential" for
                 the new event -> CLASS.
 
         Returns:
@@ -1734,189 +1730,189 @@ def build_server(
             caldav_service.create_event_from_task,
             list_name,
             task_uid,
-            kalender_name,
+            calendar_name,
             start,
-            dauer_minuten,
-            ende,
-            beschreibung,
-            erinnerungen,
-            sichtbarkeit,
+            duration_minutes,
+            end,
+            description,
+            reminders,
+            visibility,
         )
         return {"uid": new_uid, "task_uid": task_uid}
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_agenda(
-        datum: str,
-        kalender_namen: list[str] | None = None,
-        listen_namen: list[str] | None = None,
+        date: str,
+        calendar_names: list[str] | None = None,
+        list_names: list[str] | None = None,
     ) -> dict[str, Any]:
         """Return one day's calendar events and due tasks together (agenda view).
 
         Args:
-            datum: The day as a date-only "YYYY-MM-DD" string. Day boundaries
+            date: The day as a date-only "YYYY-MM-DD" string. Day boundaries
                 are constructed in the server's default timezone (`MCP_DEFAULT_TIMEZONE`,
                 default Europe/Berlin), consistent with the naive-input rule used
                 everywhere else in this server.
-            kalender_namen: Optional list of event calendars to include;
+            calendar_names: Optional list of event calendars to include;
                 None means all.
-            listen_namen: Optional list of task lists to include; None means
+            list_names: Optional list of task lists to include; None means
                 all.
 
         Returns:
-            {"datum": the day, "termine": event dicts (recurring events
-            expanded to that day's occurrences, sorted by start), "aufgaben":
-            open tasks due that day, each with an added "liste" key}. Recurring
+            {"date": the day, "events": event dicts (recurring events
+            expanded to that day's occurrences, sorted by start), "tasks":
+            open tasks due that day, each with an added "list" key}. Recurring
             *tasks* are expanded to that day's occurrences too - see list_tasks
             for what an expanded row can and cannot be used for (in short: read
-            it, act on its "serie_uid", never on its own "uid"). Every
-            entry in both lists also carries "quelle_url" - the CalDAV URL of
+            it, act on its "series_uid", never on its own "uid"). Every
+            entry in both lists also carries "source_url" - the CalDAV URL of
             the exact calendar/task list it came from (Nextcloud doesn't
-            enforce unique display names, so "kalender"/"liste" alone can't
+            enforce unique display names, so "calendar"/"list" alone can't
             always tell two collections apart). Calendar/task-list listings
             are cached for up to a minute, so a rename or deletion made in
             the Nextcloud web UI can take that long to show up here.
         """
         return await _call(
             caldav_service.get_agenda,
-            datum,
-            calendar_names=kalender_namen,
-            list_names=listen_namen,
+            date,
+            calendar_names=calendar_names,
+            list_names=list_names,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_tags(
-        kalender_namen: list[str] | None = None,
-        listen_namen: list[str] | None = None,
+        calendar_names: list[str] | None = None,
+        list_names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Aggregierte Tags (CATEGORIES) und Häufigkeit über Sammlungen abrufen.
+        """Get aggregated tags (CATEGORIES) and their frequency across collections.
 
-        Liest alle VEVENT-Termine und VTODO-Aufgaben (inklusive erledigter Aufgaben)
-        aus den angegebenen Kalendern und Listen. Die Zusammenfassung erfolgt
-        case-insensitiv; als Tag-Name wird die häufigste Schreibweise gemeldet, bei
-        Gleichstand die alphabetisch erste - damit zwei gleiche Aufrufe nicht
-        unterschiedlich antworten, nur weil der Server anders sortiert hat.
+        Reads all VEVENT events and VTODO tasks (including completed tasks) from
+        the given calendars and lists. Aggregation is case-insensitive; the
+        reported tag name is the most frequent spelling, with ties broken
+        alphabetically first - so two identical calls don't answer differently
+        just because the server happened to sort differently.
 
-        HINWEIS: Dies ist eine aufwendige Operation, da die Sammlungen vollständig
-        ohne Zeitfenster ausgelesen werden; solange sie läuft, warten andere
-        Aufrufe auf dieselbe CalDAV-Verbindung.
+        NOTE: This is an expensive operation, since the collections are read in
+        full with no time window; other calls on the same CalDAV connection wait
+        while it runs.
 
         Args:
-            kalender_namen: Liste von Kalendernamen. None = alle Kalender, [] = keine Kalender.
-            listen_namen: Liste von Aufgabenlisten-Namen. None = alle Listen, [] = keine Listen.
+            calendar_names: List of calendar names. None = all calendars, [] = none.
+            list_names: List of task list names. None = all lists, [] = none.
 
         Returns:
-            Eine Liste von {"tag": Tag-Name, "anzahl": Anzahl} Dicts, sortiert nach
-            anzahl absteigend, bei Gleichstand alphabetisch nach tag.
+            A list of {"tag": tag name, "count": count} dicts, sorted by count
+            descending, ties broken alphabetically by tag.
         """
         return await _call(
             caldav_service.list_tags,
-            calendar_names=kalender_namen,
-            list_names=listen_namen,
+            calendar_names=calendar_names,
+            list_names=list_names,
         )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_free_busy(
-        von: str,
-        bis: str,
-        benutzer: str | None = None,
+        start: str,
+        end: str,
+        user: str | None = None,
     ) -> dict[str, Any]:
         """Get busy time intervals in a date/time range, for yourself or another user.
 
         Args:
-            von: ISO 8601 start of the range. Naive datetimes are interpreted
+            start: ISO 8601 start of the range. Naive datetimes are interpreted
                 in the server's default timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin);
                 a date-only value means the start of that day.
-            bis: ISO 8601 end of the range. A date-only value includes that
+            end: ISO 8601 end of the range. A date-only value includes that
                 entire day.
-            benutzer: Optional Nextcloud user id or email of another account
+            user: Optional Nextcloud user id or email of another account
                 to query. When omitted (default), returns your own
                 availability, computed by aggregating your own event
                 calendars. When given, this sends a CalDAV free-busy
                 scheduling request to the server for that user - the server
-                resolves `benutzer`, not this tool; a user with no visible
+                resolves `user`, not this tool; a user with no visible
                 scheduling info (unknown to the server, or with scheduling
                 disabled) produces an error rather than an empty result, so
                 it isn't mistaken for "fully free".
 
         Returns:
-            {"von": range start, "bis": range end, "benutzer": benutzer,
-            "belegt": merged, sorted busy intervals as a list of
-            {"von": iso, "bis": iso} dicts}. Cancelled and "transparent"
+            {"start": range start, "end": range end, "user": user,
+            "busy": merged, sorted busy intervals as a list of
+            {"start": iso, "end": iso} dicts}. Cancelled and "transparent"
             (does-not-block-time) events are excluded from your own
             availability; overlapping/back-to-back busy blocks are merged
             into one interval.
         """
-        return await _call(caldav_service.get_free_busy, von, bis, benutzer)
+        return await _call(caldav_service.get_free_busy, start, end, user)
 
     @mcp.tool(annotations=_ADD)
     async def share_calendar(
-        kalender_name: str,
-        empfaenger: str,
-        gruppe: bool = False,
-        schreibzugriff: bool = False,
+        calendar_name: str,
+        recipient: str,
+        group: bool = False,
+        write_access: bool = False,
     ) -> dict[str, Any]:
         """Share a task list or event calendar with a Nextcloud user or group.
 
         Uses Nextcloud's own CalDAV sharing extension - this only works
         against a real Nextcloud server, not a generic CalDAV server, since
         it isn't part of any CalDAV RFC. Calling this again for the same
-        empfaenger updates their access level instead of creating a
+        recipient updates their access level instead of creating a
         duplicate share.
 
         Args:
-            kalender_name: Display name of the task list or event calendar
+            calendar_name: Display name of the task list or event calendar
                 to share (resolved across both kinds).
-            empfaenger: Nextcloud user id (or group id when gruppe=True) to
+            recipient: Nextcloud user id (or group id when group=True) to
                 share with.
-            gruppe: If True, empfaenger names a group instead of a user.
-            schreibzugriff: If True, grant read-write access; otherwise the
+            group: If True, recipient names a group instead of a user.
+            write_access: If True, grant read-write access; otherwise the
                 share is read-only.
 
         Returns:
-            {"kalender_name", "empfaenger", "schreibzugriff"} on success.
+            {"calendar_name", "recipient", "write_access"} on success.
         """
         return await _call(
-            caldav_service.share_calendar, kalender_name, empfaenger, gruppe, schreibzugriff
+            caldav_service.share_calendar, calendar_name, recipient, group, write_access
         )
 
     @mcp.tool(annotations=_MODIFY)
     async def unshare_calendar(
-        kalender_name: str,
-        empfaenger: str,
-        gruppe: bool = False,
+        calendar_name: str,
+        recipient: str,
+        group: bool = False,
     ) -> dict[str, str]:
         """Remove a user's or group's share of a task list or event calendar.
 
-        A no-op (not an error) if empfaenger doesn't currently have a share
+        A no-op (not an error) if recipient doesn't currently have a share
         of this calendar.
 
         Args:
-            kalender_name: Display name of the task list or event calendar.
-            empfaenger: Nextcloud user id (or group id when gruppe=True) to
+            calendar_name: Display name of the task list or event calendar.
+            recipient: Nextcloud user id (or group id when group=True) to
                 unshare from.
-            gruppe: If True, empfaenger names a group instead of a user.
+            group: If True, recipient names a group instead of a user.
 
         Returns:
-            {"kalender_name", "empfaenger"} on success.
+            {"calendar_name", "recipient"} on success.
         """
-        await _call(caldav_service.unshare_calendar, kalender_name, empfaenger, gruppe)
-        return {"kalender_name": kalender_name, "empfaenger": empfaenger}
+        await _call(caldav_service.unshare_calendar, calendar_name, recipient, group)
+        return {"calendar_name": calendar_name, "recipient": recipient}
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def list_calendar_shares(kalender_name: str) -> list[dict[str, Any]]:
+    async def list_calendar_shares(calendar_name: str) -> list[dict[str, Any]]:
         """List everyone a task list or event calendar is currently shared with.
 
         Args:
-            kalender_name: Display name of the task list or event calendar.
+            calendar_name: Display name of the task list or event calendar.
 
         Returns:
-            A list of {"empfaenger": user/group id, "typ": "benutzer" or
-            "gruppe", "schreibzugriff": bool, "status": invite status, e.g.
-            "akzeptiert"/"ausstehend"/"abgelehnt" (an unrecognized raw status
+            A list of {"recipient": user/group id, "type": "user" or
+            "group", "write_access": bool, "status": invite status, e.g.
+            "accepted"/"pending"/"declined" (an unrecognized raw status
             from the server comes back lowercased instead of being dropped)}
             dicts.
         """
-        return await _call(caldav_service.list_calendar_shares, kalender_name)
+        return await _call(caldav_service.list_calendar_shares, calendar_name)
 
     @mcp.tool(annotations=_READ_ONLY)
     async def list_trash() -> list[dict[str, Any]]:
@@ -1928,9 +1924,9 @@ def build_server(
 
         Returns:
             A list of {"id": trash item id (pass to restore_from_trash),
-            "titel": title if derivable from the item's data or None,
-            "typ": "aufgabe"/"termin"/None, "kalender": the original
-            calendar's URI if reported by the server or None, "geloescht_am":
+            "title": title if derivable from the item's data or None,
+            "type": "task"/"event"/None, "calendar": the original
+            calendar's URI if reported by the server or None, "deleted_at":
             ISO 8601 deletion timestamp or None} dicts.
         """
         return await _call(caldav_service.list_trash)
@@ -1949,21 +1945,21 @@ def build_server(
         return {"id": id}
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def export_calendar(kalender_name: str) -> dict[str, str]:
+    async def export_calendar(calendar_name: str) -> dict[str, str]:
         """Export a task list or event calendar as a single ICS (VCALENDAR) text.
 
         Args:
-            kalender_name: Display name of the task list or event calendar
+            calendar_name: Display name of the task list or event calendar
                 to export (resolved across both kinds).
 
         Returns:
-            {"kalender_name", "ics": the full VCALENDAR text, containing
+            {"calendar_name", "ics": the full VCALENDAR text, containing
             every task/event in the calendar}.
         """
-        return await _call(caldav_service.export_calendar, kalender_name)
+        return await _call(caldav_service.export_calendar, calendar_name)
 
     @mcp.tool(annotations=_CREATE)
-    async def import_ics(kalender_name: str, ics: str) -> dict[str, Any]:
+    async def import_ics(calendar_name: str, ics: str) -> dict[str, Any]:
         """Import ICS (VCALENDAR) text into an existing task list or event calendar.
 
         Top-level VEVENT/VTODO components are grouped by UID, so a recurring
@@ -1973,135 +1969,135 @@ def build_server(
         import.
 
         Args:
-            kalender_name: Display name of the target task list or event
+            calendar_name: Display name of the target task list or event
                 calendar (resolved across both kinds).
             ics: Full ICS text; must be a VCALENDAR containing at least one
                 VEVENT or VTODO.
 
         Returns:
-            {"kalender_name", "importiert": number of calendar objects
-            created, "uebersprungen": number skipped because the target
+            {"calendar_name", "imported": number of calendar objects
+            created, "skipped": number skipped because the target
             calendar doesn't support that component kind}.
         """
-        return await _call(caldav_service.import_ics, kalender_name, ics)
+        return await _call(caldav_service.import_ics, calendar_name, ics)
 
     # ------------------------------------------------------------------
     # Notes (Nextcloud Notes app's JSON REST API - see notes_client.py)
     # ------------------------------------------------------------------
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def list_notizen(kategorie: str | None = None) -> list[dict[str, Any]]:
+    async def list_notes(category: str | None = None) -> list[dict[str, Any]]:
         """List all Nextcloud notes (title/category/favorite only, not content).
 
         Args:
-            kategorie: Optional category name to filter by.
+            category: Optional category name to filter by.
 
         Returns:
-            A list of {"id": note id, "titel": title, "kategorie": category
-            name or None, "favorit": bool, "geaendert": ISO 8601 last-modified
+            A list of {"id": note id, "title": title, "category": category
+            name or None, "favorite": bool, "modified": ISO 8601 last-modified
             timestamp or None} dicts. Note content is not included here - use
-            get_notiz to read a specific note's content.
+            get_note to read a specific note's content.
         """
-        return await _call_notes(notes_svc.list_notes(kategorie))
+        return await _call_notes(notes_svc.list_notes(category))
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def get_notiz(notiz_id: int) -> dict[str, Any]:
+    async def get_note(note_id: int) -> dict[str, Any]:
         """Fetch a single note by id, including its full content.
 
         Args:
-            notiz_id: The note's id, as returned by list_notizen/search_notizen.
+            note_id: The note's id, as returned by list_notes/search_notes.
 
         Returns:
-            {"id", "titel", "kategorie" (or None), "inhalt": full content,
-            "favorit": bool, "geaendert": ISO 8601 last-modified timestamp or
-            None, "schreibgeschuetzt": True if the note is read-only}.
+            {"id", "title", "category" (or None), "content": full content,
+            "favorite": bool, "modified": ISO 8601 last-modified timestamp or
+            None, "read_only": True if the note is read-only}.
         """
-        return await _call_notes(notes_svc.get_note(notiz_id))
+        return await _call_notes(notes_svc.get_note(note_id))
 
     @mcp.tool(annotations=_CREATE)
-    async def create_notiz(
-        titel: str,
-        kategorie: str | None = None,
-        inhalt: str | None = None,
-        favorit: bool | None = None,
+    async def create_note(
+        title: str,
+        category: str | None = None,
+        content: str | None = None,
+        favorite: bool | None = None,
     ) -> dict[str, Any]:
         """Create a new Nextcloud note.
 
         Args:
-            titel: Note title.
-            kategorie: Optional category name.
-            inhalt: Optional initial content.
-            favorit: Optional favorite flag (defaults to false server-side).
+            title: Note title.
+            category: Optional category name.
+            content: Optional initial content.
+            favorite: Optional favorite flag (defaults to false server-side).
 
         Returns:
-            The created note, same shape as get_notiz's return value.
+            The created note, same shape as get_note's return value.
         """
         fields = notes_mapping.NoteFields(
-            titel=titel, kategorie=kategorie, inhalt=inhalt, favorit=favorit
+            title=title, category=category, content=content, favorite=favorite
         )
         return await _call_notes(notes_svc.create_note(fields))
 
     @mcp.tool(annotations=_MODIFY)
-    async def update_notiz(
-        notiz_id: int,
-        titel: str | None = None,
-        kategorie: str | None = None,
-        inhalt: str | None = None,
-        favorit: bool | None = None,
+    async def update_note(
+        note_id: int,
+        title: str | None = None,
+        category: str | None = None,
+        content: str | None = None,
+        favorite: bool | None = None,
     ) -> dict[str, Any]:
         """Update an existing note. Only fields that are explicitly given are changed.
 
         Args:
-            notiz_id: The note's id.
-            titel: New title, or None to leave unchanged.
-            kategorie: New category, or None to leave unchanged.
-            inhalt: New full content - this REPLACES the existing content
-                (use append_notiz to add to it, replace_in_notiz to change
-                one passage, or update_notiz_abschnitt to change one Markdown
+            note_id: The note's id.
+            title: New title, or None to leave unchanged.
+            category: New category, or None to leave unchanged.
+            content: New full content - this REPLACES the existing content
+                (use append_to_note to add to it, replace_in_note to change
+                one passage, or update_note_section to change one Markdown
                 section instead), or None to leave unchanged.
-            favorit: New favorite flag, or None to leave unchanged.
+            favorite: New favorite flag, or None to leave unchanged.
 
         At least one field must be given.
 
         Returns:
-            The updated note, same shape as get_notiz's return value.
+            The updated note, same shape as get_note's return value.
         """
         fields = notes_mapping.NoteFields(
-            titel=titel, kategorie=kategorie, inhalt=inhalt, favorit=favorit
+            title=title, category=category, content=content, favorite=favorite
         )
-        return await _call_notes(notes_svc.update_note(notiz_id, fields))
+        return await _call_notes(notes_svc.update_note(note_id, fields))
 
     @mcp.tool(annotations=_MODIFY)
-    async def replace_in_notiz(notiz_id: int, alt: str, neu: str) -> dict[str, Any]:
+    async def replace_in_note(note_id: int, old_text: str, new_text: str) -> dict[str, Any]:
         """Replace exactly one occurrence of a text passage in a note's content.
 
-        The targeted alternative to update_notiz's whole-content `inhalt`:
+        The targeted alternative to update_note's whole-content `content`:
         instead of re-sending the full content to change one passage, send
-        only the passage. `alt` must match the current content exactly
+        only the passage. `old_text` must match the current content exactly
         (character for character, including whitespace and newlines; may
         span multiple lines) and exactly once - zero matches or more than
         one match is an error and nothing is changed. On an "occurs N
-        times" error, retry with more surrounding context in `alt` (and the
-        same context repeated in `neu`) so it matches exactly once.
+        times" error, retry with more surrounding context in `old_text` (and the
+        same context repeated in `new_text`) so it matches exactly once.
 
-        Read-then-write like append_notiz, so not atomic - a concurrent
+        Read-then-write like append_to_note, so not atomic - a concurrent
         edit between the read and the write may be lost.
 
         Args:
-            notiz_id: The note's id.
-            alt: Existing text to replace, exactly as it appears in the content.
-            neu: Replacement text (may be empty to delete the passage).
+            note_id: The note's id.
+            old_text: Existing text to replace, exactly as it appears in the content.
+            new_text: Replacement text (may be empty to delete the passage).
 
         Returns:
-            The updated note, same shape as get_notiz's return value.
+            The updated note, same shape as get_note's return value.
         """
-        return await _call_notes(notes_svc.replace_in_note(notiz_id, alt, neu))
+        return await _call_notes(notes_svc.replace_in_note(note_id, old_text, new_text))
 
     @mcp.tool(annotations=_MODIFY)
-    async def update_notiz_abschnitt(notiz_id: int, abschnitt: str, inhalt: str) -> dict[str, Any]:
+    async def update_note_section(note_id: int, section: str, content: str) -> dict[str, Any]:
         """Replace one Markdown section of a note - heading line plus body.
 
-        `abschnitt` is an ATX heading prefix like "## 7." that must select
+        `section` is an ATX heading prefix like "## 7." that must select
         exactly one heading line of the same level (same number of '#')
         starting with it; the match stops at a word boundary, so "## 7"
         does not select "## 75. History" and "## 7.1" does not select
@@ -2111,26 +2107,26 @@ def build_server(
         blocks or a leading YAML front matter block are ignored; setext
         (underlined) headings are not recognized.
 
-        `inhalt` replaces the whole section INCLUDING its heading line, so
-        start it with the (possibly renamed) heading. An empty `inhalt`
+        `content` replaces the whole section INCLUDING its heading line, so
+        start it with the (possibly renamed) heading. An empty `content`
         removes the section entirely.
 
-        Read-then-write like append_notiz, so not atomic - a concurrent
+        Read-then-write like append_to_note, so not atomic - a concurrent
         edit between the read and the write may be lost.
 
         Args:
-            notiz_id: The note's id.
-            abschnitt: Heading prefix selecting the section, e.g. "## 7."
+            note_id: The note's id.
+            section: Heading prefix selecting the section, e.g. "## 7."
                 or "### Offene Punkte".
-            inhalt: The section's new text, starting with its heading line.
+            content: The section's new text, starting with its heading line.
 
         Returns:
-            The updated note, same shape as get_notiz's return value.
+            The updated note, same shape as get_note's return value.
         """
-        return await _call_notes(notes_svc.replace_note_section(notiz_id, abschnitt, inhalt))
+        return await _call_notes(notes_svc.replace_note_section(note_id, section, content))
 
     @mcp.tool(annotations=_CREATE)
-    async def append_notiz(notiz_id: int, text: str) -> dict[str, Any]:
+    async def append_to_note(note_id: int, text: str) -> dict[str, Any]:
         """Append text to an existing note's content, keeping what's already there.
 
         Reads the note's current content and writes it back with `text`
@@ -2140,32 +2136,32 @@ def build_server(
         be lost.
 
         Args:
-            notiz_id: The note's id.
+            note_id: The note's id.
             text: Text to append.
 
         Returns:
-            The updated note, same shape as get_notiz's return value.
+            The updated note, same shape as get_note's return value.
         """
-        return await _call_notes(notes_svc.append_note(notiz_id, text))
+        return await _call_notes(notes_svc.append_note(note_id, text))
 
     @mcp.tool(annotations=_READ_ONLY)
-    async def search_notizen(suchtext: str, kategorie: str | None = None) -> list[dict[str, Any]]:
+    async def search_notes(search_text: str, category: str | None = None) -> list[dict[str, Any]]:
         """Search notes by a case-insensitive substring match over title and content.
 
         The Notes API has no server-side full-text search, so this fetches
         the (optionally category-filtered) notes and filters client-side.
 
         Args:
-            suchtext: Substring to search for in the title or content.
-            kategorie: Optional category name to narrow the search to first.
+            search_text: Substring to search for in the title or content.
+            category: Optional category name to narrow the search to first.
 
         Returns:
-            Matching notes, same shape as list_notizen's return value (no content).
+            Matching notes, same shape as list_notes's return value (no content).
         """
-        return await _call_notes(notes_svc.search_notes(suchtext, kategorie))
+        return await _call_notes(notes_svc.search_notes(search_text, category))
 
     @mcp.tool(annotations=_MODIFY)
-    async def delete_notiz(notiz_id: int) -> dict[str, int]:
+    async def delete_note(note_id: int) -> dict[str, int]:
         """Permanently delete a Nextcloud note.
 
         WARNING: this is irreversible from this server's point of view -
@@ -2173,13 +2169,13 @@ def build_server(
         before calling this.
 
         Args:
-            notiz_id: The note's id, as returned by list_notizen/search_notizen.
+            note_id: The note's id, as returned by list_notes/search_notes.
 
         Returns:
-            {"id": notiz_id} on success.
+            {"id": note_id} on success.
         """
-        await _call_notes(notes_svc.delete_note(notiz_id))
-        return {"id": notiz_id}
+        await _call_notes(notes_svc.delete_note(note_id))
+        return {"id": note_id}
 
     return mcp
 

@@ -81,8 +81,8 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 > `state` carries Claude's own randomly generated CSRF token
 > (e.g. `state=AfGKaeD8ijS45GgSdUH0KLgD0AAitxmZJozNMHVOTLo`), the connector UI has no
 > input that could influence it, and every legitimate authorization was denied with
-> "Registrierung beim Anmeldedienst fehlgeschlagen" (fail-closed - no exposure, but no
-> way to ever register the connector either).
+> "Registration with the authentication service failed" (fail-closed - no exposure, but
+> no way to ever register the connector either).
 >
 > The `state` check has been replaced by an **interactive consent page** (LOCAL PATCH 5
 > in `personal_auth.py`): `/authorize` parks the validated OAuth request in memory under

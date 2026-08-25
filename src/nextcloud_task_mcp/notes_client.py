@@ -18,8 +18,8 @@ import httpx
 from .errors import (
     AuthenticationFailedError,
     ConnectionFailedError,
-    InvalidNotizDataError,
-    NotizNotFoundError,
+    InvalidNoteDataError,
+    NoteNotFoundError,
     TaskMcpError,
 )
 from .notes_mapping import NoteFields, parse_note, parse_note_summary, to_request_body
@@ -49,9 +49,9 @@ def _raise_for_status(response: httpx.Response) -> None:
             "Nextcloud rejected the Notes API credentials (check username/app password)."
         )
     if response.status_code == 404:
-        raise NotizNotFoundError("The requested note was not found.")
+        raise NoteNotFoundError("The requested note was not found.")
     if response.status_code == 400:
-        raise InvalidNotizDataError("Nextcloud rejected the note data as invalid.")
+        raise InvalidNoteDataError("Nextcloud rejected the note data as invalid.")
     if response.status_code == 507:
         raise TaskMcpError("Nextcloud storage quota exceeded - the note could not be saved.")
     if response.is_error:
@@ -100,7 +100,7 @@ class NotesService:
         return response
 
     async def list_notes(self, category: str | None = None) -> list[dict[str, Any]]:
-        """Return all notes as German summary dicts (no `inhalt`/content).
+        """Return all notes as summary dicts (no `content`).
 
         `category` filters server-side; `exclude=content` keeps the response
         cheap for a plain listing - `get_note` fetches a single note in full.
@@ -111,23 +111,23 @@ class NotesService:
         response = await self._request("GET", "notes", params=params)
         return [parse_note_summary(note) for note in response.json()]
 
-    async def get_note(self, notiz_id: int) -> dict[str, Any]:
+    async def get_note(self, note_id: int) -> dict[str, Any]:
         """Return a single note, including its full content."""
-        response = await self._request("GET", f"notes/{notiz_id}")
+        response = await self._request("GET", f"notes/{note_id}")
         return parse_note(response.json())
 
-    async def delete_note(self, notiz_id: int) -> None:
+    async def delete_note(self, note_id: int) -> None:
         """Permanently delete a note by id."""
-        await self._request("DELETE", f"notes/{notiz_id}")
+        await self._request("DELETE", f"notes/{note_id}")
 
     async def create_note(self, fields: NoteFields) -> dict[str, Any]:
         """Create a new note and return it, parsed like `get_note`."""
-        if fields.titel is None:
-            raise InvalidNotizDataError("titel is required to create a note.")
+        if fields.title is None:
+            raise InvalidNoteDataError("title is required to create a note.")
         response = await self._request("POST", "notes", json=to_request_body(fields))
         return parse_note(response.json())
 
-    async def update_note(self, notiz_id: int, fields: NoteFields) -> dict[str, Any]:
+    async def update_note(self, note_id: int, fields: NoteFields) -> dict[str, Any]:
         """Update only the given (non-None) fields of an existing note.
 
         The Notes API's PUT accepts a partial JSON body directly (unlike
@@ -136,11 +136,11 @@ class NotesService:
         """
         body = to_request_body(fields)
         if not body:
-            raise InvalidNotizDataError("At least one field must be given to update a note.")
-        response = await self._request("PUT", f"notes/{notiz_id}", json=body)
+            raise InvalidNoteDataError("At least one field must be given to update a note.")
+        response = await self._request("PUT", f"notes/{note_id}", json=body)
         return parse_note(response.json())
 
-    async def append_note(self, notiz_id: int, text: str) -> dict[str, Any]:
+    async def append_note(self, note_id: int, text: str) -> dict[str, Any]:
         """Append `text` to a note's existing content (read, then write back).
 
         Not an atomic server-side append - the Notes API has no such
@@ -149,53 +149,53 @@ class NotesService:
         ETag/If-Match support (v1.2+), which would only guard against that
         for a single-writer-at-a-time workflow anyway; out of scope here.
         """
-        current = await self.get_note(notiz_id)
-        separator = "\n\n" if current["inhalt"] else ""
-        new_content = f"{current['inhalt']}{separator}{text}"
-        return await self.update_note(notiz_id, NoteFields(inhalt=new_content))
+        current = await self.get_note(note_id)
+        separator = "\n\n" if current["content"] else ""
+        new_content = f"{current['content']}{separator}{text}"
+        return await self.update_note(note_id, NoteFields(content=new_content))
 
-    async def replace_in_note(self, notiz_id: int, alt: str, neu: str) -> dict[str, Any]:
-        """Replace exactly one occurrence of `alt` in a note's content with `neu`.
+    async def replace_in_note(self, note_id: int, old_text: str, new_text: str) -> dict[str, Any]:
+        """Replace exactly one occurrence of `old_text` in a note's content with `new_text`.
 
-        `alt` must match the current content exactly once: zero matches and
+        `old_text` must match the current content exactly once: zero matches and
         multiple matches are both rejected, so a caller can never silently
         patch the wrong spot. Like `append_note`, this is a read-then-write,
         not an atomic server-side operation - a concurrent edit between the
         read and the write may be lost.
         """
-        if not alt:
-            raise InvalidNotizDataError("alt must not be empty.")
-        current = await self.get_note(notiz_id)
-        count = current["inhalt"].count(alt)
+        if not old_text:
+            raise InvalidNoteDataError("old_text must not be empty.")
+        current = await self.get_note(note_id)
+        count = current["content"].count(old_text)
         if count == 0:
-            raise InvalidNotizDataError(
-                "The text to replace (alt) was not found in the note's content."
+            raise InvalidNoteDataError(
+                "The text to replace (old_text) was not found in the note's content."
             )
         if count > 1:
-            raise InvalidNotizDataError(
-                f"The text to replace (alt) occurs {count} times in the note's content - "
+            raise InvalidNoteDataError(
+                f"The text to replace (old_text) occurs {count} times in the note's content - "
                 "include more surrounding context so it matches exactly once."
             )
-        new_content = current["inhalt"].replace(alt, neu, 1)
-        return await self.update_note(notiz_id, NoteFields(inhalt=new_content))
+        new_content = current["content"].replace(old_text, new_text, 1)
+        return await self.update_note(note_id, NoteFields(content=new_content))
 
     async def replace_note_section(
-        self, notiz_id: int, abschnitt: str, inhalt: str
+        self, note_id: int, section: str, content: str
     ) -> dict[str, Any]:
         """Replace one Markdown section (heading line + body) of a note's content.
 
-        `abschnitt` selects exactly one ATX heading and `inhalt` becomes the
+        `section` selects exactly one ATX heading and `content` becomes the
         new section text, heading line included - see
         `notes_sections.replace_section` for the matching rules. Like
         `append_note`, this is a read-then-write, not atomic against
         concurrent edits.
         """
-        current = await self.get_note(notiz_id)
-        new_content = replace_section(current["inhalt"], abschnitt, inhalt)
-        return await self.update_note(notiz_id, NoteFields(inhalt=new_content))
+        current = await self.get_note(note_id)
+        new_content = replace_section(current["content"], section, content)
+        return await self.update_note(note_id, NoteFields(content=new_content))
 
     async def search_notes(
-        self, suchtext: str, kategorie: str | None = None
+        self, search_text: str, category: str | None = None
     ) -> list[dict[str, Any]]:
         """Case-insensitive substring search over title and content.
 
@@ -205,10 +205,10 @@ class NotesService:
         `list_notes`.
         """
         params: dict[str, str] = {}
-        if kategorie is not None:
-            params["category"] = kategorie
+        if category is not None:
+            params["category"] = category
         response = await self._request("GET", "notes", params=params)
-        needle = suchtext.casefold()
+        needle = search_text.casefold()
         matches = [
             note
             for note in response.json()
