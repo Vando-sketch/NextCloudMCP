@@ -807,6 +807,83 @@ def test_create_task_saves_ical_and_returns_uid(service, principal):
     assert "Neue Aufgabe" in kwargs["ical"]
 
 
+def test_create_task_with_status_erledigt_writes_a_completed_task(service, principal):
+    """Importing a finished task is one call: STATUS, PERCENT-COMPLETE and
+    COMPLETED all land in the created VTODO, exactly as complete_task would
+    have written them in a second round-trip."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(titel="Schon erledigt", status="erledigt"),
+    )
+
+    _, kwargs = calendar.save_todo.call_args
+    todo = next(c for c in Calendar.from_ical(kwargs["ical"]).walk("VTODO"))
+    assert str(todo["status"]) == "COMPLETED"
+    assert int(str(todo["percent-complete"])) == 100
+    assert "completed" in todo
+    assert mapping.parse_vtodo(todo)["status"] == "erledigt"
+
+
+@pytest.mark.parametrize(
+    ("label", "ical_status"),
+    [("in-arbeit", "IN-PROCESS"), ("abgesagt", "CANCELLED"), ("offen", "NEEDS-ACTION")],
+)
+def test_create_task_with_status_writes_that_status(service, principal, label, ical_status):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task("Personal", mapping.TaskFields(titel="Aufgabe", status=label))
+
+    _, kwargs = calendar.save_todo.call_args
+    todo = next(c for c in Calendar.from_ical(kwargs["ical"]).walk("VTODO"))
+    assert str(todo["status"]) == ical_status
+    # Only "erledigt" carries a completion timestamp.
+    assert "completed" not in todo
+
+
+def test_create_task_status_rejects_an_unknown_label(service, principal):
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(InvalidTaskDataError, match="Unknown status"):
+        service.create_task("Personal", mapping.TaskFields(titel="Aufgabe", status="fertig"))
+
+    calendar.save_todo.assert_not_called()
+
+
+def test_create_task_without_status_writes_no_status_property(service, principal):
+    """A task created the ordinary way stays exactly as it was before."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task("Personal", mapping.TaskFields(titel="Aufgabe"))
+
+    _, kwargs = calendar.save_todo.call_args
+    todo = next(c for c in Calendar.from_ical(kwargs["ical"]).walk("VTODO"))
+    assert "status" not in todo
+    assert mapping.parse_vtodo(todo)["status"] == "offen"
+
+
+def test_create_task_explicit_fortschritt_wins_over_status(service, principal):
+    """Same precedence update_task already gives the pair, so a task can be
+    imported as completed-but-recorded-at-90% without a follow-up write."""
+    calendar = _make_calendar("Personal")
+    principal.calendars.return_value = [calendar]
+
+    service.create_task(
+        "Personal",
+        mapping.TaskFields(titel="Aufgabe", status="erledigt", fortschritt_prozent=90),
+    )
+
+    _, kwargs = calendar.save_todo.call_args
+    todo = next(c for c in Calendar.from_ical(kwargs["ical"]).walk("VTODO"))
+    assert str(todo["status"]) == "COMPLETED"
+    assert int(str(todo["percent-complete"])) == 90
+
+
 def test_create_task_with_zoned_dates_writes_matching_vtimezone(service, principal):
     """Since 5.7 a task's DTSTART/DUE can reference a TZID, and RFC 5545 3.6.5
     requires a matching VTIMEZONE in the same VCALENDAR - otherwise no other
@@ -4947,6 +5024,22 @@ def test_get_agenda_recovers_from_a_404_mid_call_under_the_frozen_ttl(
 # ======================================================================
 
 
+def _hierarchy_todo(uid: str, summary: str, parent: str | None = None) -> MagicMock:
+    """A calendar object standing in for one VTODO, as `calendar.todos()` yields them.
+
+    `parent` writes the `RELATED-TO;RELTYPE=PARENT` that makes the task a
+    subtask - the property `move_task`'s orphan check reads.
+    """
+    todo = Todo()
+    todo.add("uid", uid)
+    todo.add("summary", summary)
+    if parent is not None:
+        todo.add("related-to", parent, parameters={"RELTYPE": "PARENT"})
+    obj = MagicMock()
+    obj.icalendar_component = todo
+    return obj
+
+
 def test_move_task_happy_path_caldav_move(service, principal, mock_dav_client):
     source = _make_calendar(
         "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
@@ -4959,6 +5052,8 @@ def test_move_task_happy_path_caldav_move(service, principal, mock_dav_client):
     todo_obj = MagicMock()
     todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
     source.get_todo_by_uid.return_value = todo_obj
+    source.todos.return_value = []
+    target.todos.return_value = [_hierarchy_todo("task1", "Test task")]
 
     mock_dav_client.return_value.request.return_value = SimpleNamespace(status=201)
 
@@ -4969,6 +5064,7 @@ def test_move_task_happy_path_caldav_move(service, principal, mock_dav_client):
         "von": "QuellListe",
         "nach": "ZielListe",
         "methode": "MOVE",
+        "verwaiste_verknuepfungen": [],
     }
     assert mock_dav_client.return_value.request.call_args_list[-1] == (
         (
@@ -5049,6 +5145,8 @@ def test_move_task_rejection_statuses_fallback(service, principal, mock_dav_clie
     source.get_todo_by_uid.return_value = todo_obj
 
     target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), _readback(vcal)]
+    source.todos.return_value = []
+    target.todos.return_value = [_hierarchy_todo("task1", "Test task")]
     mock_dav_client.return_value.request.return_value = SimpleNamespace(status=status)
 
     result = service.move_task("QuellListe", "task1", "ZielListe")
@@ -5058,6 +5156,7 @@ def test_move_task_rejection_statuses_fallback(service, principal, mock_dav_clie
         "von": "QuellListe",
         "nach": "ZielListe",
         "methode": "kopiert",
+        "verwaiste_verknuepfungen": [],
     }
     target.save_todo.assert_called_once()
     todo_obj.delete.assert_called_once()
@@ -5194,11 +5293,152 @@ def test_move_target_does_not_support_component(service, principal, mock_dav_cli
         service.move_event("Personal", "event1", "QuellListe")
 
 
+def _move_pair(principal, mock_dav_client):
+    """Source + target task list wired for a successful server-side MOVE."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "ZielListe", url="https://cloud.example.com/dav/ziel/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+    todo_obj = MagicMock()
+    todo_obj.url = "https://cloud.example.com/dav/quell/task1.ics"
+    source.get_todo_by_uid.return_value = todo_obj
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=201)
+    return source, target
+
+
+def test_move_task_reports_moved_subtask_left_without_its_parent(
+    service, principal, mock_dav_client
+):
+    source, target = _move_pair(principal, mock_dav_client)
+    # The parent stays behind; only the subtask moves.
+    source.todos.return_value = [_hierarchy_todo("parent1", "Projekt")]
+    target.todos.return_value = [_hierarchy_todo("task1", "Unteraufgabe", parent="parent1")]
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result["verwaiste_verknuepfungen"] == [
+        {
+            "uid": "task1",
+            "titel": "Unteraufgabe",
+            "liste": "ZielListe",
+            "fehlende_uebergeordnete_uid": "parent1",
+        }
+    ]
+
+
+def test_move_task_reports_subtasks_left_behind_by_their_parent(
+    service, principal, mock_dav_client
+):
+    source, target = _move_pair(principal, mock_dav_client)
+    # Two subtasks stay behind, pointing at the parent that just left. The
+    # unrelated task in the same list is not reported.
+    source.todos.return_value = [
+        _hierarchy_todo("kind1", "Erster Schritt", parent="task1"),
+        _hierarchy_todo("kind2", "Zweiter Schritt", parent="task1"),
+        _hierarchy_todo("fremd", "Unbeteiligt"),
+    ]
+    target.todos.return_value = [_hierarchy_todo("task1", "Projekt")]
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result["verwaiste_verknuepfungen"] == [
+        {
+            "uid": "kind1",
+            "titel": "Erster Schritt",
+            "liste": "QuellListe",
+            "fehlende_uebergeordnete_uid": "task1",
+        },
+        {
+            "uid": "kind2",
+            "titel": "Zweiter Schritt",
+            "liste": "QuellListe",
+            "fehlende_uebergeordnete_uid": "task1",
+        },
+    ]
+
+
+def test_move_task_reports_nothing_when_the_parent_is_already_in_the_target(
+    service, principal, mock_dav_client
+):
+    source, target = _move_pair(principal, mock_dav_client)
+    # The parent was moved first, so the subtask arrives next to it: the
+    # RELATED-TO resolves in its new list and nothing is orphaned.
+    source.todos.return_value = []
+    target.todos.return_value = [
+        _hierarchy_todo("parent1", "Projekt"),
+        _hierarchy_todo("task1", "Unteraufgabe", parent="parent1"),
+    ]
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    assert result["verwaiste_verknuepfungen"] == []
+
+
+def test_move_task_orphan_check_ignores_a_task_it_cannot_read(service, principal, mock_dav_client):
+    source, target = _move_pair(principal, mock_dav_client)
+    broken = MagicMock()
+    type(broken).icalendar_component = PropertyMock(side_effect=ValueError("garbage"))
+    no_uid = MagicMock()
+    no_uid.icalendar_component = Todo()
+    source.todos.return_value = [
+        broken,
+        no_uid,
+        _hierarchy_todo("kind1", "Erster Schritt", parent="task1"),
+    ]
+    target.todos.return_value = [_hierarchy_todo("task1", "Projekt")]
+
+    result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    # One unreadable VTODO does not cost the whole warning.
+    assert [entry["uid"] for entry in result["verwaiste_verknuepfungen"]] == ["kind1"]
+
+
+def test_move_task_reports_none_when_the_orphan_check_fails(
+    service, principal, mock_dav_client, caplog
+):
+    source, target = _move_pair(principal, mock_dav_client)
+    source.todos.side_effect = caldav_error.DAVError("listing failed")
+
+    with caplog.at_level(logging.WARNING):
+        result = service.move_task("QuellListe", "task1", "ZielListe")
+
+    # The move itself succeeded - only the follow-up check did not run, and
+    # "could not tell" must not read as "no orphaned links".
+    assert result["methode"] == "MOVE"
+    assert result["verwaiste_verknuepfungen"] is None
+    assert "orphaned subtask links" in caplog.text
+
+
+def test_move_event_result_has_no_orphan_field(service, principal, mock_dav_client):
+    """The hierarchy warning is a task notion; move_event's shape is unchanged."""
+    source = _make_calendar(
+        "QuellKalender", url="https://cloud.example.com/dav/quell_cal/", components=["VEVENT"]
+    )
+    target = _make_calendar(
+        "ZielKalender", url="https://cloud.example.com/dav/ziel_cal/", components=["VEVENT"]
+    )
+    principal.calendars.return_value = [source, target]
+    event_obj = MagicMock()
+    event_obj.url = "https://cloud.example.com/dav/quell_cal/event1.ics"
+    source.event_by_uid.return_value = event_obj
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=201)
+
+    result = service.move_event("QuellKalender", "event1", "ZielKalender")
+
+    assert "verwaiste_verknuepfungen" not in result
+    source.todos.assert_not_called()
+
+
 def test_move_source_equals_target_noop(service, principal, mock_dav_client):
     source = _make_calendar(
         "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
     )
     principal.calendars.return_value = [source]
+
+    source.todos.return_value = [_hierarchy_todo("task1", "Test task")]
 
     res = service.move_task("QuellListe", "task1", "QuellListe")
 
@@ -5207,8 +5447,52 @@ def test_move_source_equals_target_noop(service, principal, mock_dav_client):
         "von": "QuellListe",
         "nach": "QuellListe",
         "methode": "MOVE",
+        "verwaiste_verknuepfungen": [],
     }
+    # The move itself is a no-op and never touches the object...
     source.get_todo_by_uid.assert_not_called()
+
+
+def test_move_task_same_list_still_checks_a_parent_it_re_pointed(
+    service, principal, mock_dav_client
+):
+    """A same-list call moves nothing, but its hierarchy argument can still
+    point the task at a parent that lives in another list - so the scan is not
+    simply skipped for it."""
+    source = _make_calendar(
+        "QuellListe", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source]
+
+    todo = Todo()
+    todo.add("uid", "task1")
+    todo.add("summary", "Aufgabe")
+    instance = Calendar()
+    instance.add_component(todo)
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    todo_obj.icalendar_instance = instance
+    source.get_todo_by_uid.return_value = todo_obj
+    # After the re-parent the task points at a UID this list does not hold, and
+    # the subtask beside it is still nested under a parent that never left.
+    source.todos.return_value = [
+        _hierarchy_todo("task1", "Aufgabe", parent="fremde-liste-uid"),
+        _hierarchy_todo("kind1", "Unteraufgabe", parent="task1"),
+    ]
+
+    res = service.move_task(
+        "QuellListe", "task1", "QuellListe", uebergeordnete_aufgabe="fremde-liste-uid"
+    )
+
+    assert res["hierarchie"] == "gesetzt"
+    assert res["verwaiste_verknuepfungen"] == [
+        {
+            "uid": "task1",
+            "titel": "Aufgabe",
+            "liste": "QuellListe",
+            "fehlende_uebergeordnete_uid": "fremde-liste-uid",
+        }
+    ]
 
 
 def test_move_unknown_target_or_uid(service, principal):
@@ -5799,6 +6083,9 @@ def test_move_task_sets_new_parent_in_target_list(service, principal, mock_dav_c
         "nach": "ZielListe",
         "methode": "MOVE",
         "hierarchie": "gesetzt",
+        # Neither list reports any task here, so the orphan scan finds nothing
+        # to warn about; it has its own tests below.
+        "verwaiste_verknuepfungen": [],
     }
     # Written on the copy in the *target* list, not the one in the source.
     target.get_todo_by_uid.assert_called_once_with("task1")
@@ -5832,9 +6119,54 @@ def test_move_task_without_hierarchy_args_does_not_touch_the_target_copy(
         "von": "QuellListe",
         "nach": "ZielListe",
         "methode": "MOVE",
+        "verwaiste_verknuepfungen": [],
     }
     assert "hierarchie" not in result
+    # The read-only orphan scan is not a write: the target copy is untouched.
     target.get_todo_by_uid.assert_not_called()
+
+
+def test_move_task_reparenting_in_the_same_call_suppresses_the_warning(
+    service, principal, mock_dav_client
+):
+    """The two halves of the hierarchy story have to agree: re-parenting fixes
+    the link the move would have orphaned, and the scan runs after it, so the
+    caller is not warned about what it just repaired."""
+    source, target = _move_task_calendars(principal, mock_dav_client)
+    _moved_todo(target, parent="alter-parent")
+    source.todos.return_value = [_hierarchy_todo("alter-parent", "Altes Projekt")]
+    # The state the target list is in once the re-parent has been written.
+    target.todos.return_value = [
+        _hierarchy_todo("neuer-parent", "Neues Projekt"),
+        _hierarchy_todo("task1", "Test task", parent="neuer-parent"),
+    ]
+
+    result = service.move_task("QuellListe", "task1", "ZielListe", "neuer-parent")
+
+    assert result["hierarchie"] == "gesetzt"
+    assert result["verwaiste_verknuepfungen"] == []
+
+
+def test_move_task_warns_about_a_parent_that_is_in_neither_list(
+    service, principal, mock_dav_client
+):
+    """The mirror image: re-pointing at a parent the target list does not hold
+    creates the dangling link rather than repairing one, and is reported."""
+    source, target = _move_task_calendars(principal, mock_dav_client)
+    _moved_todo(target, parent="alter-parent")
+    source.todos.return_value = []
+    target.todos.return_value = [_hierarchy_todo("task1", "Test task", parent="dritte-liste-uid")]
+
+    result = service.move_task("QuellListe", "task1", "ZielListe", "dritte-liste-uid")
+
+    assert result["verwaiste_verknuepfungen"] == [
+        {
+            "uid": "task1",
+            "titel": "Test task",
+            "liste": "ZielListe",
+            "fehlende_uebergeordnete_uid": "dritte-liste-uid",
+        }
+    ]
 
 
 def test_move_task_applies_hierarchy_even_when_source_equals_target(service, principal):
@@ -6825,7 +7157,7 @@ def _move_responder(*move_statuses: int):
     return respond
 
 
-def _move_pair(principal) -> tuple[MagicMock, MagicMock]:
+def _batch_move_pair(principal) -> tuple[MagicMock, MagicMock]:
     source = _make_calendar(
         "MCP-World", url="https://cloud.example.com/dav/quell/", components=["VTODO"]
     )
@@ -6843,7 +7175,7 @@ def _movable(uid: str) -> MagicMock:
 
 
 def test_move_tasks_all_succeed(service, principal, mock_dav_client):
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     mock_dav_client.return_value.request.side_effect = _move_responder(201, 201, 201)
@@ -6862,7 +7194,7 @@ def test_move_tasks_all_succeed(service, principal, mock_dav_client):
 
 
 def test_move_tasks_resolves_each_list_once(service, principal, mock_dav_client):
-    source, _ = _move_pair(principal)
+    source, _ = _batch_move_pair(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     mock_dav_client.return_value.request.side_effect = _move_responder()
@@ -6875,7 +7207,7 @@ def test_move_tasks_resolves_each_list_once(service, principal, mock_dav_client)
 
 
 def test_move_tasks_reports_one_failure_and_moves_the_rest(service, principal, mock_dav_client):
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     objs = {"t1": _movable("t1"), "t3": _movable("t3")}
 
     def source_lookup(uid):
@@ -6900,7 +7232,7 @@ def test_move_tasks_reports_one_failure_and_moves_the_rest(service, principal, m
 
 def test_move_tasks_reports_a_uid_already_in_the_target(service, principal, mock_dav_client):
     """Re-running a half-failed migration must converge, not report the done half as gone."""
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     source.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
     target.get_todo_by_uid.return_value = _task_obj("t1")
     mock_dav_client.return_value.request.side_effect = _move_responder()
@@ -6922,7 +7254,7 @@ def test_move_tasks_retries_a_gateway_status_instead_of_copying(
     service, principal, mock_dav_client, retry_sleep
 ):
     """A 502 is no answer at all - copying on it is what stranded the MCP-World migration."""
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     source.get_todo_by_uid.return_value = _movable("t1")
     mock_dav_client.return_value.request.side_effect = _move_responder(502, 201)
 
@@ -6937,7 +7269,7 @@ def test_move_tasks_retry_finds_a_move_whose_answer_was_lost(
     service, principal, mock_dav_client, retry_sleep
 ):
     """The 502 came back *after* Nextcloud had already carried the MOVE out."""
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     source.get_todo_by_uid.side_effect = [_movable("t1"), caldav_error.NotFoundError()]
     target.get_todo_by_uid.return_value = _task_obj("t1")
     mock_dav_client.return_value.request.side_effect = _move_responder(502)
@@ -6951,7 +7283,7 @@ def test_move_tasks_retry_finds_a_move_whose_answer_was_lost(
 def test_move_tasks_stops_when_a_gateway_failure_outlives_its_retries(
     service, principal, mock_dav_client, retry_sleep
 ):
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
@@ -6968,7 +7300,7 @@ def test_move_tasks_stops_when_a_gateway_failure_outlives_its_retries(
 
 
 def test_move_tasks_records_a_target_clash_and_carries_on(service, principal, mock_dav_client):
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     mock_dav_client.return_value.request.side_effect = _move_responder(412, 201)
@@ -6983,7 +7315,7 @@ def test_move_tasks_records_a_target_clash_and_carries_on(service, principal, mo
 def test_move_tasks_falls_back_to_copying_when_the_server_refuses_move(
     service, principal, mock_dav_client
 ):
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     obj = _movable("t1")
     source.get_todo_by_uid.return_value = obj
     target.get_todo_by_uid.side_effect = [
@@ -7000,7 +7332,7 @@ def test_move_tasks_falls_back_to_copying_when_the_server_refuses_move(
 
 
 def test_move_tasks_auth_failure_aborts_the_batch(service, principal, mock_dav_client):
-    source, _ = _move_pair(principal)
+    source, _ = _batch_move_pair(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
 
@@ -7018,7 +7350,7 @@ def test_move_tasks_auth_failure_aborts_the_batch(service, principal, mock_dav_c
 
 
 def test_move_tasks_into_the_same_list_is_a_no_op(service, principal, mock_dav_client):
-    source, _ = _move_pair(principal)
+    source, _ = _batch_move_pair(principal)
     mock_dav_client.return_value.request.side_effect = _move_responder()
 
     res = service.move_tasks("MCP-World", ["t1"], "MCP-World")
@@ -7028,21 +7360,21 @@ def test_move_tasks_into_the_same_list_is_a_no_op(service, principal, mock_dav_c
 
 
 def test_move_tasks_unknown_target_list_rejected(service, principal):
-    _move_pair(principal)
+    _batch_move_pair(principal)
 
     with pytest.raises(TaskListNotFoundError):
         service.move_tasks("MCP-World", ["t1"], "GibtEsNicht")
 
 
 def test_move_tasks_empty_uids_rejected(service, principal):
-    _move_pair(principal)
+    _batch_move_pair(principal)
 
     with pytest.raises(InvalidTaskDataError, match="task_uids must not be empty"):
         service.move_tasks("MCP-World", [], "Archiv")
 
 
 def test_move_tasks_occurrence_uid_fails_only_its_own_entry(service, principal, mock_dav_client):
-    source, _ = _move_pair(principal)
+    source, _ = _batch_move_pair(principal)
     source.get_todo_by_uid.side_effect = lambda uid: _movable(uid)
     mock_dav_client.return_value.request.side_effect = _move_responder()
 
@@ -7087,7 +7419,7 @@ def test_a_url_beginning_with_digits_is_not_read_as_a_status():
 def test_move_tasks_retries_a_timeout_while_reading_the_source(
     service, principal, mock_dav_client, retry_sleep
 ):
-    source, _ = _move_pair(principal)
+    source, _ = _batch_move_pair(principal)
     source.get_todo_by_uid.side_effect = [
         caldav_client_module._http_errors.Timeout(),
         _movable("t1"),
@@ -7110,7 +7442,7 @@ def test_a_copy_that_got_no_answer_is_not_retried_and_says_so(
     nobody checked. So the source is kept and the message says the target is
     unknown, rather than claiming nothing was written.
     """
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     obj = _movable("t1")
     source.get_todo_by_uid.return_value = obj
     target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
@@ -7130,7 +7462,7 @@ def test_a_copy_that_got_no_answer_is_not_retried_and_says_so(
 def test_a_copy_the_server_plainly_refused_still_says_the_original_is_safe(
     service, principal, mock_dav_client
 ):
-    source, target = _move_pair(principal)
+    source, target = _batch_move_pair(principal)
     obj = _movable("t1")
     source.get_todo_by_uid.return_value = obj
     target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
@@ -7147,7 +7479,7 @@ def test_move_tasks_stops_on_a_call_scoped_failure_instead_of_repeating_it(
     service, principal, mock_dav_client
 ):
     """Rate limiting is the server asking for less, not one task's problem."""
-    source, _ = _move_pair(principal)
+    source, _ = _batch_move_pair(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     calls = []
