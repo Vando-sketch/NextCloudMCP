@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastmcp.exceptions import ToolError
 
-from nextcloud_task_mcp import mapping
+from nextcloud_task_mcp import event_mapping, mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import (
@@ -714,25 +714,6 @@ def test_list_events_delegates_with_filters(tools, fake_service):
     )
 
 
-def test_list_events_cleanup_filters_stay_positional_or_keyword(tools):
-    """`list_events` deliberately does NOT copy `list_tasks`' keyword-only rule.
-
-    FastMCP lists a keyword-only parameter in the schema's `required` array
-    even when it has a default (that is why `list_tasks`' own filters show up
-    there). `list_events` has always advertised `required: []`, so a client
-    can call it with no arguments at all; marking the new filters keyword-only
-    would put four booleans into `required` and take that away. Appending them
-    to the positional list instead rebinds nothing, since they come last.
-    """
-    params = inspect.signature(tools["list_events"].fn).parameters
-
-    assert all(
-        params[name].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        for name in ("ohne_erinnerung", "ohne_sichtbarkeit", "ohne_tags", "uid_regex")
-    )
-    assert tools["list_events"].parameters.get("required", []) == []
-
-
 def test_list_events_passes_cleanup_filters_through(tools, fake_service):
     fake_service.list_events.return_value = []
     _run(
@@ -817,6 +798,29 @@ def test_list_events_compacts_large_exdate_list(tools, fake_service):
 
 
 # --- Payload slimming (felder whitelist / kompakt mode) and default window ---
+
+
+def test_felder_whitelists_track_the_keys_the_parsers_actually_produce():
+    """`felder` rejects any name not in the whitelist, so the two must not drift.
+
+    A key added to `parse_vtodo`/`parse_vevent` but forgotten here becomes a
+    field that listings return yet `felder` refuses to select - which is how
+    `sichtbarkeit` arrived on the task side. Deriving both sets from the
+    parsers makes the next such addition fail here instead of in a client.
+    """
+    from icalendar import Event, Todo
+
+    from nextcloud_task_mcp.server import _EVENT_RESULT_KEYS, _TASK_RESULT_KEYS
+
+    todo = Todo()
+    todo.add("uid", "t1")
+    # "liste"/"liste_url" are stamped on by the client layer, not the parser.
+    assert set(mapping.parse_vtodo(todo)) | {"liste", "liste_url"} == set(_TASK_RESULT_KEYS)
+
+    event = Event()
+    event.add("uid", "e1")
+    # "kalender" likewise; "quelle_url" is stripped before list_events returns.
+    assert set(event_mapping.parse_vevent(event)) | {"kalender"} == set(_EVENT_RESULT_KEYS)
 
 
 def _sample_event() -> dict:
@@ -940,6 +944,26 @@ def test_list_events_default_window_not_applied_when_scoped(tools, fake_service)
     _run(tools["list_events"].fn(bis="2026-07-31"))
     _, kwargs = fake_service.list_events.call_args
     assert kwargs["von"] is None and kwargs["bis"] == "2026-07-31"
+
+
+def test_list_events_cleanup_filters_do_not_disable_the_default_window(tools, fake_service):
+    """A cleanup sweep narrows the default window rather than escaping it.
+
+    The `ohne_*`/`uid_regex` filters run client-side on whatever the query
+    returned, so a bare sweep only ever sees today ±90 days - phone-created
+    events older than that need `von`/`bis` (or a calendar name) as well.
+    Pinned because "find every hand-made event" reads like it should scan
+    everything, and it does not.
+    """
+    from datetime import date, datetime, timedelta
+
+    fake_service.list_events.return_value = []
+    _run(tools["list_events"].fn(ohne_erinnerung=True, uid_regex="^[A-F0-9-]+$"))
+    _, kwargs = fake_service.list_events.call_args
+    today = datetime.now(mapping.get_default_timezone()).date()
+    assert date.fromisoformat(kwargs["von"]) == today - timedelta(days=90)
+    assert date.fromisoformat(kwargs["bis"]) == today + timedelta(days=90)
+    assert kwargs["ohne_erinnerung"] is True and kwargs["uid_regex"] == "^[A-F0-9-]+$"
 
 
 def test_list_events_default_window_lets_unscoped_expansion_work(tools, fake_service):
