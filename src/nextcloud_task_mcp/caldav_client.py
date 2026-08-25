@@ -138,10 +138,45 @@ _PROBE_START = datetime(1970, 1, 1, tzinfo=timezone.utc)
 #   "voraussetzung":  the event must happen before the task (event = parent).
 _LINK_RELTYPES: dict[str, str] = {"zeitblock": "PARENT", "voraussetzung": "CHILD"}
 
+# The single field name `move_task`/`move_event` accept in their `clear`
+# argument. Moving an object between collections almost always changes its
+# hierarchy too (a subtask's parent stays behind in the old list), so both
+# move calls carry that one field as a shortcut - but they stay move tools,
+# not general-purpose update tools, so the rest of `mapping._CLEAR_SPECS` /
+# `event_mapping._CLEAR_SPECS` is deliberately not reachable through them.
+_MOVE_TASK_CLEARABLE = "uebergeordnete_aufgabe"
+_MOVE_EVENT_CLEARABLE = "verknuepfte_aufgabe"
+
 # Runs of anything that isn't an ASCII letter/digit collapse to a single
 # hyphen, so "Groceries & Errands!" -> "groceries-errands" (leading/trailing
 # hyphens stripped separately, below).
 _SLUG_INVALID_CHARS = re.compile(r"[^a-z0-9]+")
+
+
+def _validate_move_clear(
+    clear: tuple[str, ...] | list[str],
+    allowed: str,
+    value: str | None,
+    error: type[TaskMcpError],
+) -> bool:
+    """Validate a move call's `clear` argument and report whether it clears `allowed`.
+
+    Mirrors `mapping._validate_clear` / `event_mapping._validate_clear` down to
+    the wording, but over the single field a move accepts: anything else is
+    rejected by name (pointing at the update tool that does accept it), and
+    naming the same field that this call also sets is the same contradiction
+    the update tools reject.
+    """
+    names = tuple(clear or ())
+    unknown = sorted({name for name in names if name != allowed})
+    if unknown:
+        raise error(
+            f"Unknown felder_leeren entry/entries: {', '.join(unknown)}. "
+            f"Expected one of: {allowed}."
+        )
+    if names and value is not None:
+        raise error(f"Cannot both set and clear the same field in one call: {allowed}.")
+    return bool(names)
 
 
 def _slugify(display_name: str) -> str:
@@ -1914,8 +1949,15 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
 
-    def move_task(self, list_name: str, task_uid: str, target_list: str) -> dict[str, str]:
-        """Move a task from one task list to another.
+    def move_task(
+        self,
+        list_name: str,
+        task_uid: str,
+        target_list: str,
+        uebergeordnete_aufgabe: str | None = None,
+        clear: tuple[str, ...] | list[str] = (),
+    ) -> dict[str, str]:
+        """Move a task from one task list to another, optionally re-parenting it.
 
         Prefers a CalDAV MOVE request (preserving server-side URL identity and
         ETags). Falls back to copy-then-delete if the server rejects MOVE with
@@ -1926,12 +1968,78 @@ class CalDavService:
             list_name: Display name of the source task list.
             task_uid: UID of the task to move.
             target_list: Display name of the target task list.
+            uebergeordnete_aufgabe: Optional new parent task UID, applied in the
+                *target* list once the move succeeded. As in `update_task`, this
+                replaces the task's RELATED-TO rather than adding to it.
+            clear: Optional `("uebergeordnete_aufgabe",)` to detach the task from
+                its parent instead - the usual counterpart of a move, since a
+                parent left behind in the source list would otherwise keep the
+                moved task nested under a task in another list. Any other field
+                name raises `InvalidTaskDataError`; use `update_task` for those.
 
         Returns:
             {"uid": task_uid, "von": source, "nach": target,
-            "methode": "MOVE" | "kopiert" | "bereits_dort"}
+            "methode": "MOVE" | "kopiert" | "bereits_dort"}, plus
+            "hierarchie": "gesetzt" | "geleert" when the parent was changed.
         """
-        return self._move_object(list_name, task_uid, target_list, "VTODO")
+        clear_parent = _validate_move_clear(
+            clear,
+            _MOVE_TASK_CLEARABLE,
+            uebergeordnete_aufgabe,
+            InvalidTaskDataError,
+        )
+        # Checked before the move so a bad UID can't leave the task moved but
+        # un-reparented; `update_task` would reject it at the same point.
+        _reject_occurrence_uid(task_uid)
+
+        with self._lock:
+            result = self._move_object(list_name, task_uid, target_list, "VTODO")
+            if uebergeordnete_aufgabe is None and not clear_parent:
+                return result
+
+            fields = mapping.TaskFields(
+                uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+                clear=(_MOVE_TASK_CLEARABLE,) if clear_parent else (),
+            )
+            self._apply_move_hierarchy(
+                lambda: self.update_task(target_list, task_uid, fields),
+                uid=task_uid,
+                target_display=result["nach"],
+                kind_article="Task",
+                field_name=_MOVE_TASK_CLEARABLE,
+                retry_tool="update_task",
+            )
+            result["hierarchie"] = "geleert" if clear_parent else "gesetzt"
+            return result
+
+    def _apply_move_hierarchy(
+        self,
+        write: Callable[[], None],
+        *,
+        uid: str,
+        target_display: str,
+        kind_article: str,
+        field_name: str,
+        retry_tool: str,
+    ) -> None:
+        """Run a move's follow-up hierarchy write, reporting a partial failure honestly.
+
+        The hierarchy change is deliberately applied *after* the move, in the
+        target collection: the move is the primary operation, so a failure here
+        leaves a consistent object in the right collection with a stale parent
+        link - rather than the reverse order's failure mode, where a rejected
+        move would strand the object in the source collection pointing at a
+        parent that lives in the target one. The caller is told both halves so
+        it can retry just the part that did not happen.
+        """
+        try:
+            write()
+        except TaskMcpError as exc:
+            raise TaskMcpError(
+                f"{kind_article} '{uid}' was moved to '{target_display}', but changing its "
+                f"{field_name} there failed: {exc} The move itself stands - retry only the "
+                f"hierarchy change with {retry_tool} on '{target_display}'."
+            ) from exc
 
     @staticmethod
     def _validate_task_patch(fields: mapping.TaskFields) -> None:
@@ -2787,9 +2895,14 @@ class CalDavService:
                 raise _translate(exc) from exc
 
     def move_event(
-        self, calendar_name: str, event_uid: str, target_calendar: str
+        self,
+        calendar_name: str,
+        event_uid: str,
+        target_calendar: str,
+        verknuepfte_aufgabe: str | None = None,
+        clear: tuple[str, ...] | list[str] = (),
     ) -> dict[str, str]:
-        """Move an event from one calendar to another.
+        """Move an event from one calendar to another, optionally re-linking its task.
 
         Prefers a CalDAV MOVE request (preserving server-side URL identity and
         ETags). Falls back to copy-then-delete if the server rejects MOVE with
@@ -2800,12 +2913,46 @@ class CalDavService:
             calendar_name: Display name of the source calendar.
             event_uid: UID of the event to move.
             target_calendar: Display name of the target calendar.
+            verknuepfte_aufgabe: Optional task UID to link the event to, applied
+                in the *target* calendar once the move succeeded. As in
+                `update_event`, this replaces the event's whole RELATED-TO set
+                (so any "voraussetzung" link goes with it) rather than adding one
+                - `link_task_to_event` is the additive counterpart.
+            clear: Optional `("verknuepfte_aufgabe",)` to drop the event's task
+                links instead. Any other field name raises
+                `InvalidEventDataError`; use `update_event` for those.
 
         Returns:
             {"uid": event_uid, "von": source, "nach": target,
-            "methode": "MOVE" | "kopiert" | "bereits_dort"}
+            "methode": "MOVE" | "kopiert" | "bereits_dort"}, plus
+            "hierarchie": "gesetzt" | "geleert" when the link was changed.
         """
-        return self._move_object(calendar_name, event_uid, target_calendar, "VEVENT")
+        clear_link = _validate_move_clear(
+            clear,
+            _MOVE_EVENT_CLEARABLE,
+            verknuepfte_aufgabe,
+            InvalidEventDataError,
+        )
+
+        with self._lock:
+            result = self._move_object(calendar_name, event_uid, target_calendar, "VEVENT")
+            if verknuepfte_aufgabe is None and not clear_link:
+                return result
+
+            fields = event_mapping.EventFields(
+                verknuepfte_aufgabe=verknuepfte_aufgabe,
+                clear=(_MOVE_EVENT_CLEARABLE,) if clear_link else (),
+            )
+            self._apply_move_hierarchy(
+                lambda: self.update_event(target_calendar, event_uid, fields),
+                uid=event_uid,
+                target_display=result["nach"],
+                kind_article="Event",
+                field_name=_MOVE_EVENT_CLEARABLE,
+                retry_tool="update_event",
+            )
+            result["hierarchie"] = "geleert" if clear_link else "gesetzt"
+            return result
 
     @staticmethod
     def _fetch_object(collection: DAVCalendar, uid: str, component: str) -> Any:

@@ -173,7 +173,7 @@ Returns all available Nextcloud task lists (calendars supporting VTODO) as
 Event-only calendars (e.g. Nextcloud's default "Personal" calendar) are
 excluded — `list_calendars` is their counterpart.
 
-### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
+### `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, felder=None, kompakt=False, list_name=None)`
 
 Returns tasks across one, several, or all task lists (`listen_namen=None` queries *every* list on the account, unbounded unless you narrow it; `list_name` is a deprecated alias). `nur_offene=True` (default) excludes completed *and* cancelled tasks - this is the underlying `caldav` library's own "pending" query (any `STATUS` of `COMPLETED`/`CANCELLED`, or a `COMPLETED` timestamp, counts as not-open), not a choice layered on top here. Each task
 is a dict with: `uid`, `titel`, `start_datum`, `faellig_datum`, `prioritaet`,
@@ -188,7 +188,7 @@ parameter), `ort`, `url`, `tags`,
 
 **Recurring tasks:** with `faellig_vor` given, a recurring task is expanded into one row per occurrence due inside the window (capped at 100 per task) — otherwise "what is due next week" could never include a weekly task started in March. Without `faellig_vor` the series is returned as the single stored row it is, `wiederholung` intact. An expanded row is a *read-only view of one date*: `wiederholung_von` names its occurrence, `serie_uid` points at the stored task, and its own `uid` is rejected by `update_task`/`complete_task`/`delete_task`/`get_task` rather than silently acting on the whole series. See [`docs/tools.md`](docs/tools.md).
 
-Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. See [`docs/tools.md`](docs/tools.md) for details.
+Results are sorted by `faellig_datum` ascending (tasks without a readable due date last), then by `titel`. Filters: `prioritaet` (`"hoch"`/`"mittel"`/`"niedrig"`), `tag` (exact match), `suchtext` (substring over title and notes), `faellig_vor`/`faellig_nach` (due range bounds); `tag` and `suchtext` ignore case and Unicode spelling, and `""` means "no filter" for all five. `limit` (must be `> 0` — `null`, not `0`, is "no limit") caps the number of results, applied last after merging across lists. Payload slimming: `felder=[...]` whitelists result keys (unknown names error), `kompakt=true` drops `null`/`[]`/`""` values plus `liste_url` and truncates `notizen` to 200 chars (marked; `get_task` has the full text). See [`docs/tools.md`](docs/tools.md) for details.
 
 ### `get_task(list_name, task_uid)`
 
@@ -282,9 +282,11 @@ A task completed by mistake can be reopened with `update_task(status="offen")`.
 
 Permanently deletes the task.
 
-### `move_task(list_name, task_uid, ziel_liste)`
+### `move_task(list_name, task_uid, ziel_liste, uebergeordnete_aufgabe=None, felder_leeren=None)`
 
 Moves a task to another task list. Uses CalDAV `MOVE` to preserve server URL identity, UID, ETags, and all properties; falls back to verified copy-then-delete if the server *refuses* `MOVE` (HTTP 403/405/409/501). The fallback never deletes the source before writing and verifying the target copy, and the verification compares every instance of a recurring series, not just the UID. A gateway status (502/503/504) is no refusal but no answer either — the move may already have happened — so it is retried instead, and a task found in the target rather than the source comes back as `"bereits_dort"`. If the target list rejects tasks, an error is raised before touching the source. Returns `{"uid": ..., "von": ..., "nach": ..., "methode": "MOVE" | "kopiert" | "bereits_dort"}`.
+
+A list change almost always changes the hierarchy too, since the old parent stays behind in the source list. `uebergeordnete_aufgabe` sets a new parent, or `felder_leeren=["uebergeordnete_aufgabe"]` detaches the task, in the same call — the write lands on the copy in the target list after the move succeeded, and the result then also carries `"hierarchie": "gesetzt" | "geleert"`. Only that one field is accepted here; everything else still goes through `update_task`.
 
 ### Task batches: `update_tasks`, `delete_tasks`, `move_tasks`
 
@@ -318,15 +320,16 @@ the full reference.
 | `create_calendar(display_name, farbe=None)` | New VEVENT calendar via `MKCALENDAR`, optional color |
 | `update_calendar(calendar_name, new_display_name=None, farbe=None)` | Rename and/or recolor (`PROPPATCH`); URL/id stays stable |
 | `delete_calendar(calendar_name)` | Permanently delete a calendar and all its events |
-| `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False)` | Time-range query across one/several/all calendars, full-text and tag filter; optionally expands recurring events into single occurrences |
+| `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False, felder=None, kompakt=False)` | Time-range query across one/several/all calendars, full-text and tag filter; optionally expands recurring events into single occurrences. `felder` whitelists result keys, `kompakt` drops empty fields and truncates `beschreibung`. Without calendars *and* bounds, a default window of today ±90 days applies |
 | `get_event(kalender_name, event_uid)` | Single event by UID |
 | `create_event(kalender_name, titel, start, ...)` | Full event creation: all-day or timed, `ort`, `beschreibung`, `tags`, `status` (`"bestätigt"`/`"vorläufig"`/`"abgesagt"`), `sichtbarkeit`, recurrence (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE), reminders (`erinnerungen` → VALARM), `url`, task link (`verknuepfte_aufgabe`) |
+| `create_birthday(name, datum, jahr=None, kalender="Geburtstage")` | One call for the fixed birthday convention: title `"🎂 <Name> (<Geburtsjahr>)"`, all-day on the birth date (so the age is readable from each occurrence), `FREQ=YEARLY`, tag `Geburtstag`, `sichtbarkeit` `privat`, reminders on the day and the day before. `datum` is `"MM-DD"` or `"YYYY-MM-DD"`; the birth year is optional |
 | `update_event(kalender_name, event_uid, ...)` | Partial update, same fields; `felder_leeren` clears properties |
 | `update_events(kalender_name, event_uids, ...)` | Batch update up to 200 events with the same field patch; patch validated up front |
 | `update_exdates(calendar_name, event_uids, add=None, remove=None, ...)` | Add/remove single exception dates on up to 200 recurring events without rewriting the whole list |
 | `delete_event(kalender_name, event_uid)` | Permanently delete an event |
 | `delete_events(kalender_name, event_uids)` | Batch delete up to 200 events from a calendar |
-| `move_event(kalender_name, event_uid, ziel_kalender)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete, retry on a gateway status |
+| `move_event(kalender_name, event_uid, ziel_kalender, verknuepfte_aufgabe=None, felder_leeren=None)` | Move an event to another calendar via CalDAV MOVE, fallback to verified copy-then-delete, retry on a gateway status; optionally re-links (or unlinks) its task in the same call, mirroring `move_task` |
 | `link_task_to_event(list_name, task_uid, kalender_name, event_uid, beziehung="zeitblock")` | Cross-component `RELATED-TO` link, written on the event: `"zeitblock"` (event reserves time for the task) or `"voraussetzung"` (event must happen before the task) |
 | `create_event_from_task(list_name, task_uid, kalender_name, start=None, dauer_minuten=None, ende=None, beschreibung=None, erinnerungen=None, sichtbarkeit=None)` | Timeboxing: builds an event from a task (title/location/tags, due date as start; `beschreibung` inherits `notizen` unless overridden) and links both. `ende`/`dauer_minuten` are mutually exclusive; neither given = 60 minutes |
 | `get_agenda(datum, kalender_namen=None, listen_namen=None)` | One day's events (recurring ones expanded) and due open tasks together |
@@ -353,6 +356,8 @@ reference.
 | `get_notiz(notiz_id)` | Single note by id, including full content |
 | `create_notiz(titel, kategorie=None, inhalt=None, favorit=None)` | New note |
 | `update_notiz(notiz_id, ...)` | Partial update; `inhalt` replaces content wholesale |
+| `replace_in_notiz(notiz_id, alt, neu)` | Patch one passage: `alt` must match the content exactly once (0 or >1 matches is an error), then it is replaced by `neu` |
+| `update_notiz_abschnitt(notiz_id, abschnitt, inhalt)` | Replace one Markdown section (ATX heading + body, up to the next same-or-higher-level heading) selected by a heading prefix like `"## 7."`; `inhalt` includes the heading line |
 | `append_notiz(notiz_id, text)` | Read-then-write append to existing content |
 | `search_notizen(suchtext, kategorie=None)` | Case-insensitive substring search over title/content (client-side - the API has no full-text search) |
 | `delete_notiz(notiz_id)` | Permanently delete a note |
