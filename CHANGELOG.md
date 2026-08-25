@@ -104,7 +104,8 @@ This project does not yet follow Semantic Versioning releases.
     `"method": "MOVE" | "copied"`, plus `"hierarchy": "set" | "cleared"`.
   - Bulk results: `erfolgreich`/`fehlgeschlagen`->`succeeded`/`failed`,
     `ergebnisse`->`results`, `fehler`->`error` (both the key and the per-item
-    status value), and `import_ics`' `uebersprungen`->`skipped`.
+    status value), `import_ics`' `importiert`/`uebersprungen`->
+    `imported`/`skipped`, and `get_free_busy`'s `belegt`->`busy`.
   - Note dicts: `geaendert`->`modified`, `schreibgeschuetzt`->`read_only`.
   - `list_calendar_shares` invite statuses: `akzeptiert`->`accepted`,
     `abgelehnt`->`declined`, `ungueltig`->`invalid`, `geloescht`->`deleted`
