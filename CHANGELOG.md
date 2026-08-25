@@ -9,6 +9,78 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **A move can change the hierarchy in the same call.** `move_task` takes an
+  optional `uebergeordnete_aufgabe` and `move_event` an optional
+  `verknuepfte_aufgabe`, applied in the target collection once the move
+  succeeded. Moving a task to another list nearly always changes its parent
+  too - the old parent stays behind in the source list - so the common case
+  cost two round trips, a `move_task` followed by an `update_task` that existed
+  only to fix up the link the move left dangling. Passing
+  `felder_leeren=["uebergeordnete_aufgabe"]` (or `["verknuepfte_aufgabe"]`)
+  detaches instead of re-parenting, which is what a move into an unrelated list
+  usually wants. Only that one field name is accepted there - these stay move
+  tools, and every other field still goes through `update_task`/`update_event`.
+  The result carries `"hierarchie": "gesetzt" | "geleert"` when the link was
+  changed, and is unchanged for a plain move. Setting a field and clearing it in
+  one call, or naming any other field, fails before anything is moved.
+  The hierarchy write deliberately runs *after* the move, on the object in its
+  new collection: if only that write fails, the error says the move itself
+  stands and names the tool and collection to retry the link change on, rather
+  than leaving the caller to guess which half happened. As in
+  `update_task`/`update_event`, the new value replaces the object's `RELATED-TO`
+  rather than adding to it - `link_task_to_event` remains the additive way to
+  link a task and an event.
+- **Birthdays are one call, not two.** The new `create_birthday(name, datum,
+  jahr=None, kalender="Geburtstage")` writes the whole birthday convention
+  itself: title `"🎂 <Name> (<Geburtsjahr>)"`, an all-day one-day event
+  starting on the *birth* date (so occurrence year minus start year is the age
+  being celebrated), `FREQ=YEARLY`, tag `Geburtstag`, `sichtbarkeit` `privat`,
+  and reminders on the day and one day before. Entering eight birthdays used to
+  mean sixteen calls - a `create_event` plus an `update_event` each - with four
+  fields per person that are easy to get subtly wrong.
+  `datum` is `"MM-DD"` or a full `"YYYY-MM-DD"`; the birth year may come from
+  `jahr`, from `datum`, or from a trailing `"(1975)"` in `name` (so a title read
+  back from an existing entry can be passed straight in - the cake is not
+  doubled either), and sources that disagree are rejected rather than
+  silently resolved. The year always means the year of *birth*: a birth date
+  that hasn't happened yet is rejected rather than stored, since a date filled
+  in as "this year's celebration" would put the person at age 0 on the next
+  occurrence. With no birth year known the title carries none and the series
+  starts on the next upcoming occurrence.
+- **Slimmer listing payloads on request.** `list_events` and `list_tasks`
+  accept two new optional parameters: `felder`, a whitelist of result keys
+  (unknown names error, listing the valid vocabulary), and `kompakt`, which
+  drops keys whose value is `null`/`[]`/`""` (e.g. `teilnehmer`,
+  `organisator`, `wiederholung` on most entries), drops `liste_url` from
+  tasks unless whitelisted, and truncates `beschreibung`/`notizen` to 200
+  characters with a visible `… [gekürzt …]` marker (`get_event`/`get_task`
+  return the full text). Both combine: whitelist first, then compaction.
+  Defaults leave the previous full output unchanged.
+
+### Changed
+
+- **`list_events` no longer scans the whole account by default.** Called with
+  neither `kalender_namen` nor `von`/`bis`, it now applies a default window of
+  today ±90 days in the server's default timezone instead of returning every
+  event ever stored. Passing any calendar name or either bound restores the
+  previous unbounded behaviour.
+- **Notes can be patched instead of rewritten.** `update_notiz`'s `inhalt`
+  replaces a note's content wholesale, so changing one paragraph of a long
+  note meant reading the full content back and re-sending all of it. Two new
+  tools carry only what changes. `replace_in_notiz(notiz_id, alt, neu)`
+  replaces one text passage: `alt` (which may span lines) must match the
+  current content exactly once - zero matches or several are an error and
+  nothing is written, so a patch can never land on the wrong spot.
+  `update_notiz_abschnitt(notiz_id, abschnitt, inhalt)` replaces one Markdown
+  section: `abschnitt` is an ATX heading prefix like `"## 7."` that must
+  select exactly one heading of that level (matching stops at a word
+  boundary, so `"## 7"` does not select `"## 75."`), and `inhalt` replaces
+  the section - heading line included, allowing renames - up to the next
+  same-or-higher-level heading. Heading-shaped lines inside fenced code
+  blocks or a leading YAML front matter block are ignored; setext headings
+  are not recognized. Both are read-then-write like `append_notiz` (the
+  Notes API has no server-side patch), with the same concurrent-edit caveat.
+
 - **`create_task` takes a `status`.** Importing a task that is already done
   took two calls - a `create_task` followed by a `complete_task` - because a
   task could only ever be created open. `create_task` now accepts the same
@@ -20,19 +92,26 @@ This project does not yet follow Semantic Versioning releases.
   the same call still wins over the percentage `status` would derive. Omitting
   it is unchanged: no `STATUS` property is written, which is an open task.
 
-- **`move_task` reports the subtask links its move orphaned.** Nextcloud Tasks
-  resolves the `RELATED-TO;RELTYPE=PARENT` hierarchy only within one task list,
-  so moving one half of a parent/child pair silently un-nests it: the property
-  survives the move and points at a UID its list no longer holds, and nothing
-  anywhere reports an error. The result now carries
+- **`move_task` reports the subtask links a move leaves dangling.** Nextcloud
+  Tasks resolves the `RELATED-TO;RELTYPE=PARENT` hierarchy only within one task
+  list, so moving one half of a parent/child pair silently un-nests it: the
+  property survives the move and points at a UID its list no longer holds, and
+  nothing anywhere reports an error. The result now carries
   `verwaiste_verknuepfungen`, listing both directions - the moved task's own
   link to a parent left behind, and the links of subtasks left behind pointing
   at it - as `{"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}` entries
   naming the task that carries each dangling link. `[]` means the hierarchy
-  survived the move intact; `null` means the check itself could not be run
-  afterwards, which is deliberately not reported as "nothing orphaned". The
-  move's own outcome is unaffected either way, and `move_event`'s result shape
-  is unchanged.
+  came through intact; `null` means the check itself could not be run
+  afterwards, which is deliberately not reported as "nothing orphaned".
+  It reports the state the *call* leaves behind, not the bare move's: the
+  `uebergeordnete_aufgabe`/`felder_leeren` above runs first, so a caller that
+  re-parented is not warned about the link it just repaired, and one that
+  re-pointed a task at a parent in a third list is warned about the link it
+  just created. What those arguments cannot reach is the subtasks left behind -
+  separate objects in the source list, one `update_task` each - which is
+  exactly what this warning is for.
+  The move's own outcome is unaffected either way, and `move_event`'s result
+  shape is unchanged.
 
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
@@ -289,6 +368,11 @@ This project does not yet follow Semantic Versioning releases.
   as `-PT0M`, joining the normalization the other durations already had
   (`-P1W` reads back as `-P7D`, `-PT90M` as `-PT1H30M`). Non-zero reminders
   are untouched.
+- **`move_task` rejects an expanded occurrence's UID** instead of acting on the
+  whole series. Every other task tool taking a UID already refused those
+  synthetic per-occurrence UIDs with an error naming the series' own UID;
+  `move_task` was the one that did not, and failed later with a bare
+  "task not found" instead.
 
 - **Every tool now advertises MCP `annotations`, so read-only calls no longer
   need a human to approve them.** All 44 tools were registered without
