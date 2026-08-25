@@ -67,7 +67,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, felder=None, kompakt=False, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -79,6 +79,8 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
+| `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per task. Unknown names error; `[]` means *no* whitelist (unlike `listen_namen=[]`, an empty scope) |
+| `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""` plus `liste_url` (unless whitelisted); truncate `notizen` to 200 chars with an `… [gekürzt …]` marker (`get_task` has the full text) |
 | `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
 
 > **BREAKING CHANGE**: Results are now sorted by `faellig_datum` ascending (tasks without a due date last, then by `titel`), rather than returned in server order.
@@ -557,15 +559,32 @@ Returns `{"uid": "<task_uid>"}`.
 
 ---
 
-## `move_task(list_name, task_uid, ziel_liste)`
+## `move_task(list_name, task_uid, ziel_liste, uebergeordnete_aufgabe=None, felder_leeren=None)`
 
-Moves a task (VTODO) from one task list to another.
+Moves a task (VTODO) from one task list to another, optionally re-parenting it
+in the same call.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `list_name` | string | yes | Display name of the source task list |
 | `task_uid` | string | yes | UID of the task to move |
 | `ziel_liste` | string | yes | Display name of the target task list |
+| `uebergeordnete_aufgabe` | string | no | UID of the task's new parent, set in the target list after the move |
+| `felder_leeren` | array | no | Only `["uebergeordnete_aufgabe"]` — detach the task from its parent instead |
+
+Hierarchy shortcut:
+- A list change almost always changes the hierarchy too — the old parent stays
+  behind in the source list — so the parent link can be set (or dropped) in the
+  same call instead of a follow-up `update_task`.
+- Like `update_task`, `uebergeordnete_aufgabe` *replaces* the task's
+  `RELATED-TO` rather than adding to it.
+- The hierarchy write happens **after** the move, on the copy in the target
+  list, and applies to a same-list no-op move as well. If only that write fails,
+  the error says so in as many words — the move itself stands, and only the
+  hierarchy change needs retrying with `update_task` on the target list.
+- `felder_leeren` accepts nothing but `"uebergeordnete_aufgabe"` here (this is a
+  move tool, not a general-purpose update); any other name, or setting and
+  clearing the parent in one call, is an error raised before anything is moved.
 
 Behaviour:
 - Resolves source and target task lists. Target must support VTODO tasks; if the target exists but does not accept tasks (e.g. an events-only calendar), an error is raised naming both target and component kind before any object is touched.
@@ -583,6 +602,7 @@ Result shape:
   "von": "Privat",
   "nach": "Arbeit",
   "methode": "MOVE",
+  "hierarchie": "gesetzt",
   "verwaiste_verknuepfungen": [
     {
       "uid": "0f8ba4a4-...",
@@ -594,7 +614,7 @@ Result shape:
 }
 ```
 
-(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed. `"hierarchie"` is only present when the parent was changed: `"gesetzt"` for a new `uebergeordnete_aufgabe`, `"geleert"` for `felder_leeren`.)
 
 ### Orphaned subtask links (`verwaiste_verknuepfungen`)
 
@@ -615,15 +635,28 @@ Each entry is `{"uid", "titel", "liste", "fehlende_uebergeordnete_uid"}`, where 
 `titel` and `liste` name the task *carrying* the dangling link and
 `fehlende_uebergeordnete_uid` is the parent UID that is not in that list.
 
-- `[]` — the move left the hierarchy intact (also the immediate answer when source and
-  target are the same list, which rearranges nothing).
+- `[]` — the call left the hierarchy intact.
 - `null` — the check could not be run after the move. The move itself still succeeded;
   "could not tell" is deliberately not reported as "no orphaned links".
 
+The scan runs **after** the hierarchy shortcut above, so what it reports is the state this
+*call* leaves behind rather than the one a bare move would have:
+
+- re-parenting with `uebergeordnete_aufgabe` repairs the first case as it happens, so such a
+  call is not warned about the link it just fixed — nor is one that detached with
+  `felder_leeren`;
+- pointing a task at a parent that lives in neither list *is* reported, because the call
+  created that dangling link;
+- a same-list call leaves no subtask behind (nothing moved), so only its own parent link is
+  checked.
+
+The second case — subtasks left behind — is the half no argument to a move can reach: each is
+a separate object in the source list. Repair those by moving them along too, or with one
+`update_task` each (`uebergeordnete_aufgabe` to re-point, `felder_leeren:
+["uebergeordnete_aufgabe"]` to make them top-level).
+
 Completed subtasks are included in the scan: a done subtask is still nested under its
-parent. To repair a reported link, either move the other half of the pair as well, or
-re-point it with `update_task`'s `uebergeordnete_aufgabe` — or drop it entirely with
-`felder_leeren: ["uebergeordnete_aufgabe"]`, which leaves the task as a top-level one.
+parent.
 
 ---
 
@@ -686,7 +719,7 @@ Permanently deletes the calendar **and every event inside it**. Returns
 
 ---
 
-## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False)`
+## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False, felder=None, kompakt=False)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -697,6 +730,16 @@ Permanently deletes the calendar **and every event inside it**. Returns
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `limit` | integer | no | Max results, must be `> 0`; applied last (earliest events win) |
 | `wiederholungen_aufloesen` | boolean | no (default `false`) | Expand recurring events into single occurrences within `[von, bis]` (both bounds required) |
+| `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per event. Unknown names error; `[]` means *no* whitelist |
+| `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""`; truncate `beschreibung` to 200 chars with an `… [gekürzt …]` marker (`get_event` has the full text) |
+
+Called with neither `kalender_namen` nor a time bound, a default window of
+**today ±90 days** (in the server's default timezone) is applied instead of
+scanning every event in the account. Any calendar name or either bound
+disables the default — naming a calendar is a scoping decision, so
+`kalender_namen` plus `wiederholungen_aufloesen=true` and no bounds still
+fails with *"Expanding recurring events requires both von and bis bounds."*,
+exactly as before.
 
 The time-range filter runs server-side (CalDAV `time-range` REPORT), so a
 recurring event with an occurrence in the window matches even if its master
@@ -844,6 +887,65 @@ Example:
   ]
 }
 ```
+
+---
+
+## `create_birthday(name, datum, jahr=None, kalender="Geburtstage")`
+
+Creates one birthday entry with the whole convention filled in, so a birthday
+is a single call instead of a `create_event` plus an `update_event`. Nothing
+about the shape below is a parameter — it is what every entry in the birthday
+calendar looks like:
+
+| Field | Value |
+|---|---|
+| `titel` | `"🎂 <name> (<Geburtsjahr>)"` — without the parentheses if no birth year is known |
+| `start` / `ende` | The **birth** date, all-day, one day (`ende` = `start`) |
+| `wiederholung` | `"FREQ=YEARLY"` |
+| `tags` | `["Geburtstag"]` |
+| `sichtbarkeit` | `"privat"` |
+| `erinnerungen` | `["-PT0M", "-P1D"]` — on the day itself and one day before |
+
+Starting the series in the birth year is what makes the age readable: each
+occurrence's year minus the start year is the age being celebrated. With no
+birth year known, the series starts on the next upcoming occurrence instead
+(same series, no age).
+
+Parameters:
+
+| Parameter | Required | Notes |
+|---|---|---|
+| `name` | yes | The person's name, without the cake and without the year — both are added. A title read back from an existing entry (`"🎂 Papa (1975)"`) works too: the cake is not doubled and the `(1975)` is read as the birth year |
+| `datum` | yes | `"MM-DD"` (e.g. `"07-04"`), or a full `"YYYY-MM-DD"` whose year is the year of **birth** |
+| `jahr` | no | Year of birth. May instead come from `datum` or from a trailing `"(1975)"` in `name` |
+| `kalender` | no | Target calendar display name, `"Geburtstage"` by default |
+
+The birth year may therefore be named by `jahr`, by `datum` and by `name`.
+Naming it more than once is fine as long as the values agree; **conflicting
+values are rejected** rather than silently resolved. A year that isn't a
+four-digit year is rejected as well.
+
+> **The year is always the year of birth, never the year of the next
+> celebration.** Turning "his birthday is on October 10th" into
+> `"2026-10-10"` claims the person was born this year — they would be 0 on
+> the next occurrence. A birth date that hasn't happened yet is therefore
+> rejected outright; when the birth year is unknown, pass `"MM-DD"` and the
+> entry simply carries no year.
+
+A `02-29` birthday stays `02-29` — a yearly rule then only fires in leap
+years, which is what that date means; pass `02-28` or `03-01` instead if the
+entry should show up every year. Without a birth year, a `02-29` entry starts
+on the next real leap day.
+
+Returns the created event, same dict shape as `get_event`.
+
+Example:
+
+```json
+{"name": "Papa", "datum": "07-04", "jahr": 1975}
+```
+
+writes `🎂 Papa (1975)` as an all-day event on 1975-07-04, repeating yearly.
 
 ---
 
@@ -1061,15 +1163,33 @@ Contract and behaviour:
 
 ---
 
-## `move_event(kalender_name, event_uid, ziel_kalender)`
+## `move_event(kalender_name, event_uid, ziel_kalender, verknuepfte_aufgabe=None, felder_leeren=None)`
 
-Moves an event (VEVENT) from one calendar to another.
+Moves an event (VEVENT) from one calendar to another, optionally re-linking its
+task in the same call.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `kalender_name` | string | yes | Display name of the source calendar |
 | `event_uid` | string | yes | UID of the event to move |
 | `ziel_kalender` | string | yes | Display name of the target calendar |
+| `verknuepfte_aufgabe` | string | no | UID of the task to link the event to, set in the target calendar after the move |
+| `felder_leeren` | array | no | Only `["verknuepfte_aufgabe"]` — drop the event's task links instead |
+
+Task-link shortcut:
+- Mirrors `move_task`'s `uebergeordnete_aufgabe`: a calendar change usually comes
+  with a link change, so it can be done in the same call instead of a follow-up
+  `update_event`.
+- Like `update_event`, `verknuepfte_aufgabe` *replaces* the event's whole
+  `RELATED-TO` set (so a `"voraussetzung"` link goes with it) rather than adding
+  one. `link_task_to_event` is the additive counterpart.
+- The link write happens **after** the move, on the copy in the target calendar,
+  and applies to a same-calendar no-op move as well. If only that write fails,
+  the error says so — the move stands, and only the link needs retrying with
+  `update_event` on the target calendar.
+- `felder_leeren` accepts nothing but `"verknuepfte_aufgabe"` here; any other
+  name, or setting and clearing the link in one call, is an error raised before
+  anything is moved.
 
 Behaviour:
 - Resolves source and target calendars. Target must support VEVENT events; if the target exists but does not accept events (e.g. a tasks-only list), an error is raised naming both target and component kind before any object is touched.
@@ -1086,11 +1206,12 @@ Result shape:
   "uid": "event-uid",
   "von": "QuellKalender",
   "nach": "ZielKalender",
-  "methode": "MOVE"
+  "methode": "MOVE",
+  "hierarchie": "gesetzt"
 }
 ```
 
-(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed. `"hierarchie"` is only present when the task link was changed: `"gesetzt"` for a new `verknuepfte_aufgabe`, `"geleert"` for `felder_leeren`.)
 
 ---
 

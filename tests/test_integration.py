@@ -499,6 +499,50 @@ def test_create_task_with_status_erledigt_reads_back_as_completed(live_service, 
             pass
 
 
+def test_move_task_reparents_in_the_target_list(live_service, test_list_name, move_target_list):
+    """The whole point of the hierarchy shortcut: one call, and the parent is the new one."""
+    parent_uid = live_service.create_task(
+        move_target_list,
+        mapping.TaskFields(titel="Neue Eltern-Aufgabe", notizen="Integrationstest; kann weg."),
+    )
+    child_uid = live_service.create_task(
+        test_list_name,
+        mapping.TaskFields(
+            titel="Verschiebe-und-Umhaenge-Test",
+            uebergeordnete_aufgabe="alter-parent-uid",
+            notizen="Integrationstest; kann weg.",
+        ),
+    )
+
+    try:
+        result = live_service.move_task(test_list_name, child_uid, move_target_list, parent_uid)
+        assert result["nach"] == move_target_list
+        assert result["hierarchie"] == "gesetzt"
+        # The re-parent repaired the very link this move would have orphaned,
+        # and it ran before the scan, so there is nothing left to warn about.
+        assert result["verwaiste_verknuepfungen"] == []
+
+        moved = live_service.get_task(move_target_list, child_uid)
+        assert moved["uebergeordnete_uid"] == parent_uid
+
+        # ... and the same call can detach it again.
+        detached = live_service.move_task(
+            move_target_list,
+            child_uid,
+            move_target_list,
+            clear=("uebergeordnete_aufgabe",),
+        )
+        assert detached["hierarchie"] == "geleert"
+        assert live_service.get_task(move_target_list, child_uid)["uebergeordnete_uid"] is None
+    finally:
+        for list_name in (move_target_list, test_list_name):
+            for uid in (child_uid, parent_uid):
+                try:
+                    live_service.delete_task(list_name, uid)
+                except Exception:
+                    pass
+
+
 def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_name, test_calendar):
     """One tag on an event and on a task has to come back as one entry counting two."""
     from nextcloud_task_mcp import event_mapping
