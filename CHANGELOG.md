@@ -26,6 +26,39 @@ This project does not yet follow Semantic Versioning releases.
   in as "this year's celebration" would put the person at age 0 on the next
   occurrence. With no birth year known the title carries none and the series
   starts on the next upcoming occurrence.
+- **Slimmer listing payloads on request.** `list_events` and `list_tasks`
+  accept two new optional parameters: `felder`, a whitelist of result keys
+  (unknown names error, listing the valid vocabulary), and `kompakt`, which
+  drops keys whose value is `null`/`[]`/`""` (e.g. `teilnehmer`,
+  `organisator`, `wiederholung` on most entries), drops `liste_url` from
+  tasks unless whitelisted, and truncates `beschreibung`/`notizen` to 200
+  characters with a visible `… [gekürzt …]` marker (`get_event`/`get_task`
+  return the full text). Both combine: whitelist first, then compaction.
+  Defaults leave the previous full output unchanged.
+
+### Changed
+
+- **`list_events` no longer scans the whole account by default.** Called with
+  neither `kalender_namen` nor `von`/`bis`, it now applies a default window of
+  today ±90 days in the server's default timezone instead of returning every
+  event ever stored. Passing any calendar name or either bound restores the
+  previous unbounded behaviour.
+- **Notes can be patched instead of rewritten.** `update_notiz`'s `inhalt`
+  replaces a note's content wholesale, so changing one paragraph of a long
+  note meant reading the full content back and re-sending all of it. Two new
+  tools carry only what changes. `replace_in_notiz(notiz_id, alt, neu)`
+  replaces one text passage: `alt` (which may span lines) must match the
+  current content exactly once - zero matches or several are an error and
+  nothing is written, so a patch can never land on the wrong spot.
+  `update_notiz_abschnitt(notiz_id, abschnitt, inhalt)` replaces one Markdown
+  section: `abschnitt` is an ATX heading prefix like `"## 7."` that must
+  select exactly one heading of that level (matching stops at a word
+  boundary, so `"## 7"` does not select `"## 75."`), and `inhalt` replaces
+  the section - heading line included, allowing renames - up to the next
+  same-or-higher-level heading. Heading-shaped lines inside fenced code
+  blocks or a leading YAML front matter block are ignored; setext headings
+  are not recognized. Both are read-then-write like `append_notiz` (the
+  Notes API has no server-side patch), with the same concurrent-edit caveat.
 
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
