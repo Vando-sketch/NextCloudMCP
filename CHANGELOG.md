@@ -10,17 +10,17 @@ This project does not yet follow Semantic Versioning releases.
 ### Added
 
 - **A move can change the hierarchy in the same call.** `move_task` takes an
-  optional `uebergeordnete_aufgabe` and `move_event` an optional
-  `verknuepfte_aufgabe`, applied in the target collection once the move
+  optional `parent_task` and `move_event` an optional
+  `linked_task`, applied in the target collection once the move
   succeeded. Moving a task to another list nearly always changes its parent
   too - the old parent stays behind in the source list - so the common case
   cost two round trips, a `move_task` followed by an `update_task` that existed
   only to fix up the link the move left dangling. Passing
-  `felder_leeren=["uebergeordnete_aufgabe"]` (or `["verknuepfte_aufgabe"]`)
+  `clear_fields=["parent_task"]` (or `["linked_task"]`)
   detaches instead of re-parenting, which is what a move into an unrelated list
   usually wants. Only that one field name is accepted there - these stay move
   tools, and every other field still goes through `update_task`/`update_event`.
-  The result carries `"hierarchie": "gesetzt" | "geleert"` when the link was
+  The result carries `"hierarchy": "set" | "cleared"` when the link was
   changed, and is unchanged for a plain move. Setting a field and clearing it in
   one call, or naming any other field, fails before anything is moved.
   The hierarchy write deliberately runs *after* the move, on the object in its
@@ -30,16 +30,16 @@ This project does not yet follow Semantic Versioning releases.
   `update_task`/`update_event`, the new value replaces the object's `RELATED-TO`
   rather than adding to it - `link_task_to_event` remains the additive way to
   link a task and an event.
-- **Birthdays are one call, not two.** The new `create_birthday(name, datum,
-  jahr=None, kalender="Geburtstage")` writes the whole birthday convention
-  itself: title `"🎂 <Name> (<Geburtsjahr>)"`, an all-day one-day event
+- **Birthdays are one call, not two.** The new `create_birthday(name, date,
+  year=None, calendar="Birthdays")` writes the whole birthday convention
+  itself: title `"🎂 <name> (<birth year>)"`, an all-day one-day event
   starting on the *birth* date (so occurrence year minus start year is the age
-  being celebrated), `FREQ=YEARLY`, tag `Geburtstag`, `sichtbarkeit` `privat`,
+  being celebrated), `FREQ=YEARLY`, tag `Birthday`, `visibility` `private`,
   and reminders on the day and one day before. Entering eight birthdays used to
   mean sixteen calls - a `create_event` plus an `update_event` each - with four
   fields per person that are easy to get subtly wrong.
-  `datum` is `"MM-DD"` or a full `"YYYY-MM-DD"`; the birth year may come from
-  `jahr`, from `datum`, or from a trailing `"(1975)"` in `name` (so a title read
+  `date` is `"MM-DD"` or a full `"YYYY-MM-DD"`; the birth year may come from
+  `year`, from `date`, or from a trailing `"(1975)"` in `name` (so a title read
   back from an existing entry can be passed straight in - the cake is not
   doubled either), and sources that disagree are rejected rather than
   silently resolved. The year always means the year of *birth*: a birth date
@@ -48,20 +48,20 @@ This project does not yet follow Semantic Versioning releases.
   occurrence. With no birth year known the title carries none and the series
   starts on the next upcoming occurrence.
 - **Slimmer listing payloads on request.** `list_events` and `list_tasks`
-  accept two new optional parameters: `felder`, a whitelist of result keys
-  (unknown names error, listing the valid vocabulary), and `kompakt`, which
-  drops keys whose value is `null`/`[]`/`""` (e.g. `teilnehmer`,
-  `organisator`, `wiederholung` on most entries), drops `liste_url` from
-  tasks unless whitelisted, and truncates `beschreibung`/`notizen` to 200
-  characters with a visible `… [gekürzt …]` marker (`get_event`/`get_task`
+  accept two new optional parameters: `fields`, a whitelist of result keys
+  (unknown names error, listing the valid vocabulary), and `compact`, which
+  drops keys whose value is `null`/`[]`/`""` (e.g. `attendees`,
+  `organizer`, `recurrence` on most entries), drops `list_url` from
+  tasks unless whitelisted, and truncates `description`/`notes` to 200
+  characters with a visible `… [truncated …]` marker (`get_event`/`get_task`
   return the full text). Both combine: whitelist first, then compaction.
   Defaults leave the previous full output unchanged.
 
 - **Cleanup filters on `list_tasks` and `list_events`.** Items created by hand
   on a phone are recognizable by all-uppercase UUIDs and missing
   reminders/visibility/tags; four new filters turn the manual pass over sixty
-  events into one call: `ohne_erinnerung`, `ohne_sichtbarkeit` and `ohne_tags`
-  keep only items with an empty `erinnerungen` list / no readable `CLASS` /
+  events into one call: `without_reminder`, `without_visibility` and `without_tags`
+  keep only items with an empty `reminders` list / no readable `CLASS` /
   no tags, and `uid_regex` keeps only items whose uid contains a match for a
   regular expression (case-sensitive `re.search`; anchor with `^...$` for a
   full match, e.g. `"^[A-F0-9-]+$"`). An unparsable pattern is an error, an
@@ -69,37 +69,92 @@ This project does not yet follow Semantic Versioning releases.
   run before recurrence expansion, so `uid_regex` matches the series uid,
   never the synthetic `<uid>#<occurrence>` of an expanded row.
   In support of this, task dicts returned by `list_tasks`/`get_task` now also
-  carry a `sichtbarkeit` key (`"öffentlich"`/`"privat"`/`"vertraulich"` or
+  carry a `visibility` key (`"public"`/`"private"`/`"confidential"` or
   `null`), which events already had.
 
 ### Changed
+- **All German naming translated to English.** The tool contract was a mix of
+  English tool names and German parameters, result keys and enum values; it is
+  now English throughout. **Breaking** for every client of this server.
+  - Tools: `list_notizen`, `get_notiz`, `create_notiz`, `update_notiz`,
+    `replace_in_notiz`, `update_notiz_abschnitt`, `append_notiz`,
+    `search_notizen` and `delete_notiz` became `list_notes`, `get_note`,
+    `create_note`, `update_note`, `replace_in_note`, `update_note_section`,
+    `append_to_note`, `search_notes` and `delete_note`.
+  - Parameters and result keys: `titel`->`title`, `beschreibung`->`description`,
+    `notizen`->`notes`, `ort`->`location`, `prioritaet`->`priority`,
+    `faellig_datum`/`faellig_vor`/`faellig_nach`->`due_date`/`due_before`/`due_after`,
+    `start_datum`->`start_date`, `fortschritt_prozent`->`progress_percent`,
+    `erinnerungen`->`reminders`, `sichtbarkeit`->`visibility`,
+    `wiederholung`->`recurrence`, `wiederholung_von`->`recurrence_id`,
+    `wiederholungen_aufloesen`->`expand_recurrences`,
+    `ausnahme_daten`->`exception_dates`, `uebergeordnete_aufgabe`->`parent_task`,
+    `verknuepfte_aufgabe(n)`->`linked_task(s)`, `teilnehmer`->`attendees`,
+    `felder`/`felder_leeren`->`fields`/`clear_fields`, `kompakt`->`compact`,
+    `suchtext`->`search_text`, `listen_namen`->`list_names`,
+    `kalender_name(n)`->`calendar_name(s)`, `nur_offene`->`only_open`,
+    `von`/`bis`->`start`/`end`, `ende`->`end`, `datum`->`date`, `jahr`->`year`,
+    `farbe`->`color`, `empfaenger`->`recipient`, `gruppe`->`group`,
+    `schreibzugriff`->`write_access`, `benutzer`->`user`, `antwort`->`response`,
+    `kommentar`->`comment`, `beziehung`->`relation`, `ziel_liste`->`target_list`,
+    `ziel_kalender`->`target_calendar`, `dauer_minuten`->`duration_minutes`,
+    `kategorie`->`category`, `inhalt`->`content`, `abschnitt`->`section`,
+    `favorit`->`favorite`, `notiz_id`->`note_id`, and `alt`/`neu`->`old_text`/`new_text`.
+  - Move results now return `{"uid", "from", "to", "method"}` with
+    `"method": "MOVE" | "copied"`, plus `"hierarchy": "set" | "cleared"`.
+  - Bulk results: `erfolgreich`/`fehlgeschlagen`->`succeeded`/`failed`,
+    `ergebnisse`->`results`, `fehler`->`error` (both the key and the per-item
+    status value), and `import_ics`' `uebersprungen`->`skipped`.
+  - Note dicts: `geaendert`->`modified`, `schreibgeschuetzt`->`read_only`.
+  - `list_calendar_shares` invite statuses: `akzeptiert`->`accepted`,
+    `abgelehnt`->`declined`, `ungueltig`->`invalid`, `geloescht`->`deleted`
+    (`pending` was already English).
+  - Enum values: task status `offen`/`in-arbeit`/`erledigt`/`abgesagt` ->
+    `open`/`in-progress`/`completed`/`cancelled`; event status
+    `bestaetigt`/`vorlaeufig`/`abgesagt` -> `confirmed`/`tentative`/`cancelled`;
+    priority `hoch`/`mittel`/`niedrig` -> `high`/`medium`/`low`; visibility
+    `oeffentlich`/`privat`/`vertraulich` -> `public`/`private`/`confidential`;
+    attendee status `ausstehend`/`zugesagt`/`abgesagt`/`vorlaeufig`/`delegiert` ->
+    `pending`/`accepted`/`declined`/`tentative`/`delegated`; attendee role
+    `leitung`/`erforderlich`/`optional`/`keine-teilnahme` ->
+    `chair`/`required`/`optional`/`non-participant`; task/event relation
+    `zeitblock`/`voraussetzung`/`gleichrangig` ->
+    `time_block`/`prerequisite`/`sibling`; share principal type
+    `benutzer`/`gruppe` -> `user`/`group`.
+  - `create_birthday` defaults changed with the vocabulary: the default calendar
+    is now `"Birthdays"` (was `"Geburtstage"`) and the tag it writes is
+    `"Birthday"` (was `"Geburtstag"`). Existing birthday entries created under
+    the old convention keep their German calendar name and tag and will not be
+    found by the new defaults - pass `calendar="Geburtstage"` explicitly, or
+    rename the calendar and re-tag those events.
+
 
 - **`list_events` no longer scans the whole account by default.** Called with
-  neither `kalender_namen` nor `von`/`bis`, it now applies a default window of
+  neither `calendar_names` nor `start`/`end`, it now applies a default window of
   today ±90 days in the server's default timezone instead of returning every
   event ever stored. Passing any calendar name or either bound restores the
   previous unbounded behaviour.
-- **Notes can be patched instead of rewritten.** `update_notiz`'s `inhalt`
+- **Notes can be patched instead of rewritten.** `update_note`'s `content`
   replaces a note's content wholesale, so changing one paragraph of a long
   note meant reading the full content back and re-sending all of it. Two new
-  tools carry only what changes. `replace_in_notiz(notiz_id, alt, neu)`
-  replaces one text passage: `alt` (which may span lines) must match the
+  tools carry only what changes. `replace_in_note(note_id, old_text, new_text)`
+  replaces one text passage: `old_text` (which may span lines) must match the
   current content exactly once - zero matches or several are an error and
   nothing is written, so a patch can never land on the wrong spot.
-  `update_notiz_abschnitt(notiz_id, abschnitt, inhalt)` replaces one Markdown
-  section: `abschnitt` is an ATX heading prefix like `"## 7."` that must
+  `update_note_section(note_id, section, content)` replaces one Markdown
+  section: `section` is an ATX heading prefix like `"## 7."` that must
   select exactly one heading of that level (matching stops at a word
-  boundary, so `"## 7"` does not select `"## 75."`), and `inhalt` replaces
+  boundary, so `"## 7"` does not select `"## 75."`), and `content` replaces
   the section - heading line included, allowing renames - up to the next
   same-or-higher-level heading. Heading-shaped lines inside fenced code
   blocks or a leading YAML front matter block are ignored; setext headings
-  are not recognized. Both are read-then-write like `append_notiz` (the
+  are not recognized. Both are read-then-write like `append_to_note` (the
   Notes API has no server-side patch), with the same concurrent-edit caveat.
 
 - **Exception dates can be changed one at a time.** The new `update_exdates`
   tool adds or removes single `EXDATE`s on up to 200 recurring events at once,
   merging them into what each event already has. `update_event`'s
-  `ausnahme_daten` replaces an event's whole exception set, so cancelling one
+  `exception_dates` replaces an event's whole exception set, so cancelling one
   more day on a series that already skips sixty occurrences meant reading all
   sixty back and writing sixty-one - per series. This merges server-side, so
   the call carries only what changes.
@@ -116,18 +171,18 @@ This project does not yet follow Semantic Versioning releases.
   German-named tools around it, which are unchanged.
 
 - **Tasks can recur, and can skip single occurrences.** `create_task` and
-  `update_task` take `wiederholung` (raw RFC 5545 `RRULE`, the same form the
-  event tools use) and `ausnahme_daten` (`EXDATE`), and `list_tasks`/`get_task`
-  return both. A recurring task needs a `start_datum` to recur from - RFC 5545
+  `update_task` take `recurrence` (raw RFC 5545 `RRULE`, the same form the
+  event tools use) and `exception_dates` (`EXDATE`), and `list_tasks`/`get_task`
+  return both. A recurring task needs a `start_date` to recur from - RFC 5545
   generates the recurrence set from `DTSTART`, not `DUE` - and the rule is
   validated semantically, not just grammatically: a missing `FREQ`, a duplicate
   or unknown part, `INTERVAL=0`, `BYMONTH=13`, `UNTIL` together with `COUNT` or
   before the anchor are all rejected rather than stored as a series no client
   can resolve.
-  `ausnahme_daten` mirrors the event field of the same name exactly: entries
+  `exception_dates` mirrors the event field of the same name exactly: entries
   must match the task's own value kind (date-only for an all-day task), and an
   entry naming no occurrence of the series is rejected instead of stored to
-  cancel nothing. Clearing `wiederholung` drops `EXDATE`/`RDATE` with it rather
+  cancel nothing. Clearing `recurrence` drops `EXDATE`/`RDATE` with it rather
   than orphaning them on the task.
   Recurring tasks are anchored to the timezone they are written in rather than
   to a fixed UTC instant, so "every Monday 09:00" stays at 09:00 local across a
@@ -140,39 +195,39 @@ This project does not yet follow Semantic Versioning releases.
   servers do not expand `VTODO` series the way they expand `VEVENT`s, so a
   weekly task appeared exactly once in every listing - at its original due date,
   never again, which made "what is due next week" silently wrong. `list_tasks`
-  with `faellig_vor`, and `get_agenda`, now expand a recurring task
+  with `due_before`, and `get_agenda`, now expand a recurring task
   client-side into one row per occurrence due inside the queried window
-  (`ausnahme_daten` skipped, at most 100 rows per task). Without `faellig_vor`
+  (`exception_dates` skipped, at most 100 rows per task). Without `due_before`
   there is no window to expand into and the series is returned as the single
-  stored row it is, `wiederholung` intact.
-  An expanded row is a **read-only view of one date**: `wiederholung_von` names
-  its occurrence, `serie_uid` points at the stored task, `wiederholung` is
-  `null`, and its own `uid` is a synthetic `"<serie_uid>#<occurrence>"` that
+  stored row it is, `recurrence` intact.
+  An expanded row is a **read-only view of one date**: `recurrence_id` names
+  its occurrence, `series_uid` points at the stored task, `recurrence` is
+  `null`, and its own `uid` is a synthetic `"<series_uid>#<occurrence>"` that
   `update_task`, `complete_task`, `delete_task` and `get_task` all **reject**
   with an error naming the series - rather than silently acting on the whole
   series the caller meant to touch one occurrence of. Two new keys,
-  `wiederholung_von` and `serie_uid`, are therefore present (as `null`) on
+  `recurrence_id` and `series_uid`, are therefore present (as `null`) on
   every task dict.
 - **`list_tasks` queries across task lists, and filters like `list_events`.**
-  `listen_namen` replaces `list_name`: `null` (the default) queries every task
+  `list_names` replaces `list_name`: `null` (the default) queries every task
   list on the account, a list of names queries those, and `[]` is an empty
   scope that returns nothing without a request. "What is overdue anywhere?"
-  used to cost one call per list. New `prioritaet`, `tag` and `suchtext`
-  filters mirror the event side; `tag`/`suchtext` compare case-insensitively
+  used to cost one call per list. New `priority`, `tag` and `search_text`
+  filters mirror the event side; `tag`/`search_text` compare case-insensitively
   and independently of Unicode spelling (either encoding of "ü", and "STRASSE"
   against "Straße"), and an empty string means "no filter" for every filter
-  that takes one - `prioritaet`, `tag`, `suchtext`, `faellig_vor`, and
-  `faellig_nach` alike. `limit` still rejects `0`.
+  that takes one - `priority`, `tag`, `search_text`, `due_before`, and
+  `due_after` alike. `limit` still rejects `0`.
   `get_agenda` takes its tasks through the same path.
   **Breaking**, in three ways:
-  - Results are **sorted** by `faellig_datum` ascending (tasks without a
-    readable due date last), then by `titel` - with umlauts filed under their
+  - Results are **sorted** by `due_date` ascending (tasks without a
+    readable due date last), then by `title` - with umlauts filed under their
     base letter rather than behind "Z" - instead of arriving in server order,
     and `limit` caps the merged, sorted result rather than one list's.
-  - Every task dict carries a new **`liste`** key with its task list's display
+  - Every task dict carries a new **`list`** key with its task list's display
     name. It is the name every other task tool takes, except in the one case
-    Nextcloud permits two task lists to share a display name: `liste` then
-    cannot tell them apart, but a new `liste_url` key alongside it carries
+    Nextcloud permits two task lists to share a display name: `list` then
+    cannot tell them apart, but a new `list_url` key alongside it carries
     the list's unique collection URL, which you can match against
     `list_task_lists`. However, because no tool accepts a URL to act on,
     such a name is reported as ambiguous by any by-name call. Renaming one
@@ -184,7 +239,7 @@ This project does not yet follow Semantic Versioning releases.
     Everything added to either signature after `limit` is keyword-only, so the
     positional prefix cannot shift under a caller again.
 - **Reminders are readable**: `list_tasks`, `get_task`, `list_events` and
-  `get_event` now return an `erinnerungen` list in the same string form
+  `get_event` now return an `reminders` list in the same string form
   `create_task`/`create_event` accept, so a reminder can be verified without
   exporting the calendar and parsing ICS by hand. Only alarms whose trigger
   that string form can express are listed - an alarm anchored to the end of an
@@ -193,26 +248,26 @@ This project does not yet follow Semantic Versioning releases.
   in a timezone that resolves to no known zone, and a relative one on a
   component with no date at all to be relative to: each would read back as a
   different moment than it fires, or as a value a write would reject. Writing
-  `erinnerungen` never touches those alarms - which means a hidden alarm and a
+  `reminders` never touches those alarms - which means a hidden alarm and a
   written reminder can both fire, see `docs/tools.md` - and a reminder that is
   already present is kept as it is rather than
   rebuilt, so its action, dismissed state (`ACKNOWLEDGED`/`X-MOZ-LASTACK`) and
-  UID survive an edit. Clearing `"erinnerungen"` via `felder_leeren` still
+  UID survive an edit. Clearing `"reminders"` via `clear_fields` still
   removes every alarm. `export_calendar`/`import_ics` remain the verbatim,
   lossless path for alarms. Absolute reminders are resolved in the timezone
   they were stored in (previously always assumed UTC, silently shifting
   foreign-client alarms) and read back formatted in the server's default
-  timezone (`MCP_DEFAULT_TIMEZONE`), the same convention `start_datum`/
-  `faellig_datum` follow; durations read back in canonical spelling
+  timezone (`MCP_DEFAULT_TIMEZONE`), the same convention `start_date`/
+  `due_date` follow; durations read back in canonical spelling
   (`-P1W` → `-P7D`), and passing the same trigger twice creates one alarm.
-- **Notes support**: 6 new MCP tools (`list_notizen`, `get_notiz`,
-  `create_notiz`, `update_notiz`, `append_notiz`, `search_notizen`) over the
+- **Notes support**: 6 new MCP tools (`list_notes`, `get_note`,
+  `create_note`, `update_note`, `append_to_note`, `search_notes`) over the
   Nextcloud Notes app's own JSON REST API - a per-project "living document"
   alongside the task/calendar tools' "what's open" view. Deliberately a
   separate code path from CalDAV: a new async `notes_client.py`
   (`NotesService`, built on `httpx`) and `notes_mapping.py` translation
   layer, with their own `NEXTCLOUD_BASE_URL` config setting (reusing the
-  existing CalDAV credentials/OAuth gate). `append_notiz` is a
+  existing CalDAV credentials/OAuth gate). `append_to_note` is a
   read-then-write, not an atomic server-side append - the Notes API has none.
 - **Calendar & event support (VEVENT)**: 12 new MCP tools alongside the task
   tools. Calendar management (`list_calendars`, `create_calendar`,
@@ -220,11 +275,11 @@ This project does not yet follow Semantic Versioning releases.
   (`list_events` with server-side time-range REPORT, full-text/tag filters and
   optional expansion of recurring events into single occurrences; `get_event`,
   `create_event`, `update_event`, `delete_event`) including recurrence
-  (`wiederholung` = raw RRULE), exceptions (`ausnahme_daten` → EXDATE),
-  reminders (`erinnerungen` → VALARM relative to DTSTART), status/visibility,
-  and all-day events with *inclusive* `ende` semantics. Task↔event linking via
+  (`recurrence` = raw RRULE), exceptions (`exception_dates` → EXDATE),
+  reminders (`reminders` → VALARM relative to DTSTART), status/visibility,
+  and all-day events with *inclusive* `end` semantics. Task↔event linking via
   cross-component `RELATED-TO` written on the event (`link_task_to_event` with
-  `"zeitblock"`/`"voraussetzung"`), task→event conversion for timeboxing
+  `"time_block"`/`"prerequisite"`), task→event conversion for timeboxing
   (`create_event_from_task`), and a combined day view (`get_agenda`) returning
   events plus due tasks. New `event_mapping.py` translation layer mirrors
   `mapping.py`; verified live against a Nextcloud instance (calendar/event
@@ -236,11 +291,11 @@ This project does not yet follow Semantic Versioning releases.
   does not automatically roll the series forward to the next occurrence
   (unlike what the Nextcloud UI might do). Instead, it hard-ends the series by
   marking the entire recurring task as done. To advance a series, use
-  `update_task` on its `faellig_datum` instead.
+  `update_task` on its `due_date` instead.
 - **One configurable server timezone instead of hardcoded UTC**
   (`MCP_DEFAULT_TIMEZONE`, default `Europe/Berlin`). Naive datetime input is
-  interpreted in that zone, day windows (`get_agenda`, `von`/`bis`,
-  `faellig_vor`/`faellig_nach`) are local days in it, and returned timestamps
+  interpreted in that zone, day windows (`get_agenda`, `start`/`end`,
+  `due_before`/`due_after`) are local days in it, and returned timestamps
   carry its offset (e.g. `+02:00`); all-day values stay bare `YYYY-MM-DD`
   strings. `MCP_DEFAULT_TIMEZONE=UTC` restores the previous behaviour
   *including the wire format*: a zone that is UTC is written as plain
@@ -254,32 +309,32 @@ This project does not yet follow Semantic Versioning releases.
   nothing about *which* zone it came from - so writing one straight back used
   to re-anchor a recurring event to a fixed UTC instant, reintroducing the
   hour of DST drift after a single read/write round trip, and updating only
-  `start` or only `ende` could leave the two ends anchored differently (the
-  event silently changing length at the next transition). `start`, `ende` and
-  `ausnahme_daten` are now written in the timezone the event itself is
+  `start` or only `end` could leave the two ends anchored differently (the
+  event silently changing length at the next transition). `start`, `end` and
+  `exception_dates` are now written in the timezone the event itself is
   anchored to - its `DTSTART`'s - whichever zone the value arrived in, and
   always at the instant that value meant (a naive one still means the server's
   default timezone). Naming a zone on `start`
   (`"2026-07-21T09:00:00 Asia/Tokyo"`) is how an event is *moved* to another
-  zone; everything else then follows the new anchor. `ausnahme_daten`
+  zone; everything else then follows the new anchor. `exception_dates`
   therefore also shares one representation across all its entries - a mix of
   naive and offset entries used to produce an `EXDATE` with a `TZID` parameter
   next to a value still carrying `Z`, which RFC 5545 3.2.19 forbids and no
-  reader reports. For the same reason, `ausnahme_daten` entries must now all be
+  reader reports. For the same reason, `exception_dates` entries must now all be
   the same kind as the event's start - date-only values for an all-day event,
   datetimes otherwise - and a mixed or mismatched set is **rejected** with a
   clear error rather than written as one `EXDATE` carrying two value types
   under a single `TZID`.
-- **An exception date that would cancel nothing now says so.** `ausnahme_daten`
+- **An exception date that would cancel nothing now says so.** `exception_dates`
   only skips an occurrence when it names exactly a moment the series produces;
   miss it by a day, an hour, or a timezone and the entry used to be stored
   while the occurrence stayed, with nothing reporting it. Entries are now
-  checked against the event's `wiederholung` (and its `RDATE`s) and a
+  checked against the event's `recurrence` (and its `RDATE`s) and a
   non-matching one is rejected with an error naming it. The check never
   guesses: an event with no recurrence rule, a rule that cannot be expanded,
   or a series that would take more than 10 000 occurrences to search are all
   accepted unchecked.
-- **`get_free_busy(benutzer=...)` sends a valid VFREEBUSY again.** The
+- **`get_free_busy(user=...)` sends a valid VFREEBUSY again.** The
   scheduling request carried its day bounds as `DTSTART;TZID=Europe/Berlin:...`
   in a request body that has no VTIMEZONE component in it; RFC 5545 3.6.4
   requires UTC bounds there, so they are converted before the POST (the same
@@ -287,10 +342,10 @@ This project does not yet follow Semantic Versioning releases.
   UTC too, as that format requires - reading them in the default timezone
   moved every reported busy block by that zone's offset.
 - **The last two UTC-only timestamps follow the same rule now**: a note's
-  `geaendert` (`list_notizen`, `get_notiz`, …) and the token expiry printed by
+  `changed` (`list_notes`, `get_note`, …) and the token expiry printed by
   the `nextcloud-task-mcp-admin list` CLI, which reads `MCP_DEFAULT_TIMEZONE`
   from the environment for it (falling back to UTC if it names no known zone).
-  `list_trash`'s `geloescht_am` keeps reading a server-side value without an
+  `list_trash`'s `deleted_at` keeps reading a server-side value without an
   offset as UTC - it is Nextcloud's own record of the deletion, not a
   caller's input or a floating calendar time - and is then rendered in the
   default timezone like everything else.
@@ -300,7 +355,7 @@ This project does not yet follow Semantic Versioning releases.
   anchor to a zone. A `start` naming an IANA zone now keeps it, a start taken
   from the task's own due date (a bare instant - tasks store no zone) is
   anchored in the server's default timezone, and an explicit numeric offset
-  still becomes UTC, exactly as in `create_event`. `dauer_minuten` is also a
+  still becomes UTC, exactly as in `create_event`. `duration_minutes` is also a
   real duration now: a block spanning a daylight-saving change no longer
   grows or shrinks by the transition's hour.
 - **Day boundaries come from one helper, and are readings that exist.** Zones
@@ -317,7 +372,7 @@ This project does not yet follow Semantic Versioning releases.
   shortly before midnight went missing. The agenda now queries the
   neighbouring days as well and applies its own local-day rule to the result,
   so the events half of the agenda draws the same day boundary the tasks half
-  already did. `list_events` keeps passing `von`/`bis` to the server
+  already did. `list_events` keeps passing `start`/`end` to the server
   untouched: its range is a filter, not a promise about days.
 - **The VTIMEZONE attached to a zone-anchored event covers dates past 2038.**
   `icalendar` writes a zone's transitions as an explicit list and ends it at
@@ -360,18 +415,18 @@ This project does not yet follow Semantic Versioning releases.
   create (8), overwriting/removing (17) and additive-idempotent (3) sets, all
   with `openWorldHint=True` since every one of them talks to a remote Nextcloud.
 - **Collection caches bounded by a 60-second TTL and unified.** The process-wide collection caches now refresh 60 seconds after their last fetch, protecting against out-of-band deletes or renames (e.g. from the Nextcloud web UI) feeding stale collections to tools forever. The cache lists and metadata are now fetched atomically, avoiding skew windows. `get_agenda` freezes that TTL for the duration of its own query so its events and tasks are read from one consistent server state instead of splitting across two if the TTL lapses mid-call - which means the real worst-case staleness bound is 60 seconds plus the duration of the slowest overlapping `get_agenda` call, not a flat 60 seconds.
-- **`get_agenda` adds a `quelle_url` key to all entries.** Display names are not unique in Nextcloud; this provides the exact collection URL an event or task came from, so ambiguous entries can be uniquely identified.
+- **`get_agenda` adds a `source_url` key to all entries.** Display names are not unique in Nextcloud; this provides the exact collection URL an event or task came from, so ambiguous entries can be uniquely identified.
 
 - **One unreadable due date no longer breaks a whole task listing.** A `DUE`
   this server cannot parse - a bare time, a period, whatever a foreign client
   wrote - made `list_tasks` fail for every task in that list rather than just
   that one. Such a task is now listed like a task with no due date at all:
-  sorted last, and excluded when a `faellig_vor`/`faellig_nach` bound is given,
+  sorted last, and excluded when a `due_before`/`due_after` bound is given,
   because it cannot be judged "before" or "after" anything either.
 - **A task list deleted server-side no longer breaks every all-lists query.**
   The collection listing is cached for the life of the process, so a vanished
   list stayed in it and failed on every use; `list_tasks()` and
-  `get_agenda(listen_namen=None)` recover from that the way named lists always
+  `get_agenda(list_names=None)` recover from that the way named lists always
   have - drop the caches, re-list once, carry on.
 - **Every tool call was slow (3-10 s, even simple reads): a per-call cascade of
   sequential CalDAV round-trips is now cached down to a handful.** Two
@@ -432,11 +487,10 @@ This project does not yet follow Semantic Versioning releases.
   against `^[a-zA-Z0-9_.-]{1,64}$`, so parameter names like `fällig_datum`,
   `priorität` and `übergeordnete_aufgabe` made the API reject the whole tool
   list and the connector unusable. Renamed across the entire public surface -
-  tool parameters, `felder_leeren` values, returned task-dict keys
-  (`faellig_datum`, `prioritaet`, `uebergeordnete_aufgabe`,
-  `uebergeordnete_uid`, `faellig_vor`, `faellig_nach`) - and in error
-  messages, docs and tests. **Breaking** for any client that consumed the old
-  umlaut spellings.
+  tool parameters, field-clearing values, returned task-dict keys - and in
+  error messages, docs and tests. (These names have since been translated to
+  English outright; see "All German naming translated to English" above.)
+  **Breaking** for any client that consumed the old umlaut spellings.
 
 ### Changed
 
@@ -468,7 +522,7 @@ High-level summary of the improvement-plan work packages (see
 - **Correctness & API design (WP3):** correct all-day date handling and
   consistent UTC-naive-datetime semantics; a single `TaskFields` dataclass
   replacing five duplicated parameter lists; field-clearing via
-  `felder_leeren`; consistent `list_name` naming; new `get_task` tool; cached
+  `clear_fields`; consistent `list_name` naming; new `get_task` tool; cached
   calendar resolution.
 - **Auth depth (WP4):** full OAuth code/token/refresh/revocation lifecycle
   tests; bounded refresh-token expiry; `nextcloud-task-mcp-admin` CLI for
