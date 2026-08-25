@@ -1908,6 +1908,43 @@ def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
 # --- Birthday convention (birthday_fields) ---
 
 
+def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account():
+    assert event_mapping.resolve_birthday_calendar([]) == "Birthdays"
+    assert event_mapping.resolve_birthday_calendar(["Work", "Personal"]) == "Birthdays"
+
+
+def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar():
+    """A server set up before the rename already files birthdays in "Geburtstage"."""
+    assert event_mapping.resolve_birthday_calendar(["Work", "Geburtstage"]) == "Geburtstage"
+
+
+def test_resolve_birthday_calendar_prefers_english_when_both_exist():
+    assert event_mapping.resolve_birthday_calendar(["Geburtstage", "Birthdays"]) == "Birthdays"
+
+
+def test_resolve_birthday_calendar_matches_the_name_exactly():
+    """Resolution elsewhere compares display names exactly, so a differently
+    cased calendar is not this calendar - claiming it would only turn a clean
+    "not found" into a confusing one."""
+    assert event_mapping.resolve_birthday_calendar(["geburtstage"]) == "Birthdays"
+
+
+def test_birthday_tag_follows_the_calendar():
+    assert event_mapping.birthday_tag_for("Geburtstage") == "Geburtstag"
+    assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
+    assert event_mapping.birthday_tag_for("Family") == "Birthday"
+
+
+def test_birthday_fields_tags_with_the_given_tag():
+    fields = event_mapping.birthday_fields("Dad", "07-04", 1975, today=_TODAY, tag="Geburtstag")
+
+    assert fields.tags == ["Geburtstag"]
+    # Everything else about the convention is unchanged by the tag.
+    assert fields.title == "🎂 Dad (1975)"
+    assert fields.recurrence == "FREQ=YEARLY"
+    assert fields.visibility == "private"
+
+
 _TODAY = date(2026, 8, 24)
 
 

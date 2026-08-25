@@ -852,13 +852,17 @@ def test_create_birthday_schema(tools):
     schema = tools["create_birthday"].parameters
     assert set(schema["properties"]) == {"name", "date", "year", "calendar"}
     assert schema["required"] == ["name", "date"]
-    assert schema["properties"]["calendar"]["default"] == "Birthdays"
+    # No literal default any more: which calendar an unnamed birthday goes to
+    # depends on what the account already has, so it is resolved per call.
+    assert schema["properties"]["calendar"]["default"] is None
 
 
 def test_create_birthday_builds_the_convention_and_returns_the_event(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
     expected_event = {"uid": "new-uid", "title": "🎂 Dad (1975)"}
     fake_service.get_event.return_value = expected_event
+
+    fake_service.list_calendars.return_value = [{"name": "Birthdays"}]
 
     result = _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
 
@@ -879,8 +883,57 @@ def test_create_birthday_writes_to_the_given_calendar(tools, fake_service):
 
     _run(tools["create_birthday"].fn(name="Dad", date="07-04", calendar="Family"))
 
-    (cal_name, _), _ = fake_service.create_event.call_args
+    (cal_name, fields), _ = fake_service.create_event.call_args
     assert cal_name == "Family"
+    # An explicitly named calendar is used as given, without asking the server
+    # which birthday calendars exist, and keeps the English tag.
+    fake_service.list_calendars.assert_not_called()
+    assert fields.tags == ["Birthday"]
+
+
+def test_create_birthday_uses_the_legacy_calendar_when_it_is_the_only_one(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+    fake_service.list_calendars.return_value = [{"name": "Geburtstage"}, {"name": "Work"}]
+
+    _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
+
+    (cal_name, fields), _ = fake_service.create_event.call_args
+    assert cal_name == "Geburtstage"
+    # The tag follows the calendar, so one tag still covers all of its entries.
+    assert fields.tags == ["Geburtstag"]
+    fake_service.get_event.assert_called_once_with("Geburtstage", "new-uid")
+
+
+def test_create_birthday_prefers_the_english_calendar_when_both_exist(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+    fake_service.list_calendars.return_value = [{"name": "Geburtstage"}, {"name": "Birthdays"}]
+
+    _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
+
+    (cal_name, fields), _ = fake_service.create_event.call_args
+    assert cal_name == "Birthdays"
+    assert fields.tags == ["Birthday"]
+
+
+def test_create_birthday_named_legacy_calendar_still_gets_the_legacy_tag(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+
+    _run(tools["create_birthday"].fn(name="Dad", date="07-04", calendar="Geburtstage"))
+
+    (cal_name, fields), _ = fake_service.create_event.call_args
+    assert cal_name == "Geburtstage"
+    assert fields.tags == ["Geburtstag"]
+
+
+def test_create_birthday_creates_the_english_calendar_on_a_fresh_account(tools, fake_service):
+    fake_service.create_event.return_value = "new-uid"
+    fake_service.list_calendars.return_value = [{"name": "Work"}]
+
+    _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
+
+    (cal_name, fields), _ = fake_service.create_event.call_args
+    assert cal_name == "Birthdays"
+    assert fields.tags == ["Birthday"]
 
 
 def test_create_birthday_invalid_date_becomes_clean_tool_error(tools, fake_service):

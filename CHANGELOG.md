@@ -123,12 +123,13 @@ This project does not yet follow Semantic Versioning releases.
     `zeitblock`/`voraussetzung`/`gleichrangig` ->
     `time_block`/`prerequisite`/`sibling`; share principal type
     `benutzer`/`gruppe` -> `user`/`group`.
-  - `create_birthday` defaults changed with the vocabulary: the default calendar
-    is now `"Birthdays"` (was `"Geburtstage"`) and the tag it writes is
-    `"Birthday"` (was `"Geburtstag"`). Existing birthday entries created under
-    the old convention keep their German calendar name and tag and will not be
-    found by the new defaults - pass `calendar="Geburtstage"` explicitly, or
-    rename the calendar and re-tag those events.
+  - `create_birthday` now writes to `"Birthdays"` with tag `"Birthday"` on a
+    fresh account. This one is *not* breaking: with no `calendar` given the
+    target is resolved against the calendars the account actually has, so a
+    server that already files birthdays in `"Geburtstage"` keeps filing them
+    there, and entries written to that calendar keep the `"Geburtstag"` tag
+    the ones already in it carry. The English names win when both calendars
+    exist, and when neither does. Naming a calendar explicitly always uses it.
 
 
 - **`list_events` no longer scans the whole account by default.** Called with
