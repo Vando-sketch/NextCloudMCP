@@ -36,6 +36,7 @@ from nextcloud_task_mcp.errors import (
     TaskListNotFoundError,
     TaskMcpError,
     TaskNotFoundError,
+    TransientServerError,
 )
 
 #: The shipped default timezone, spelled out where a test builds a component
@@ -67,6 +68,17 @@ def _make_calendar(
 def mock_dav_client():
     with patch("nextcloud_task_mcp.caldav_client.DAVClient") as mock_cls:
         yield mock_cls
+
+
+@pytest.fixture(autouse=True)
+def retry_sleep():
+    """Run the transient-failure retries without their real backoff.
+
+    Autouse so no test pays 1.5s for a retried batch item; yielded so the tests
+    that care can assert how often (and how long) it would have slept.
+    """
+    with patch("nextcloud_task_mcp.caldav_client._sleep") as mock_sleep:
+        yield mock_sleep
 
 
 @pytest.fixture
@@ -5101,7 +5113,7 @@ def _readback(vcal: Calendar) -> MagicMock:
     return copied
 
 
-@pytest.mark.parametrize("status", [403, 405, 409, 501, 502])
+@pytest.mark.parametrize("status", [403, 405, 409, 501])
 def test_move_task_rejection_statuses_fallback(service, principal, mock_dav_client, status):
     source = _make_calendar(
         "SourceList", url="https://cloud.example.com/dav/source/", components=["VTODO"]
@@ -5141,7 +5153,7 @@ def test_move_task_rejection_statuses_fallback(service, principal, mock_dav_clie
     todo_obj.delete.assert_called_once()
 
 
-@pytest.mark.parametrize("status", [403, 405, 409, 501, 502])
+@pytest.mark.parametrize("status", [403, 405, 409, 501])
 def test_move_event_rejection_statuses_fallback(service, principal, mock_dav_client, status):
     source = _make_calendar(
         "SourceCalendar", url="https://cloud.example.com/dav/source_cal/", components=["VEVENT"]
@@ -5220,7 +5232,7 @@ def test_move_fallback_write_fails_source_survives(service, principal, mock_dav_
 
     target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
     target.save_todo.side_effect = Exception("Write failed")
-    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=502)
+    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=405)
 
     with pytest.raises(TaskMcpError, match="left untouched"):
         service.move_task("SourceList", "task1", "TargetList")
@@ -5488,6 +5500,9 @@ def test_move_unknown_target_or_uid(service, principal):
     )
     principal.calendars.return_value = [source, target]
     source.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    # Missing in the source is only "not found" once the target is ruled out
+    # too - a UID sitting in the target means the move already happened.
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
 
     with pytest.raises(TaskNotFoundError):
         service.move_task("SourceList", "unknown_uid", "TargetList")
@@ -5506,6 +5521,7 @@ def test_move_unknown_target_or_uid(service, principal):
         service.move_event("SourceCal", "event1", "UnknownTarget")
 
     source_cal.event_by_uid.side_effect = caldav_error.NotFoundError()
+    target_cal.event_by_uid.side_effect = caldav_error.NotFoundError()
     with pytest.raises(EventNotFoundError):
         service.move_event("SourceCal", "unknown_uid", "TargetCal")
 
@@ -6709,3 +6725,762 @@ def test_update_events_conflict_message_speaks_of_events(service, principal):
     res = service.update_events("Events", ["u1"], event_mapping.EventFields(location="Office"))
 
     assert "Event 'u1' was modified by another client" in res["results"][0]["error"]
+
+
+# ======================================================================
+# Transient-failure detection and retries
+# ======================================================================
+
+
+def _put_error(status: int) -> caldav_error.PutError:
+    """A caldav write error carrying an HTTP status the way caldav builds them.
+
+    `errmsg(response)` renders "<status> <reason>\n\n<body>" and is passed as
+    the exception's *url*, which is the only place the status survives.
+    """
+    return caldav_error.PutError(f"{status} Bad Gateway\n\n<html>proxy</html>")
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_gateway_statuses_count_as_transient(status):
+    assert caldav_client_module._is_transient(_put_error(status)) is True
+
+
+@pytest.mark.parametrize("status", [400, 403, 409, 500])
+def test_decided_statuses_do_not_count_as_transient(status):
+    assert caldav_client_module._is_transient(_put_error(status)) is False
+
+
+def test_definite_caldav_errors_are_never_transient():
+    # Each of these is an answer about the request, not a missing one - and
+    # RateLimitError only surfaces once caldav's own backoff gave up.
+    for exc in (
+        caldav_error.NotFoundError("404 Not Found\n\n"),
+        caldav_error.ETagMismatchError("412 Precondition Failed\n\n"),
+        caldav_error.ConsistencyError("409 Conflict\n\n"),
+        caldav_error.RateLimitError(url="503 Service Unavailable\n\n"),
+    ):
+        assert caldav_client_module._is_transient(exc) is False
+
+
+def test_dropped_connections_count_as_transient():
+    assert caldav_client_module._is_transient(caldav_client_module._http_errors.Timeout()) is True
+
+
+def test_unparseable_dav_error_is_not_treated_as_transient():
+    # "Can't tell" must never license a retry of a write.
+    assert (
+        caldav_client_module._is_transient(caldav_error.PutError("something went wrong")) is False
+    )
+
+
+def test_retry_transient_gives_up_after_the_configured_attempts(retry_sleep):
+    attempts = []
+
+    def always_502():
+        attempts.append(1)
+        raise _put_error(502)
+
+    with pytest.raises(caldav_error.PutError):
+        caldav_client_module._retry_transient(always_502)
+
+    assert len(attempts) == caldav_client_module._BATCH_RETRY_ATTEMPTS
+    # Backs off between attempts rather than hammering: one sleep less than
+    # attempts, each longer than the last.
+    waits = [call.args[0] for call in retry_sleep.call_args_list]
+    assert waits == [0.5, 1.0]
+
+
+def test_retry_transient_does_not_retry_a_decided_failure(retry_sleep):
+    attempts = []
+
+    def always_403():
+        attempts.append(1)
+        raise _put_error(403)
+
+    with pytest.raises(caldav_error.PutError):
+        caldav_client_module._retry_transient(always_403)
+
+    assert len(attempts) == 1
+    retry_sleep.assert_not_called()
+
+
+# ======================================================================
+# update_tasks / delete_tasks / move_tasks (task batches)
+# ======================================================================
+
+
+def _task_obj(uid: str = "t1", **fields) -> MagicMock:
+    """A caldav task object whose `icalendar_instance` really holds the VTODO.
+
+    `update_tasks` patches the series master found by walking the instance, so
+    a bare MagicMock there would make the write vacuous.
+    """
+    vcal = Calendar()
+    todo = Todo()
+    todo.add("uid", uid)
+    todo.add("summary", "Task")
+    mapping.apply_task_fields(todo, mapping.TaskFields(**fields))
+    vcal.add_component(todo)
+    obj = MagicMock()
+    obj.icalendar_instance = vcal
+    obj.icalendar_component = todo
+    return obj
+
+
+def _task_list_with(objs: dict[str, MagicMock], name: str = "Personal") -> MagicMock:
+    task_list = _make_calendar(name, components=["VTODO"])
+    task_list.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    return task_list
+
+
+def test_update_tasks_all_succeed(service, principal):
+    objs = {"t1": _task_obj("t1"), "t2": _task_obj("t2")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    res = service.update_tasks("Personal", ["t1", "t2"], mapping.TaskFields(location="Büro"))
+
+    assert res == {
+        "list_name": "Personal",
+        "succeeded": 2,
+        "failed": 0,
+        "results": [
+            {"uid": "t1", "status": "ok"},
+            {"uid": "t2", "status": "ok"},
+        ],
+    }
+    for obj in objs.values():
+        assert obj.save.called
+        assert str(obj.icalendar_component["location"]) == "Büro"
+
+
+def test_update_tasks_patches_the_series_master_not_an_override(service, principal):
+    """A recurring task's file also holds its RECURRENCE-ID overrides."""
+    vcal = Calendar()
+    master = Todo()
+    master.add("uid", "t1")
+    master.add("summary", "Series")
+    master.add("dtstart", datetime(2026, 7, 20, 9, 0, tzinfo=BERLIN))
+    master.add("rrule", vRecur.from_ical("FREQ=WEEKLY"))
+    override = Todo()
+    override.add("uid", "t1")
+    override.add("summary", "Exception")
+    override.add("recurrence-id", datetime(2026, 7, 27, 9, 0, tzinfo=BERLIN))
+    vcal.add_component(override)
+    vcal.add_component(master)
+    obj = MagicMock()
+    obj.icalendar_instance = vcal
+    obj.icalendar_component = override
+
+    task_list = _make_calendar("Personal", components=["VTODO"])
+    task_list.get_todo_by_uid.return_value = obj
+    principal.calendars.return_value = [task_list]
+
+    res = service.update_tasks("Personal", ["t1"], mapping.TaskFields(location="Büro"))
+
+    assert res["succeeded"] == 1
+    assert str(master["location"]) == "Büro"
+    assert "location" not in override
+
+
+def test_update_tasks_partial_failure_unknown_uid(service, principal):
+    objs = {"t1": _task_obj("t1"), "t3": _task_obj("t3")}
+    task_list = _make_calendar("Personal", components=["VTODO"])
+
+    def side_effect(uid):
+        if uid == "t2":
+            raise caldav_error.NotFoundError()
+        return objs[uid]
+
+    task_list.get_todo_by_uid.side_effect = side_effect
+    principal.calendars.return_value = [task_list]
+
+    res = service.update_tasks("Personal", ["t1", "t2", "t3"], mapping.TaskFields(location="Büro"))
+
+    assert (res["succeeded"], res["failed"]) == (2, 1)
+    assert res["results"][1] == {
+        "uid": "t2",
+        "status": "error",
+        "error": "Task 't2' was not found.",
+    }
+    assert objs["t3"].save.called
+
+
+def test_update_tasks_deduplicates_uids(service, principal):
+    objs = {"t1": _task_obj("t1")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    res = service.update_tasks("Personal", ["t1", "t1", "t1"], mapping.TaskFields(location="Büro"))
+
+    assert res["results"] == [{"uid": "t1", "status": "ok"}]
+    objs["t1"].save.assert_called_once()
+
+
+def test_update_tasks_empty_uids_rejected(service):
+    with pytest.raises(InvalidTaskDataError, match="task_uids must not be empty"):
+        service.update_tasks("Personal", [], mapping.TaskFields(location="Büro"))
+
+
+def test_update_tasks_over_the_uid_limit_rejected(service):
+    uids = [f"t{i}" for i in range(201)]
+    with pytest.raises(InvalidTaskDataError, match="at most 200 task UIDs"):
+        service.update_tasks("Personal", uids, mapping.TaskFields(location="Büro"))
+
+
+def test_update_tasks_empty_patch_rejected(service, principal):
+    principal.calendars.return_value = [_make_calendar("Personal", components=["VTODO"])]
+
+    with pytest.raises(InvalidTaskDataError, match="No fields to update"):
+        service.update_tasks("Personal", ["t1"], mapping.TaskFields())
+
+
+def test_update_tasks_invalid_patch_writes_nothing(service, principal):
+    objs = {"t1": _task_obj("t1")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    with pytest.raises(InvalidTaskDataError):
+        service.update_tasks(
+            "Personal", ["t1"], mapping.TaskFields(recurrence="FREQ=NEVER;BYDAY=XX")
+        )
+
+    objs["t1"].save.assert_not_called()
+
+
+def test_update_tasks_unknown_clear_fields_writes_nothing(service, principal):
+    objs = {"t1": _task_obj("t1")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    with pytest.raises(InvalidTaskDataError):
+        service.update_tasks("Personal", ["t1"], mapping.TaskFields(clear=("no_such_field",)))
+
+    objs["t1"].save.assert_not_called()
+
+
+def test_update_tasks_accepts_a_recurrence_only_patch(service, principal):
+    """The probe carries a DTSTART, so `recurrence` alone is not rejected up front."""
+    objs = {"t1": _task_obj("t1", start_date="2026-07-20T09:00:00")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    res = service.update_tasks(
+        "Personal", ["t1"], mapping.TaskFields(recurrence="FREQ=WEEKLY;BYDAY=MO")
+    )
+
+    assert res["succeeded"] == 1
+
+
+def test_update_tasks_reports_a_conflict_per_uid(service, principal):
+    task_list = _make_calendar("Personal", components=["VTODO"])
+    obj = _task_obj("t1")
+    obj.save.side_effect = caldav_error.ETagMismatchError()
+    task_list.get_todo_by_uid.return_value = obj
+    principal.calendars.return_value = [task_list]
+
+    res = service.update_tasks("Personal", ["t1"], mapping.TaskFields(location="Büro"))
+
+    assert res["failed"] == 1
+    assert "Task 't1' was modified by another client" in res["results"][0]["error"]
+
+
+def test_update_tasks_occurrence_uid_fails_only_its_own_entry(service, principal):
+    objs = {"t1": _task_obj("t1")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    res = service.update_tasks(
+        "Personal", ["t1", "series#2026-07-27"], mapping.TaskFields(location="Büro")
+    )
+
+    assert (res["succeeded"], res["failed"]) == (1, 1)
+    assert "single occurrences cannot be edited" in res["results"][1]["error"]
+    assert objs["t1"].save.called
+
+
+def test_update_tasks_auth_failure_aborts_the_batch(service, principal):
+    task_list = _make_calendar("Personal", components=["VTODO"])
+    task_list.get_todo_by_uid.side_effect = caldav_error.AuthorizationError(reason="Unauthorized")
+    principal.calendars.return_value = [task_list]
+
+    with pytest.raises(AuthenticationFailedError):
+        service.update_tasks("Personal", ["t1", "t2"], mapping.TaskFields(location="Büro"))
+
+
+def test_update_tasks_unknown_list_rejected(service, principal):
+    principal.calendars.return_value = []
+
+    with pytest.raises(TaskListNotFoundError):
+        service.update_tasks("Fehlt", ["t1"], mapping.TaskFields(location="Büro"))
+
+
+def test_update_tasks_retries_a_gateway_failure(service, principal, retry_sleep):
+    obj = _task_obj("t1")
+    obj.save.side_effect = [_put_error(502), None]
+    task_list = _make_calendar("Personal", components=["VTODO"])
+    task_list.get_todo_by_uid.return_value = obj
+    principal.calendars.return_value = [task_list]
+
+    res = service.update_tasks("Personal", ["t1"], mapping.TaskFields(location="Büro"))
+
+    assert res["results"] == [{"uid": "t1", "status": "ok"}]
+    assert obj.save.call_count == 2
+    retry_sleep.assert_called_once()
+
+
+def test_update_tasks_stops_when_a_gateway_failure_outlives_its_retries(
+    service, principal, retry_sleep
+):
+    """A server that answers nothing is a reason to stop, not to try it 199 more times."""
+    objs = {"t1": _task_obj("t1"), "t2": _task_obj("t2"), "t3": _task_obj("t3")}
+    objs["t2"].save.side_effect = _put_error(502)
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    with pytest.raises(TaskMcpError) as excinfo:
+        service.update_tasks("Personal", ["t1", "t2", "t3"], mapping.TaskFields(location="Büro"))
+
+    assert objs["t2"].save.call_count == caldav_client_module._BATCH_RETRY_ATTEMPTS
+    objs["t3"].save.assert_not_called()
+    # The exception carries no `results`, so the work already done has to be
+    # in the message - otherwise a half-finished batch is unresumable.
+    message = str(excinfo.value)
+    assert "1 of 3 were done (t1)" in message
+    assert "Still to do: t2, t3" in message
+
+
+def test_a_batch_that_stops_on_its_first_uid_says_so(service, principal, retry_sleep):
+    objs = {"t1": _task_obj("t1"), "t2": _task_obj("t2")}
+    objs["t1"].save.side_effect = _put_error(502)
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    with pytest.raises(TaskMcpError) as excinfo:
+        service.update_tasks("Personal", ["t1", "t2"], mapping.TaskFields(location="Büro"))
+
+    message = str(excinfo.value)
+    assert "0 of 2 were done." in message
+    assert "Still to do: t1, t2" in message
+    objs["t2"].save.assert_not_called()
+
+
+def test_delete_tasks_all_succeed(service, principal):
+    objs = {"t1": _task_obj("t1"), "t2": _task_obj("t2")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    res = service.delete_tasks("Personal", ["t1", "t2"])
+
+    assert res == {
+        "list_name": "Personal",
+        "succeeded": 2,
+        "failed": 0,
+        "results": [{"uid": "t1", "status": "ok"}, {"uid": "t2", "status": "ok"}],
+    }
+    for obj in objs.values():
+        obj.delete.assert_called_once()
+
+
+def test_delete_tasks_partial_failure(service, principal):
+    objs = {"t2": _task_obj("t2")}
+    task_list = _make_calendar("Personal", components=["VTODO"])
+
+    def side_effect(uid):
+        if uid == "t1":
+            raise caldav_error.NotFoundError()
+        return objs[uid]
+
+    task_list.get_todo_by_uid.side_effect = side_effect
+    principal.calendars.return_value = [task_list]
+
+    res = service.delete_tasks("Personal", ["t1", "t2"])
+
+    assert (res["succeeded"], res["failed"]) == (1, 1)
+    assert res["results"][0]["error"] == "Task 't1' was not found."
+    objs["t2"].delete.assert_called_once()
+
+
+def test_delete_tasks_deduplicates_uids(service, principal):
+    objs = {"t1": _task_obj("t1")}
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    res = service.delete_tasks("Personal", ["t1", "t1"])
+
+    assert res["results"] == [{"uid": "t1", "status": "ok"}]
+    objs["t1"].delete.assert_called_once()
+
+
+def test_delete_tasks_empty_uids_rejected(service):
+    with pytest.raises(InvalidTaskDataError, match="task_uids must not be empty"):
+        service.delete_tasks("Personal", [])
+
+
+def test_delete_tasks_over_the_uid_limit_rejected(service):
+    with pytest.raises(InvalidTaskDataError, match="at most 200 task UIDs"):
+        service.delete_tasks("Personal", [f"t{i}" for i in range(201)])
+
+
+def test_delete_tasks_stops_when_the_server_refuses_a_delete(service, principal):
+    """Unlike an unknown UID, a refused DELETE says nothing about this one task."""
+    objs = {"t1": _task_obj("t1"), "t2": _task_obj("t2")}
+    objs["t1"].delete.side_effect = caldav_error.ConsistencyError("server said no")
+    principal.calendars.return_value = [_task_list_with(objs)]
+
+    with pytest.raises(TaskMcpError):
+        service.delete_tasks("Personal", ["t1", "t2"])
+
+    objs["t2"].delete.assert_not_called()
+
+
+def _move_responder(*move_statuses: int):
+    """A `DAVClient.request` stand-in answering MOVE with the given statuses in order.
+
+    Everything else (the collection-metadata PROPFIND) gets the same generic
+    response the other move tests use, so the sequence isn't consumed by
+    requests the test isn't about.
+    """
+    remaining = list(move_statuses)
+
+    def respond(url, method="", body="", headers=None, **kwargs):
+        if method == "MOVE":
+            return SimpleNamespace(status=remaining.pop(0) if remaining else 201)
+        return SimpleNamespace(status=207, tree=None)
+
+    return respond
+
+
+def _batch_move_pair(principal) -> tuple[MagicMock, MagicMock]:
+    source = _make_calendar(
+        "MCP-World", url="https://cloud.example.com/dav/source/", components=["VTODO"]
+    )
+    target = _make_calendar(
+        "Archiv", url="https://cloud.example.com/dav/target/", components=["VTODO"]
+    )
+    principal.calendars.return_value = [source, target]
+    return source, target
+
+
+def _movable(uid: str) -> MagicMock:
+    obj = _task_obj(uid)
+    obj.url = f"https://cloud.example.com/dav/source/{uid}.ics"
+    return obj
+
+
+def test_move_tasks_all_succeed(service, principal, mock_dav_client):
+    source, target = _batch_move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    mock_dav_client.return_value.request.side_effect = _move_responder(201, 201, 201)
+
+    res = service.move_tasks("MCP-World", ["t1", "t2", "t3"], "Archiv")
+
+    assert res["list_name"] == "MCP-World"
+    assert (res["succeeded"], res["failed"]) == (3, 0)
+    assert res["results"][0] == {
+        "uid": "t1",
+        "status": "ok",
+        "from": "MCP-World",
+        "to": "Archiv",
+        "method": "MOVE",
+    }
+
+
+def test_move_tasks_resolves_each_list_once(service, principal, mock_dav_client):
+    source, _ = _batch_move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    mock_dav_client.return_value.request.side_effect = _move_responder()
+
+    service.move_tasks("MCP-World", ["t1", "t2", "t3"], "Archiv")
+
+    # One listing for the target, served from cache for the source - not two
+    # name resolutions per task, which is the whole point over move_task.
+    assert principal.calendars.call_count == 1
+
+
+def test_move_tasks_reports_one_failure_and_moves_the_rest(service, principal, mock_dav_client):
+    source, target = _batch_move_pair(principal)
+    objs = {"t1": _movable("t1"), "t3": _movable("t3")}
+
+    def source_lookup(uid):
+        if uid == "t2":
+            raise caldav_error.NotFoundError()
+        return objs[uid]
+
+    source.get_todo_by_uid.side_effect = source_lookup
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    mock_dav_client.return_value.request.side_effect = _move_responder()
+
+    res = service.move_tasks("MCP-World", ["t1", "t2", "t3"], "Archiv")
+
+    assert (res["succeeded"], res["failed"]) == (2, 1)
+    assert res["results"][1] == {
+        "uid": "t2",
+        "status": "error",
+        "error": "Task 't2' was not found.",
+    }
+    assert res["results"][2]["method"] == "MOVE"
+
+
+def test_move_tasks_reports_a_uid_already_in_the_target(service, principal, mock_dav_client):
+    """Re-running a half-failed migration must converge, not report the done half as gone."""
+    source, target = _batch_move_pair(principal)
+    source.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    target.get_todo_by_uid.return_value = _task_obj("t1")
+    mock_dav_client.return_value.request.side_effect = _move_responder()
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["results"] == [
+        {
+            "uid": "t1",
+            "status": "ok",
+            "from": "MCP-World",
+            "to": "Archiv",
+            "method": "already_there",
+        }
+    ]
+
+
+def test_move_tasks_retries_a_gateway_status_instead_of_copying(
+    service, principal, mock_dav_client, retry_sleep
+):
+    """A 502 is no answer at all - copying on it is what stranded the MCP-World migration."""
+    source, target = _batch_move_pair(principal)
+    source.get_todo_by_uid.return_value = _movable("t1")
+    mock_dav_client.return_value.request.side_effect = _move_responder(502, 201)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["results"][0]["method"] == "MOVE"
+    retry_sleep.assert_called_once()
+    target.save_todo.assert_not_called()
+
+
+def test_move_tasks_retry_finds_a_move_whose_answer_was_lost(
+    service, principal, mock_dav_client, retry_sleep
+):
+    """The 502 came back *after* Nextcloud had already carried the MOVE out."""
+    source, target = _batch_move_pair(principal)
+    source.get_todo_by_uid.side_effect = [_movable("t1"), caldav_error.NotFoundError()]
+    target.get_todo_by_uid.return_value = _task_obj("t1")
+    mock_dav_client.return_value.request.side_effect = _move_responder(502)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["results"][0]["method"] == "already_there"
+    target.save_todo.assert_not_called()
+
+
+def test_move_tasks_stops_when_a_gateway_failure_outlives_its_retries(
+    service, principal, mock_dav_client, retry_sleep
+):
+    source, target = _batch_move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    # t1 moves, then every MOVE for t2 comes back 502.
+    mock_dav_client.return_value.request.side_effect = _move_responder(201, 502, 502, 502)
+
+    with pytest.raises(TransientServerError) as excinfo:
+        service.move_tasks("MCP-World", ["t1", "t2", "t3"], "Archiv")
+
+    message = str(excinfo.value)
+    assert "may or may not have been carried out" in message
+    assert "1 of 3 were done (t1)" in message
+    assert "Still to do: t2, t3" in message
+
+
+def test_move_tasks_records_a_target_clash_and_carries_on(service, principal, mock_dav_client):
+    source, target = _batch_move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    mock_dav_client.return_value.request.side_effect = _move_responder(412, 201)
+
+    res = service.move_tasks("MCP-World", ["t1", "t2"], "Archiv")
+
+    assert (res["succeeded"], res["failed"]) == (1, 1)
+    assert "already exists in target" in res["results"][0]["error"]
+    assert res["results"][1]["method"] == "MOVE"
+
+
+def test_move_tasks_falls_back_to_copying_when_the_server_refuses_move(
+    service, principal, mock_dav_client
+):
+    source, target = _batch_move_pair(principal)
+    obj = _movable("t1")
+    source.get_todo_by_uid.return_value = obj
+    target.get_todo_by_uid.side_effect = [
+        caldav_error.NotFoundError(),
+        _readback(obj.icalendar_instance),
+    ]
+    mock_dav_client.return_value.request.side_effect = _move_responder(405)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["results"][0]["method"] == "copied"
+    target.save_todo.assert_called_once()
+    obj.delete.assert_called_once()
+
+
+def test_move_tasks_auth_failure_aborts_the_batch(service, principal, mock_dav_client):
+    source, _ = _batch_move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+
+    def respond(url, method="", body="", headers=None, **kwargs):
+        if method == "MOVE":
+            raise caldav_error.AuthorizationError(reason="Unauthorized")
+        return SimpleNamespace(status=207, tree=None)
+
+    mock_dav_client.return_value.request.side_effect = respond
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_tasks("MCP-World", ["t1", "t2"], "Archiv")
+
+    assert objs["t2"].delete.call_count == 0
+
+
+def test_move_tasks_into_the_same_list_is_a_no_op(service, principal, mock_dav_client):
+    source, _ = _batch_move_pair(principal)
+    mock_dav_client.return_value.request.side_effect = _move_responder()
+
+    res = service.move_tasks("MCP-World", ["t1"], "MCP-World")
+
+    assert res["results"][0]["method"] == "MOVE"
+    source.get_todo_by_uid.assert_not_called()
+
+
+def test_move_tasks_unknown_target_list_rejected(service, principal):
+    _batch_move_pair(principal)
+
+    with pytest.raises(TaskListNotFoundError):
+        service.move_tasks("MCP-World", ["t1"], "GibtEsNicht")
+
+
+def test_move_tasks_empty_uids_rejected(service, principal):
+    _batch_move_pair(principal)
+
+    with pytest.raises(InvalidTaskDataError, match="task_uids must not be empty"):
+        service.move_tasks("MCP-World", [], "Archiv")
+
+
+def test_move_tasks_occurrence_uid_fails_only_its_own_entry(service, principal, mock_dav_client):
+    source, _ = _batch_move_pair(principal)
+    source.get_todo_by_uid.side_effect = lambda uid: _movable(uid)
+    mock_dav_client.return_value.request.side_effect = _move_responder()
+
+    res = service.move_tasks("MCP-World", ["series#2026-07-27", "t1"], "Archiv")
+
+    assert (res["succeeded"], res["failed"]) == (1, 1)
+    assert "single occurrences cannot be edited" in res["results"][0]["error"]
+
+
+# --- the paths that translate before they retry ---
+
+
+def test_a_translated_gateway_failure_is_still_recognized_as_transient():
+    """Most write paths run exceptions through `_translate` before anything retries them.
+
+    If that translation flattened a 502 into the generic "the request failed",
+    every retry on those paths would be dead while still looking alive.
+    """
+    translated = _translate(_put_error(502))
+    assert isinstance(translated, TransientServerError)
+    assert caldav_client_module._is_transient(translated) is True
+
+
+def test_a_translated_timeout_is_still_recognized_as_transient():
+    translated = _translate(caldav_client_module._http_errors.Timeout())
+    assert isinstance(translated, ConnectionFailedError)
+    assert caldav_client_module._is_transient(translated) is True
+
+
+def test_a_translated_decided_failure_is_not_transient():
+    assert caldav_client_module._is_transient(_translate(_put_error(500))) is False
+
+
+def test_a_url_beginning_with_digits_is_not_read_as_a_status():
+    # `DAVError.url` really does hold a URL on some caldav paths; a host named
+    # "502.example.com" must not make a retryable failure out of a decided one.
+    exc = caldav_error.PutError("502.example.com/dav/personal/t1.ics")
+    assert caldav_client_module._dav_error_status(exc) is None
+    assert caldav_client_module._is_transient(exc) is False
+
+
+def test_move_tasks_retries_a_timeout_while_reading_the_source(
+    service, principal, mock_dav_client, retry_sleep
+):
+    source, _ = _batch_move_pair(principal)
+    source.get_todo_by_uid.side_effect = [
+        caldav_client_module._http_errors.Timeout(),
+        _movable("t1"),
+    ]
+    mock_dav_client.return_value.request.side_effect = _move_responder(201)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["results"][0]["method"] == "MOVE"
+    retry_sleep.assert_called_once()
+
+
+def test_a_copy_that_got_no_answer_is_not_retried_and_says_so(
+    service, principal, mock_dav_client, retry_sleep
+):
+    """The one write that must NOT be retried: it may have landed unverified.
+
+    A retry would meet its own copy in the target and call it a clash - and a
+    retry taught to ignore that would be deleting the source against a copy
+    nobody checked. So the source is kept and the message says the target is
+    unknown, rather than claiming nothing was written.
+    """
+    source, target = _batch_move_pair(principal)
+    obj = _movable("t1")
+    source.get_todo_by_uid.return_value = obj
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    target.save_todo.side_effect = _put_error(502)
+    mock_dav_client.return_value.request.side_effect = _move_responder(405)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["failed"] == 1
+    error = res["results"][0]["error"]
+    assert "may or may not have arrived" in error
+    assert "was kept" in error
+    target.save_todo.assert_called_once()
+    obj.delete.assert_not_called()
+
+
+def test_a_copy_the_server_plainly_refused_still_says_the_original_is_safe(
+    service, principal, mock_dav_client
+):
+    source, target = _batch_move_pair(principal)
+    obj = _movable("t1")
+    source.get_todo_by_uid.return_value = obj
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    target.save_todo.side_effect = _put_error(400)
+    mock_dav_client.return_value.request.side_effect = _move_responder(405)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert "left untouched" in res["results"][0]["error"]
+    obj.delete.assert_not_called()
+
+
+def test_move_tasks_stops_on_a_call_scoped_failure_instead_of_repeating_it(
+    service, principal, mock_dav_client
+):
+    """Rate limiting is the server asking for less, not one task's problem."""
+    source, _ = _batch_move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    calls = []
+
+    def respond(url, method="", body="", headers=None, **kwargs):
+        if method != "MOVE":
+            return SimpleNamespace(status=207, tree=None)
+        calls.append(url)
+        if len(calls) == 1:
+            return SimpleNamespace(status=201)
+        raise caldav_error.RateLimitError(url="https://cloud.example.com/dav/", reason="slow down")
+
+    mock_dav_client.return_value.request.side_effect = respond
+
+    with pytest.raises(TaskMcpError, match="rate-limiting"):
+        service.move_tasks("MCP-World", ["t1", "t2", "t3"], "Archiv")
+
+    # Asked once more after the first success, then stopped - not once per UID.
+    assert len(calls) == 2
