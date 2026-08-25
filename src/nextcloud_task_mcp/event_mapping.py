@@ -49,13 +49,13 @@ from .mapping import _exdate_values as _shared_exdate_values
 # every existing reference in this module keeps reading the same.
 
 STATUS_LABELS: dict[str, str] = {
-    "bestätigt": "CONFIRMED",
-    "vorläufig": "TENTATIVE",
-    "abgesagt": "CANCELLED",
+    "confirmed": "CONFIRMED",
+    "tentative": "TENTATIVE",
+    "cancelled": "CANCELLED",
 }
 _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
 
-# RFC 5545 RELTYPE -> German relation name used in the `verknuepfte_aufgaben`
+# RFC 5545 RELTYPE -> German relation name used in the `linked_tasks`
 # entries returned by `parse_vevent`. A RELATED-TO property without an
 # explicit RELTYPE parameter means PARENT per RFC 5545 (handled where the
 # parameter is read, in `_extract_related` and `add_relation`).
@@ -63,76 +63,76 @@ _ICAL_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in STATUS_LABELS.items()}
 # On *events*, PARENT/CHILD carry the task-link semantics of
 # `link_task_to_event` (server.py) rather than a generic subtask hierarchy -
 # a RELATED-TO is only ever written on a VEVENT by that tool (or
-# `verknuepfte_aufgabe`/`create_event_from_task`, both "zeitblock"), never by
+# `linked_task`/`create_event_from_task`, both "time_block"), never by
 # a task-side operation. So the labels here reuse `link_task_to_event`'s own
-# `beziehung` vocabulary ("zeitblock"/"voraussetzung") instead of the
-# generic "uebergeordnet"/"untergeordnet" used on the VTODO side
-# (mapping.py's `uebergeordnete_aufgabe`) - a link written as "zeitblock"
-# must read back as "zeitblock", not a different word for the same relation.
+# `relation` vocabulary ("time_block"/"prerequisite") instead of the
+# generic "parent"/"untergeordnet" used on the VTODO side
+# (mapping.py's `parent_task`) - a link written as "time_block"
+# must read back as "time_block", not a different word for the same relation.
 RELTYPE_LABELS: dict[str, str] = {
-    "PARENT": "zeitblock",
-    "CHILD": "voraussetzung",
-    "SIBLING": "gleichrangig",
+    "PARENT": "time_block",
+    "CHILD": "prerequisite",
+    "SIBLING": "sibling",
 }
 
-# RFC 5545 PARTSTAT -> German attendee-status label surfaced in `teilnehmer`
+# RFC 5545 PARTSTAT -> German attendee-status label surfaced in `attendees`
 # entries (parse_vevent). A missing PARTSTAT parameter means NEEDS-ACTION per
 # RFC 5545.
 PARTSTAT_LABELS: dict[str, str] = {
-    "ausstehend": "NEEDS-ACTION",
-    "zugesagt": "ACCEPTED",
-    "abgesagt": "DECLINED",
-    "vorläufig": "TENTATIVE",
-    "delegiert": "DELEGATED",
+    "pending": "NEEDS-ACTION",
+    "accepted": "ACCEPTED",
+    "cancelled": "DECLINED",
+    "tentative": "TENTATIVE",
+    "delegated": "DELEGATED",
 }
 _ICAL_PARTSTAT_TO_LABEL: dict[str, str] = {v: k for k, v in PARTSTAT_LABELS.items()}
 
-# respond_to_event's `antwort` only ever sets one of these three - an RSVP
+# respond_to_event's `response` only ever sets one of these three - an RSVP
 # reply can't set NEEDS-ACTION (that's the un-replied starting state, not
 # something you "reply" with) or DELEGATED (this server has no delegation
 # support).
 RESPOND_PARTSTAT_LABELS: dict[str, str] = {
-    "zugesagt": "ACCEPTED",
-    "abgesagt": "DECLINED",
-    "vorläufig": "TENTATIVE",
+    "accepted": "ACCEPTED",
+    "cancelled": "DECLINED",
+    "tentative": "TENTATIVE",
 }
 
-# RFC 5545 ROLE -> German label, surfaced in `teilnehmer` entries and accepted
-# in `teilnehmer` entries passed to create_event/update_event. A missing ROLE
+# RFC 5545 ROLE -> German label, surfaced in `attendees` entries and accepted
+# in `attendees` entries passed to create_event/update_event. A missing ROLE
 # parameter means REQ-PARTICIPANT per RFC 5545.
 ROLE_LABELS: dict[str, str] = {
-    "leitung": "CHAIR",
-    "erforderlich": "REQ-PARTICIPANT",
+    "chair": "CHAIR",
+    "required": "REQ-PARTICIPANT",
     "optional": "OPT-PARTICIPANT",
-    "keine-teilnahme": "NON-PARTICIPANT",
+    "non-participant": "NON-PARTICIPANT",
 }
 _ICAL_ROLE_TO_LABEL: dict[str, str] = {v: k for k, v in ROLE_LABELS.items()}
 
-# Maps the German, LLM-facing `felder_leeren` entry name to the
-# (EventFields attribute name, iCalendar property name) it clears. "titel"
+# Maps the German, LLM-facing `clear_fields` entry name to the
+# (EventFields attribute name, iCalendar property name) it clears. "title"
 # and "start" are deliberately absent - clearing them is not a supported
 # operation (a VEVENT without DTSTART is not addressable in any useful way).
-# "erinnerungen" has no single iCalendar property (it clears all VALARM
+# "reminders" has no single iCalendar property (it clears all VALARM
 # subcomponents instead), hence the `None` ical name, handled specially in
-# `apply_event_fields`. "ausnahme_daten" and "verknuepfte_aufgabe" clear
+# `apply_event_fields`. "exception_dates" and "linked_task" clear
 # *all* EXDATE / RELATED-TO properties (deleting the key removes every
 # occurrence, icalendar stores repeated properties as a list under one key).
-# "teilnehmer" clears every ATTENDEE property *and* (handled specially in
-# `apply_event_fields`, like "erinnerungen") the ORGANIZER left behind once no
+# "attendees" clears every ATTENDEE property *and* (handled specially in
+# `apply_event_fields`, like "reminders") the ORGANIZER left behind once no
 # attendees remain - an ORGANIZER with no ATTENDEEs is meaningless clutter.
 _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
-    "ende": ("ende", "dtend"),
-    "ort": ("ort", "location"),
-    "beschreibung": ("beschreibung", "description"),
+    "end": ("end", "dtend"),
+    "location": ("location", "location"),
+    "description": ("description", "description"),
     "tags": ("tags", "categories"),
     "status": ("status", "status"),
-    "sichtbarkeit": ("sichtbarkeit", "class"),
-    "wiederholung": ("wiederholung", "rrule"),
-    "ausnahme_daten": ("ausnahme_daten", "exdate"),
-    "erinnerungen": ("erinnerungen", None),
+    "visibility": ("visibility", "class"),
+    "recurrence": ("recurrence", "rrule"),
+    "exception_dates": ("exception_dates", "exdate"),
+    "reminders": ("reminders", None),
     "url": ("url", "url"),
-    "verknuepfte_aufgabe": ("verknuepfte_aufgabe", "related-to"),
-    "teilnehmer": ("teilnehmer", "attendee"),
+    "linked_task": ("linked_task", "related-to"),
+    "attendees": ("attendees", "attendee"),
 }
 
 
@@ -151,38 +151,38 @@ class EventFields:
     and the validation rules (unknown names, and setting+clearing the same
     field in one call, both raise `InvalidEventDataError`).
 
-    Date semantics: `start`/`ende` follow `mapping.parse_datetime_input` - a
+    Date semantics: `start`/`end` follow `mapping.parse_datetime_input` - a
     string of exactly the form "YYYY-MM-DD" makes the event all-day
     (VALUE=DATE), a naive datetime is interpreted in the server's default
     timezone and, since events pass `keep_zone=True`, keeps that zone
     (DTSTART;TZID=...) instead of collapsing to UTC. A value that carries only
     a numeric offset (the form `parse_vevent` returns) is re-expressed in the
     zone the event is already anchored to, same instant - see `_anchored`. For
-    all-day events `ende` is the *inclusive* last day; RFC 5545 DTEND is
+    all-day events `end` is the *inclusive* last day; RFC 5545 DTEND is
     exclusive, so one day is added when writing and subtracted again when
     parsing.
 
-    `teilnehmer`, when set, *replaces* the event's full ATTENDEE set (not an
+    `attendees`, when set, *replaces* the event's full ATTENDEE set (not an
     append). Each entry is {"email": str (required), "name": str (optional),
-    "rolle": str (optional, default "erforderlich" - see ROLE_LABELS),
+    "role": str (optional, default "required" - see ROLE_LABELS),
     "rsvp": bool (optional, default True)}. See `apply_event_fields` for how
     ORGANIZER gets set the first time attendees are added.
     """
 
-    titel: str | None = None  # SUMMARY
+    title: str | None = None  # SUMMARY
     start: str | None = None  # DTSTART, ISO 8601
-    ende: str | None = None  # DTEND (all-day: inclusive last day, see above)
-    ort: str | None = None  # LOCATION
-    beschreibung: str | None = None  # DESCRIPTION
+    end: str | None = None  # DTEND (all-day: inclusive last day, see above)
+    location: str | None = None  # LOCATION
+    description: str | None = None  # DESCRIPTION
     tags: list[str] | None = None  # CATEGORIES
     status: str | None = None  # STATUS via STATUS_LABELS
-    sichtbarkeit: str | None = None  # CLASS via mapping.VISIBILITY_LABELS
-    wiederholung: str | None = None  # RRULE as raw RFC 5545 text, e.g. "FREQ=WEEKLY;BYDAY=MO"
-    ausnahme_daten: list[str] | None = None  # EXDATE, list of ISO date/datetime strings
-    erinnerungen: list[str] | None = None  # VALARM specs (relative to DTSTART, or absolute)
+    visibility: str | None = None  # CLASS via mapping.VISIBILITY_LABELS
+    recurrence: str | None = None  # RRULE as raw RFC 5545 text, e.g. "FREQ=WEEKLY;BYDAY=MO"
+    exception_dates: list[str] | None = None  # EXDATE, list of ISO date/datetime strings
+    reminders: list[str] | None = None  # VALARM specs (relative to DTSTART, or absolute)
     url: str | None = None  # URL
-    verknuepfte_aufgabe: str | None = None  # VTODO UID -> RELATED-TO;RELTYPE=PARENT (timeboxing)
-    teilnehmer: list[dict] | None = None  # ATTENDEEs; see apply_event_fields for entry shape
+    linked_task: str | None = None  # VTODO UID -> RELATED-TO;RELTYPE=PARENT (timeboxing)
+    attendees: list[dict] | None = None  # ATTENDEEs; see apply_event_fields for entry shape
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
 
@@ -197,24 +197,24 @@ class EventFields:
 # takes name + date and this module fills in the rest.
 
 #: Default calendar `create_birthday` writes to.
-BIRTHDAY_CALENDAR = "Geburtstage"
+BIRTHDAY_CALENDAR = "Birthdays"
 
 #: Title prefix; the birth year, when known, follows the name in parentheses.
 BIRTHDAY_TITLE_PREFIX = "🎂"
 
 #: The fixed field values every birthday entry gets.
-BIRTHDAY_TAG = "Geburtstag"
+BIRTHDAY_TAG = "Birthday"
 BIRTHDAY_RRULE = "FREQ=YEARLY"
-BIRTHDAY_VISIBILITY = "privat"
+BIRTHDAY_VISIBILITY = "private"
 #: On the day itself (00:00 of the all-day event) and one day before.
 BIRTHDAY_REMINDERS: tuple[str, ...] = ("-PT0M", "-P1D")
 
-#: `datum`: "MM-DD", or "YYYY-MM-DD" with the birth year already in it.
+#: `date`: "MM-DD", or "YYYY-MM-DD" with the birth year already in it.
 _BIRTHDAY_DATE_RE = re.compile(r"^(?:(\d{4})-)?(\d{1,2})-(\d{1,2})$")
 
 #: A trailing "(1975)" in `name` - i.e. a title copied back from an existing
 #: entry - names the birth year too rather than becoming part of the name.
-_TRAILING_YEAR_RE = re.compile(r"^(?P<name>.*?)\s*\((?P<jahr>\d{4})\)$")
+_TRAILING_YEAR_RE = re.compile(r"^(?P<name>.*?)\s*\((?P<year>\d{4})\)$")
 
 #: Safety bound for the leap-day search in `_next_occurrence`: the longest
 #: real gap between leap years is 8 (2096 -> 2104).
@@ -240,18 +240,18 @@ def _birthday_name_and_year(name: str) -> tuple[str, int | None]:
     match = _TRAILING_YEAR_RE.match(cleaned)
     if match:
         cleaned = match.group("name").strip()
-        year = int(match.group("jahr"))
+        year = int(match.group("year"))
     if not cleaned:
         raise InvalidEventDataError("name must not be empty.")
     return cleaned, year
 
 
-def _birthday_month_day(datum: str) -> tuple[int | None, int, int]:
-    """Parse `datum` into (year or None, month, day), validating the day exists."""
-    match = _BIRTHDAY_DATE_RE.match(datum.strip())
+def _birthday_month_day(date_text: str) -> tuple[int | None, int, int]:
+    """Parse `date_text` into (year or None, month, day), validating the day exists."""
+    match = _BIRTHDAY_DATE_RE.match(date_text.strip())
     if match is None:
         raise InvalidEventDataError(
-            f"Could not parse datum '{datum}': expected 'MM-DD' (e.g. '07-04'), or "
+            f"Could not parse date '{date_text}': expected 'MM-DD' (e.g. '07-04'), or "
             "'YYYY-MM-DD' with the birth year in it."
         )
     year_text, month_text, day_text = match.groups()
@@ -262,13 +262,13 @@ def _birthday_month_day(datum: str) -> tuple[int | None, int, int]:
         date(2000, month, day)
     except ValueError:
         raise InvalidEventDataError(
-            f"Could not parse datum '{datum}': {month:02d}-{day:02d} is not a valid month/day."
+            f"Could not parse date '{date_text}': {month:02d}-{day:02d} is not a valid month/day."
         ) from None
     return (int(year_text) if year_text else None, month, day)
 
 
 def _resolve_birth_year(sources: dict[str, int | None]) -> int | None:
-    """Reconcile the birth year given via `jahr`, `datum` and/or `name`.
+    """Reconcile the birth year given via `year`, `date` and/or `name`.
 
     Each source may name it; naming it twice is fine as long as they agree,
     and disagreeing is an error rather than a silent pick. Returns None when
@@ -291,18 +291,18 @@ def _resolve_birth_year(sources: dict[str, int | None]) -> int | None:
     return year
 
 
-def _next_occurrence(month: int, day: int, heute: date) -> date:
-    """The next month/day on or after `heute` - the start for an unknown birth year.
+def _next_occurrence(month: int, day: int, today: date) -> date:
+    """The next month/day on or after `today` - the start for an unknown birth year.
 
     Skips years the date doesn't exist in, so a 02-29 birthday without a birth
     year starts on a real leap day instead of being rejected.
     """
-    for year in range(heute.year, heute.year + _MAX_YEAR_LOOKAHEAD + 1):
+    for year in range(today.year, today.year + _MAX_YEAR_LOOKAHEAD + 1):
         try:
             candidate = date(year, month, day)
         except ValueError:
             continue
-        if candidate >= heute:
+        if candidate >= today:
             return candidate
     raise InvalidEventDataError(  # pragma: no cover - unreachable for a valid month/day
         f"Could not find an upcoming {month:02d}-{day:02d}."
@@ -311,10 +311,10 @@ def _next_occurrence(month: int, day: int, heute: date) -> date:
 
 def birthday_fields(
     name: str,
-    datum: str,
-    jahr: int | None = None,
+    date_text: str,
+    year: int | None = None,
     *,
-    heute: date | None = None,
+    today: date | None = None,
 ) -> EventFields:
     """Build the `EventFields` for one birthday entry, per the fixed convention.
 
@@ -324,10 +324,10 @@ def birthday_fields(
       each occurrence minus the DTSTART year is the age being celebrated.
       With no birth year known, it starts on the next upcoming occurrence
       instead (the series is the same either way).
-    - `FREQ=YEARLY`, tag "Geburtstag", `sichtbarkeit` "privat", reminders on
+    - `FREQ=YEARLY`, tag "Birthday", `visibility` "private", reminders on
       the day and one day before.
 
-    The birth year may come from `jahr`, from a "YYYY-MM-DD" `datum`, or from
+    The birth year may come from `year`, from a "YYYY-MM-DD" `date_text`, or from
     a trailing "(1975)" in `name`; sources that disagree are an error, and a
     birth date that hasn't happened yet is one too - the year names the year
     of *birth*, never the year of the next celebration. A 02-29
@@ -335,17 +335,17 @@ def birthday_fields(
     that is what the date says; give 03-01 or 02-28 instead if the celebration
     should be annual).
 
-    `heute` is injectable for tests; it defaults to today in the server's
+    `today` is injectable for tests; it defaults to today in the server's
     default timezone.
     """
-    heute = heute or _today_local()
+    today = today or _today_local()
     clean_name, name_year = _birthday_name_and_year(name)
-    datum_year, month, day = _birthday_month_day(datum)
-    birth_year = _resolve_birth_year({"jahr": jahr, "datum": datum_year, "name": name_year})
+    date_year, month, day = _birthday_month_day(date_text)
+    birth_year = _resolve_birth_year({"year": year, "date": date_year, "name": name_year})
 
     if birth_year is None:
-        start = _next_occurrence(month, day, heute)
-        titel = f"{BIRTHDAY_TITLE_PREFIX} {clean_name}"
+        start = _next_occurrence(month, day, today)
+        title = f"{BIRTHDAY_TITLE_PREFIX} {clean_name}"
     else:
         try:
             start = date(birth_year, month, day)
@@ -353,7 +353,7 @@ def birthday_fields(
             raise InvalidEventDataError(
                 f"{birth_year} is not a leap year, so {birth_year}-02-29 does not exist."
             ) from None
-        if start > heute:
+        if start > today:
             # The whole *date*, not just the year: "2026-10-10" passed as a
             # birth date two months before it happens is the shape an LLM
             # produces when it reads "birthday on October 10th" as this
@@ -362,17 +362,17 @@ def birthday_fields(
                 f"Birth date {start.isoformat()} is in the future. Pass the date of "
                 "birth (or leave the year out), not the date of the next celebration."
             )
-        titel = f"{BIRTHDAY_TITLE_PREFIX} {clean_name} ({birth_year})"
+        title = f"{BIRTHDAY_TITLE_PREFIX} {clean_name} ({birth_year})"
 
     iso = start.isoformat()
     return EventFields(
-        titel=titel,
+        title=title,
         start=iso,
-        ende=iso,  # all-day `ende` is the inclusive last day: a one-day event
+        end=iso,  # all-day `end` is the inclusive last day: a one-day event
         tags=[BIRTHDAY_TAG],
-        sichtbarkeit=BIRTHDAY_VISIBILITY,
-        wiederholung=BIRTHDAY_RRULE,
-        erinnerungen=list(BIRTHDAY_REMINDERS),
+        visibility=BIRTHDAY_VISIBILITY,
+        recurrence=BIRTHDAY_RRULE,
+        reminders=list(BIRTHDAY_REMINDERS),
     )
 
 
@@ -403,37 +403,37 @@ def role_label_to_ical(label: str) -> str:
         return ROLE_LABELS[label]
     except KeyError:
         raise InvalidEventDataError(
-            f"Unknown rolle '{label}'. Expected one of: {', '.join(ROLE_LABELS)}."
+            f"Unknown role '{label}'. Expected one of: {', '.join(ROLE_LABELS)}."
         ) from None
 
 
 def ical_role_to_label(value: str | None) -> str:
     """Map an RFC 5545 ROLE value back to a German label.
 
-    A missing ROLE means REQ-PARTICIPANT ("erforderlich") per RFC 5545.
+    A missing ROLE means REQ-PARTICIPANT ("required") per RFC 5545.
     Unknown values (written by other CalDAV clients) pass through lowercased
     rather than raising - same policy as `RELTYPE_LABELS`.
     """
     if value is None:
-        return "erforderlich"
+        return "required"
     key = str(value).strip().upper()
     return _ICAL_ROLE_TO_LABEL.get(key, key.lower())
 
 
 def response_label_to_partstat(label: str) -> str:
-    """Map a German RSVP-reply label (respond_to_event's `antwort`) to PARTSTAT."""
+    """Map a German RSVP-reply label (respond_to_event's `response`) to PARTSTAT."""
     try:
         return RESPOND_PARTSTAT_LABELS[label]
     except KeyError:
         raise InvalidEventDataError(
-            f"Unknown antwort '{label}'. Expected one of: {', '.join(RESPOND_PARTSTAT_LABELS)}."
+            f"Unknown response '{label}'. Expected one of: {', '.join(RESPOND_PARTSTAT_LABELS)}."
         ) from None
 
 
 def ical_partstat_to_label(value: str | None) -> str:
     """Map an RFC 5545 PARTSTAT value back to a German label.
 
-    A missing PARTSTAT means NEEDS-ACTION ("ausstehend") per RFC 5545. Unknown
+    A missing PARTSTAT means NEEDS-ACTION ("pending") per RFC 5545. Unknown
     values pass through lowercased rather than raising - same policy as
     `ical_role_to_label`/`RELTYPE_LABELS`.
     """
@@ -531,7 +531,7 @@ def _validate_clear(fields: EventFields, clear: tuple[str, ...]) -> None:
     unknown = sorted({name for name in clear if name not in _CLEAR_SPECS})
     if unknown:
         raise InvalidEventDataError(
-            f"Unknown felder_leeren entry/entries: {', '.join(unknown)}. "
+            f"Unknown clear_fields entry/entries: {', '.join(unknown)}. "
             f"Expected one of: {', '.join(_CLEAR_SPECS)}."
         )
     conflicts = sorted(
@@ -563,18 +563,18 @@ def _check_start_end_consistency(event) -> None:
     end_is_all_day = not isinstance(end_value, datetime)
     if start_is_all_day != end_is_all_day:
         raise InvalidEventDataError(
-            "start and ende must both be all-day dates or both be datetimes; "
+            "start and end must both be all-day dates or both be datetimes; "
             "got one of each. Use 'YYYY-MM-DD' for both, or full datetimes for both."
         )
     if start_is_all_day:
         if end_value <= start_value:
             raise InvalidEventDataError(
-                f"ende ({(end_value - timedelta(days=1)).isoformat()}) must not be "
+                f"end ({(end_value - timedelta(days=1)).isoformat()}) must not be "
                 f"before start ({start_value.isoformat()})."
             )
     elif _as_utc(end_value) < _as_utc(start_value):
         raise InvalidEventDataError(
-            f"ende ({end_value.isoformat()}) must not be before start ({start_value.isoformat()})."
+            f"end ({end_value.isoformat()}) must not be before start ({start_value.isoformat()})."
         )
 
 
@@ -585,11 +585,11 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     and update_event their "only set what's provided" semantics. Field names
     listed in `fields.clear` are removed from the component entirely;
     clearing and setting the same field in one call, or naming an unknown
-    field (including "titel" and "start", which cannot be cleared), raises
+    field (including "title" and "start", which cannot be cleared), raises
     `InvalidEventDataError`.
 
     Timestamps are anchored to the zone the event already carries: a `start`,
-    `ende` or `ausnahme_daten` entry that names no zone of its own (only a
+    `end` or `exception_dates` entry that names no zone of its own (only a
     numeric offset, which is what `parse_vevent` hands back) is written in the
     event's own DTSTART zone rather than as a bare UTC instant, so reading an
     event and writing it back leaves it exactly as anchored as it was. See
@@ -598,7 +598,7 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     `own_organizer` is the caller's own "mailto:..." address (discovered by
     `CalDavService` via a CalDAV principal lookup - this module makes no
     network calls itself, so the value has to be handed in). It is only used
-    when `fields.teilnehmer` adds at least one attendee and the event has no
+    when `fields.attendees` adds at least one attendee and the event has no
     ORGANIZER yet; passing `None` in that situation simply leaves ORGANIZER
     unset (used by the pure event_mapping unit tests, which have no principal
     to ask).
@@ -606,13 +606,13 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     clear = tuple(fields.clear or ())
     _validate_clear(fields, clear)
 
-    # Clears run first, so later sets (and the erinnerungen rebuild below)
+    # Clears run first, so later sets (and the reminders rebuild below)
     # observe the final DTSTART presence.
     for name in clear:
         _, ical_name = _CLEAR_SPECS[name]
-        if name == "erinnerungen":
+        if name == "reminders":
             event.subcomponents = [c for c in event.subcomponents if c.name != "VALARM"]
-        elif name == "teilnehmer":
+        elif name == "attendees":
             # Clearing attendees leaves an ORGANIZER-with-no-ATTENDEEs behind,
             # which is meaningless clutter - drop it too.
             if ical_name is not None and ical_name in event:
@@ -627,8 +627,8 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
     # instead of each keeping whichever zone it happened to parse in.
     zone = _component_zone(event)
 
-    if fields.titel is not None:
-        _set(event, "summary", fields.titel)
+    if fields.title is not None:
+        _set(event, "summary", fields.title)
     if fields.start is not None:
         start_value = _parse_datetime(fields.start)
         if not names_timezone(fields.start):
@@ -639,68 +639,68 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
             start_value = _anchored(start_value, zone)
         _set(event, "dtstart", start_value)
         zone = _component_zone(event)
-    if fields.ende is not None:
-        end_value = _anchored(_parse_datetime(fields.ende), zone)
+    if fields.end is not None:
+        end_value = _anchored(_parse_datetime(fields.end), zone)
         if not isinstance(end_value, datetime):
-            # `ende` is the inclusive last day; RFC 5545 DTEND is exclusive,
+            # `end` is the inclusive last day; RFC 5545 DTEND is exclusive,
             # so the stored all-day end is one day later.
             end_value = end_value + timedelta(days=1)
         _set(event, "dtend", end_value)
-    if fields.ort is not None:
-        _set(event, "location", fields.ort)
-    if fields.beschreibung is not None:
-        _set(event, "description", fields.beschreibung)
+    if fields.location is not None:
+        _set(event, "location", fields.location)
+    if fields.description is not None:
+        _set(event, "description", fields.description)
     if fields.tags is not None:
         _set(event, "categories", list(fields.tags))
     if fields.status is not None:
         _set(event, "status", status_label_to_ical(fields.status))
-    if fields.sichtbarkeit is not None:
+    if fields.visibility is not None:
         try:
-            ical_class = visibility_label_to_ical(fields.sichtbarkeit)
+            ical_class = visibility_label_to_ical(fields.visibility)
         except InvalidTaskDataError as exc:
             raise InvalidEventDataError(str(exc)) from None
         _set(event, "class", ical_class)
-    if fields.wiederholung is not None:
+    if fields.recurrence is not None:
         anchor_val = None
         dtstart_prop = event.get("dtstart")
         if dtstart_prop is not None:
             anchor_val = getattr(dtstart_prop, "dt", None)
-        _set(event, "rrule", _parse_rrule(fields.wiederholung, anchor=anchor_val))
-    if fields.ausnahme_daten is not None:
+        _set(event, "rrule", _parse_rrule(fields.recurrence, anchor=anchor_val))
+    if fields.exception_dates is not None:
         # Replace, not append: drop every existing EXDATE, then write all
         # entries as one EXDATE property with a comma-separated value list.
         # (`parse_vevent` reads back all three wire forms other clients may
         # produce: one property, repeated properties, comma lists.)
         if "exdate" in event:
             del event["exdate"]
-        if fields.ausnahme_daten:
-            exdate_entries = list(fields.ausnahme_daten)
+        if fields.exception_dates:
+            exdate_entries = list(fields.exception_dates)
             exdate_values = _exdate_values(event, exdate_entries)
             _check_exdates_match_occurrences(event, exdate_entries, exdate_values)
             event.add("exdate", exdate_values)
     if fields.url is not None:
         _set(event, "url", fields.url)
-    if fields.verknuepfte_aufgabe is not None:
+    if fields.linked_task is not None:
         # Timeboxing: the event is the "child" of the task it schedules, so
         # the task UID is written as the event's PARENT relation (replacing
         # any existing RELATED-TO; `add_relation` is the appending variant).
         _set(
             event,
             "related-to",
-            fields.verknuepfte_aufgabe,
+            fields.linked_task,
             parameters={"RELTYPE": "PARENT"},
         )
 
-    if fields.teilnehmer is not None:
-        # Replace, not append (mirrors ausnahme_daten/verknuepfte_aufgabe):
+    if fields.attendees is not None:
+        # Replace, not append (mirrors exception_dates/linked_task):
         # drop every existing ATTENDEE, then write the given list fresh.
         if "attendee" in event:
             del event["attendee"]
-        for entry in fields.teilnehmer:
+        for entry in fields.attendees:
             email = entry.get("email")
             if not email:
-                raise InvalidEventDataError("Each teilnehmer entry needs an 'email'.")
-            role_ical = role_label_to_ical(entry.get("rolle", "erforderlich"))
+                raise InvalidEventDataError("Each attendees entry needs an 'email'.")
+            role_ical = role_label_to_ical(entry.get("role", "required"))
             rsvp = entry.get("rsvp", True)
             attendee_params: dict[str, str] = {
                 "ROLE": role_ical,
@@ -719,16 +719,16 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
         # address (an event that already has ATTENDEEs already has an
         # ORGANIZER too, from whenever they were first added, and that one
         # is left alone).
-        if fields.teilnehmer and "organizer" not in event and own_organizer:
+        if fields.attendees and "organizer" not in event and own_organizer:
             _set(event, "organizer", own_organizer)
 
-    if fields.erinnerungen is not None:
+    if fields.reminders is not None:
         try:
             # Relative reminders on a VEVENT resolve against DTSTART
             # (RELATED=START) - a VEVENT has no DUE, so `apply_alarms` derives
             # that anchor by itself. It raises the "needs a start" error when
             # DTSTART is absent.
-            apply_alarms(event, list(fields.erinnerungen), str(event.get("summary", "Reminder")))
+            apply_alarms(event, list(fields.reminders), str(event.get("summary", "Reminder")))
         except InvalidTaskDataError as exc:
             raise InvalidEventDataError(str(exc)) from None
 
@@ -738,7 +738,7 @@ def apply_event_fields(event, fields: EventFields, *, own_organizer: str | None 
 def add_relation(component, uid: str, reltype: str) -> None:
     """Append one extra RELATED-TO;RELTYPE=<reltype> property, idempotently.
 
-    Unlike the replacing `verknuepfte_aufgabe` set in `apply_event_fields`,
+    Unlike the replacing `linked_task` set in `apply_event_fields`,
     this *adds* to whatever relations already exist - the service layer uses
     it for link_task_to_event on VEVENTs. Idempotent: if a RELATED-TO with
     the same UID and the same RELTYPE (missing RELTYPE counts as PARENT per
@@ -799,7 +799,7 @@ def _text(component, name: str) -> str | None:
 def _format_end(component, start_value: date | datetime | None) -> str | None:
     """Return the event's end as an ISO string, or None.
 
-    An all-day DTEND is exclusive per RFC 5545; the German `ende` field is
+    An all-day DTEND is exclusive per RFC 5545; the German `end` field is
     the inclusive last day, so one day is subtracted on the way out. When
     DTEND is absent but a DURATION is present, the end is computed as
     start + duration (RFC 5545 allows either form); with neither, None.
@@ -821,7 +821,7 @@ def _format_end(component, start_value: date | datetime | None) -> str | None:
 
 
 def _extract_related(component) -> list[dict[str, str]]:
-    """Read all RELATED-TO properties as {"uid", "beziehung"} dicts.
+    """Read all RELATED-TO properties as {"uid", "relation"} dicts.
 
     A missing RELTYPE parameter means PARENT per RFC 5545; RELTYPEs outside
     `RELTYPE_LABELS` are surfaced lowercased rather than dropped, so links
@@ -835,9 +835,7 @@ def _extract_related(component) -> list[dict[str, str]]:
     for entry in entries:
         params = getattr(entry, "params", {}) or {}
         reltype = str(params.get("RELTYPE", "PARENT")).upper()
-        result.append(
-            {"uid": str(entry), "beziehung": RELTYPE_LABELS.get(reltype, reltype.lower())}
-        )
+        result.append({"uid": str(entry), "relation": RELTYPE_LABELS.get(reltype, reltype.lower())})
     return result
 
 
@@ -860,7 +858,7 @@ def _parse_organizer(component) -> dict[str, Any] | None:
 
 
 def _parse_attendees(component) -> list[dict[str, Any]]:
-    """Read every ATTENDEE into {"email", "name", "status", "rolle", "rsvp"} dicts."""
+    """Read every ATTENDEE into {"email", "name", "status", "role", "rsvp"} dicts."""
     attendee = component.get("attendee")
     if attendee is None:
         return []
@@ -875,7 +873,7 @@ def _parse_attendees(component) -> list[dict[str, Any]]:
                 "email": _strip_mailto(entry),
                 "name": str(name) if name else None,
                 "status": ical_partstat_to_label(params.get("PARTSTAT")),
-                "rolle": ical_role_to_label(params.get("ROLE")),
+                "role": ical_role_to_label(params.get("ROLE")),
                 "rsvp": rsvp,
             }
         )
@@ -891,7 +889,7 @@ def apply_exdate_changes(
 ) -> dict[str, Any]:
     """Add and/or remove exception dates on an event, keeping the rest.
 
-    The additive counterpart of `EventFields.ausnahme_daten`, which replaces
+    The additive counterpart of `EventFields.exception_dates`, which replaces
     the event's whole EXDATE set. Cancelling six sick days on a series that
     already skips sixty occurrences means writing six values here instead of
     reading and rewriting sixty-six - the reason this exists.
@@ -982,7 +980,7 @@ def _write_exdates(event, values, *, zone, all_day: bool) -> None:
         raise InvalidEventDataError(
             "This event's stored exception dates mix date-only and datetime values, which "
             "cannot be written as one EXDATE property. Fix them with update_event's "
-            "ausnahme_daten (which replaces the whole set) instead."
+            "exception_dates (which replaces the whole set) instead."
         )
     ordered = sorted(values, key=lambda value: _occurrence_key(value, all_day=all_day))
     written = [
@@ -1003,11 +1001,11 @@ def _write_exdates(event, values, *, zone, all_day: bool) -> None:
 def parse_vevent(component) -> dict[str, Any]:
     """Parse an icalendar VEVENT component into the server's German event dict.
 
-    `ganztaegig` is True when DTSTART is a bare date (all-day event);
-    `wiederholung_von` carries the RECURRENCE-ID of a materialized single
-    occurrence of a recurring series, None for ordinary events. `organisator`
-    is the ORGANIZER (None if the event has none); `teilnehmer` lists every
-    ATTENDEE (empty list if none) - see `EventFields.teilnehmer` for the
+    `all_day` is True when DTSTART is a bare date (all-day event);
+    `recurrence_id` carries the RECURRENCE-ID of a materialized single
+    occurrence of a recurring series, None for ordinary events. `organizer`
+    is the ORGANIZER (None if the event has none); `attendees` lists every
+    ATTENDEE (empty list if none) - see `EventFields.attendees` for the
     entry shape (plus a "status" key here, absent on the way in since it's
     server/RSVP-controlled, not settable directly - see respond_to_event).
     """
@@ -1018,25 +1016,25 @@ def parse_vevent(component) -> dict[str, Any]:
     rrule = component.get("rrule")
     return {
         "uid": str(component.get("uid")),
-        "titel": str(component.get("summary", "")),
+        "title": str(component.get("summary", "")),
         "start": format_datetime_output(start_value),
-        "ende": _format_end(component, start_value),
-        "ganztaegig": start_value is not None and not isinstance(start_value, datetime),
-        "ort": _text(component, "location"),
-        "beschreibung": _text(component, "description"),
+        "end": _format_end(component, start_value),
+        "all_day": start_value is not None and not isinstance(start_value, datetime),
+        "location": _text(component, "location"),
+        "description": _text(component, "description"),
         "tags": _extract_categories(component),
-        "erinnerungen": extract_alarms(component),
+        "reminders": extract_alarms(component),
         "status": ical_status_to_label(str(status) if status is not None else None),
-        "sichtbarkeit": (
+        "visibility": (
             _ICAL_CLASS_TO_LABEL.get(str(class_value).upper()) if class_value is not None else None
         ),
-        "wiederholung": rrule.to_ical().decode() if rrule is not None else None,
-        "ausnahme_daten": _extract_exdates(component),
+        "recurrence": rrule.to_ical().decode() if rrule is not None else None,
+        "exception_dates": _extract_exdates(component),
         "url": _text(component, "url"),
-        "verknuepfte_aufgaben": _extract_related(component),
-        "wiederholung_von": _format_recurrence_id(component),
-        "organisator": _parse_organizer(component),
-        "teilnehmer": _parse_attendees(component),
+        "linked_tasks": _extract_related(component),
+        "recurrence_id": _format_recurrence_id(component),
+        "organizer": _parse_organizer(component),
+        "attendees": _parse_attendees(component),
     }
 
 
@@ -1083,7 +1081,7 @@ def _event_interval(event: dict[str, Any]) -> tuple[datetime, datetime] | None:
         return None
     try:
         start_value = _parse_datetime(start_text)
-        end_text = event.get("ende")
+        end_text = event.get("end")
         end_value = _parse_datetime(end_text) if isinstance(end_text, str) else None
     except InvalidEventDataError:
         return None
@@ -1114,14 +1112,14 @@ def events_in_window(
 
     Two kinds of event are kept unconditionally, because their dict says
     nothing about which moment matched the query: one that still carries a
-    `wiederholung` (a series master a server answered with instead of
+    `recurrence` (a series master a server answered with instead of
     expanding it - its DTSTART is the first occurrence, not the matching one),
     and one with no usable start. Dropping either would hide a real event to
     tidy up a boundary.
     """
     kept: list[dict[str, Any]] = []
     for event in events:
-        if event.get("wiederholung"):
+        if event.get("recurrence"):
             kept.append(event)
             continue
         interval = _event_interval(event)
@@ -1141,25 +1139,25 @@ def events_in_window(
 def filter_events(
     events: list[dict[str, Any]],
     *,
-    suchtext: str | None = None,
+    search_text: str | None = None,
     tag: str | None = None,
     limit: int | None = None,
-    ohne_erinnerung: bool = False,
-    ohne_sichtbarkeit: bool = False,
-    ohne_tags: bool = False,
+    without_reminder: bool = False,
+    without_visibility: bool = False,
+    without_tags: bool = False,
     uid_regex: str | None = None,
 ) -> list[dict[str, Any]]:
     """Filter already-`parse_vevent`-parsed event dicts, chronologically sorted.
 
-    `suchtext` is a case-insensitive substring match over titel, beschreibung
-    and ort (None fields are skipped). `tag` must match one tags entry
+    `search_text` is a case-insensitive substring match over title, description
+    and location (None fields are skipped). `tag` must match one tags entry
     exactly (case-insensitively). Results are sorted by start (events
     without a start last); `limit`, if given, must be a positive integer and
     caps the number of results, applied last - so it returns the *earliest*
     N matches.
 
-    `ohne_erinnerung`/`ohne_sichtbarkeit`/`ohne_tags` keep only events whose
-    `erinnerungen` list is empty / whose `sichtbarkeit` is None (no readable
+    `without_reminder`/`without_visibility`/`without_tags` keep only events whose
+    `reminders` list is empty / whose `visibility` is None (no readable
     CLASS) / whose `tags` list is empty. `uid_regex` keeps only events whose
     `uid` contains a match for the given regular expression (`re.search`,
     case-sensitive - anchor with ^...$ for a full match; an unparsable
@@ -1177,21 +1175,21 @@ def filter_events(
             raise InvalidEventDataError(f"Invalid uid_regex '{uid_regex}': {exc}.") from exc
         events = [event for event in events if uid_pattern.search(str(event.get("uid") or ""))]
 
-    if ohne_erinnerung:
-        events = [event for event in events if not event.get("erinnerungen")]
-    if ohne_sichtbarkeit:
-        events = [event for event in events if event.get("sichtbarkeit") is None]
-    if ohne_tags:
+    if without_reminder:
+        events = [event for event in events if not event.get("reminders")]
+    if without_visibility:
+        events = [event for event in events if event.get("visibility") is None]
+    if without_tags:
         events = [event for event in events if not event.get("tags")]
 
-    if suchtext is not None:
-        needle = suchtext.lower()
+    if search_text is not None:
+        needle = search_text.lower()
         events = [
             event
             for event in events
             if any(
                 needle in value.lower()
-                for value in (event.get("titel"), event.get("beschreibung"), event.get("ort"))
+                for value in (event.get("title"), event.get("description"), event.get("location"))
                 if value is not None
             )
         ]
@@ -1227,7 +1225,7 @@ def event_busy_interval(component) -> tuple[datetime, datetime] | None:
     expanded to the full *local* day(s) they cover (the server's default
     timezone, matching every other day window), using the same DTEND/DURATION
     fallback as `_format_end` - but returning the *exclusive* end datetime
-    (unlike the German `ende` field, which is inclusive), since that's the
+    (unlike the German `end` field, which is inclusive), since that's the
     natural representation for an interval to be merged with others in
     `merge_busy_intervals`. An event with an end at or before its start
     collapses to a zero-length interval at its start rather than going

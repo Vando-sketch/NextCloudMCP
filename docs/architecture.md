@@ -93,7 +93,7 @@ makes `update_task`'s "only touch fields that were passed" contract safe.
 **Reminder semantics.** Relative `VALARM` triggers are anchored with
 `TRIGGER;RELATED=END` (i.e. relative to `DUE`) when the task has a due date, falling back
 to `RELATED=START`, matching Nextcloud Tasks' own "before due date" behavior. Absolute
-triggers are converted to UTC as RFC 5545 requires. Setting `erinnerungen` on update
+triggers are converted to UTC as RFC 5545 requires. Setting `reminders` on update
 replaces all existing alarms — merging alarm lists has no unambiguous semantics.
 
 **UID generation client-side.** `create_task` generates the UID itself (uuid4) instead of
@@ -117,8 +117,8 @@ debugging.
 default 30s) into `DAVClient`, so a hung Nextcloud server can no longer hang this server
 forever.
 
-**German tool schema on purpose.** The tool parameters (`faellig_datum`, `prioritaet`,
-`uebergeordnete_aufgabe`, ...) are the literal MCP schema field names. Since the server is
+**German tool schema on purpose.** The tool parameters (`due_date`, `priority`,
+`parent_task`, ...) are the literal MCP schema field names. Since the server is
 operated in German via Claude, keeping the schema in German gives the model the most
 direct mapping from user language to tool arguments. The names are ASCII-transliterated
 (`ä`→`ae`, `ü`→`ue`) because the Anthropic API rejects tool schemas whose property names
