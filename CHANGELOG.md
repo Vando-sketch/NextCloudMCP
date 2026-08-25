@@ -9,6 +9,23 @@ This project does not yet follow Semantic Versioning releases.
 
 ### Added
 
+- **Birthdays are one call, not two.** The new `create_birthday(name, datum,
+  jahr=None, kalender="Geburtstage")` writes the whole birthday convention
+  itself: title `"🎂 <Name> (<Geburtsjahr>)"`, an all-day one-day event
+  starting on the *birth* date (so occurrence year minus start year is the age
+  being celebrated), `FREQ=YEARLY`, tag `Geburtstag`, `sichtbarkeit` `privat`,
+  and reminders on the day and one day before. Entering eight birthdays used to
+  mean sixteen calls - a `create_event` plus an `update_event` each - with four
+  fields per person that are easy to get subtly wrong.
+  `datum` is `"MM-DD"` or a full `"YYYY-MM-DD"`; the birth year may come from
+  `jahr`, from `datum`, or from a trailing `"(1975)"` in `name` (so a title read
+  back from an existing entry can be passed straight in - the cake is not
+  doubled either), and sources that disagree are rejected rather than
+  silently resolved. The year always means the year of *birth*: a birth date
+  that hasn't happened yet is rejected rather than stored, since a date filled
+  in as "this year's celebration" would put the person at age 0 on the next
+  occurrence. With no birth year known the title carries none and the series
+  starts on the next upcoming occurrence.
 - **Slimmer listing payloads on request.** `list_events` and `list_tasks`
   accept two new optional parameters: `felder`, a whitelist of result keys
   (unknown names error, listing the valid vocabulary), and `kompakt`, which
