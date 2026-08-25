@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastmcp.exceptions import ToolError
 
-from nextcloud_task_mcp import mapping
+from nextcloud_task_mcp import event_mapping, mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import (
@@ -354,6 +354,10 @@ def test_list_tasks_passes_nur_offene_through(tools, fake_service):
         prioritaet=None,
         tag=None,
         suchtext=None,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
         limit=None,
     )
 
@@ -379,6 +383,10 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
         prioritaet="hoch",
         tag="arbeit",
         suchtext="test",
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
         limit=5,
     )
 
@@ -394,6 +402,37 @@ def test_list_tasks_deprecated_list_name_alias_works(tools, fake_service):
         prioritaet=None,
         tag=None,
         suchtext=None,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
+        limit=None,
+    )
+
+
+def test_list_tasks_passes_cleanup_filters_through(tools, fake_service):
+    fake_service.list_tasks.return_value = []
+    _run(
+        tools["list_tasks"].fn(
+            listen_namen=["Personal"],
+            ohne_erinnerung=True,
+            ohne_sichtbarkeit=True,
+            ohne_tags=True,
+            uid_regex="^[A-F0-9-]+$",
+        )
+    )
+    fake_service.list_tasks.assert_called_once_with(
+        list_names=["Personal"],
+        only_open=True,
+        due_before=None,
+        due_after=None,
+        prioritaet=None,
+        tag=None,
+        suchtext=None,
+        ohne_erinnerung=True,
+        ohne_sichtbarkeit=True,
+        ohne_tags=True,
+        uid_regex="^[A-F0-9-]+$",
         limit=None,
     )
 
@@ -420,7 +459,16 @@ def test_list_tasks_tool_filters_added_after_limit_are_keyword_only(tools):
     assert positional == ["listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"]
     assert all(
         params[name].kind is inspect.Parameter.KEYWORD_ONLY
-        for name in ("prioritaet", "tag", "suchtext", "list_name")
+        for name in (
+            "prioritaet",
+            "tag",
+            "suchtext",
+            "ohne_erinnerung",
+            "ohne_sichtbarkeit",
+            "ohne_tags",
+            "uid_regex",
+            "list_name",
+        )
     )
 
 
@@ -430,6 +478,7 @@ def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
 
     assert {"listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"} <= set(properties)
     assert {"prioritaet", "tag", "suchtext", "list_name"} <= set(properties)
+    assert {"ohne_erinnerung", "ohne_sichtbarkeit", "ohne_tags", "uid_regex"} <= set(properties)
 
 
 def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
@@ -710,6 +759,10 @@ def test_list_events_schema(tools):
         "tag",
         "limit",
         "wiederholungen_aufloesen",
+        "ohne_erinnerung",
+        "ohne_sichtbarkeit",
+        "ohne_tags",
+        "uid_regex",
         "felder",
         "kompakt",
     }
@@ -737,6 +790,36 @@ def test_list_events_delegates_with_filters(tools, fake_service):
         tag="Privat",
         limit=10,
         expand=True,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
+    )
+
+
+def test_list_events_passes_cleanup_filters_through(tools, fake_service):
+    fake_service.list_events.return_value = []
+    _run(
+        tools["list_events"].fn(
+            kalender_namen=["Termine"],
+            ohne_erinnerung=True,
+            ohne_sichtbarkeit=True,
+            ohne_tags=True,
+            uid_regex="^[A-F0-9-]+$",
+        )
+    )
+    fake_service.list_events.assert_called_once_with(
+        calendar_names=["Termine"],
+        von=None,
+        bis=None,
+        suchtext=None,
+        tag=None,
+        limit=None,
+        expand=False,
+        ohne_erinnerung=True,
+        ohne_sichtbarkeit=True,
+        ohne_tags=True,
+        uid_regex="^[A-F0-9-]+$",
     )
 
 
@@ -842,6 +925,29 @@ def test_list_events_compacts_large_exdate_list(tools, fake_service):
 
 
 # --- Payload slimming (felder whitelist / kompakt mode) and default window ---
+
+
+def test_felder_whitelists_track_the_keys_the_parsers_actually_produce():
+    """`felder` rejects any name not in the whitelist, so the two must not drift.
+
+    A key added to `parse_vtodo`/`parse_vevent` but forgotten here becomes a
+    field that listings return yet `felder` refuses to select - which is how
+    `sichtbarkeit` arrived on the task side. Deriving both sets from the
+    parsers makes the next such addition fail here instead of in a client.
+    """
+    from icalendar import Event, Todo
+
+    from nextcloud_task_mcp.server import _EVENT_RESULT_KEYS, _TASK_RESULT_KEYS
+
+    todo = Todo()
+    todo.add("uid", "t1")
+    # "liste"/"liste_url" are stamped on by the client layer, not the parser.
+    assert set(mapping.parse_vtodo(todo)) | {"liste", "liste_url"} == set(_TASK_RESULT_KEYS)
+
+    event = Event()
+    event.add("uid", "e1")
+    # "kalender" likewise; "quelle_url" is stripped before list_events returns.
+    assert set(event_mapping.parse_vevent(event)) | {"kalender"} == set(_EVENT_RESULT_KEYS)
 
 
 def _sample_event() -> dict:
@@ -965,6 +1071,26 @@ def test_list_events_default_window_not_applied_when_scoped(tools, fake_service)
     _run(tools["list_events"].fn(bis="2026-07-31"))
     _, kwargs = fake_service.list_events.call_args
     assert kwargs["von"] is None and kwargs["bis"] == "2026-07-31"
+
+
+def test_list_events_cleanup_filters_do_not_disable_the_default_window(tools, fake_service):
+    """A cleanup sweep narrows the default window rather than escaping it.
+
+    The `ohne_*`/`uid_regex` filters run client-side on whatever the query
+    returned, so a bare sweep only ever sees today ±90 days - phone-created
+    events older than that need `von`/`bis` (or a calendar name) as well.
+    Pinned because "find every hand-made event" reads like it should scan
+    everything, and it does not.
+    """
+    from datetime import date, datetime, timedelta
+
+    fake_service.list_events.return_value = []
+    _run(tools["list_events"].fn(ohne_erinnerung=True, uid_regex="^[A-F0-9-]+$"))
+    _, kwargs = fake_service.list_events.call_args
+    today = datetime.now(mapping.get_default_timezone()).date()
+    assert date.fromisoformat(kwargs["von"]) == today - timedelta(days=90)
+    assert date.fromisoformat(kwargs["bis"]) == today + timedelta(days=90)
+    assert kwargs["ohne_erinnerung"] is True and kwargs["uid_regex"] == "^[A-F0-9-]+$"
 
 
 def test_list_events_default_window_lets_unscoped_expansion_work(tools, fake_service):
@@ -1514,6 +1640,10 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
         prioritaet=None,
         tag=None,
         suchtext=None,
+        ohne_erinnerung=False,
+        ohne_sichtbarkeit=False,
+        ohne_tags=False,
+        uid_regex=None,
     ):
         # Spelled out rather than (*args, **kwargs) on purpose: this is the
         # one place a test would notice the tool and the service drifting
