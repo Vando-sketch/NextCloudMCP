@@ -830,7 +830,7 @@ Example:
 
 ---
 
-## `create_birthday(name, date, year=None, calendar="Birthdays")`
+## `create_birthday(name, date, year=None, calendar=None)`
 
 Creates one birthday entry with the whole convention filled in, so a birthday
 is a single call instead of a `create_event` plus an `update_event`. Nothing
@@ -842,7 +842,7 @@ calendar looks like:
 | `title` | `"🎂 <name> (<birth year>)"` — without the parentheses if no birth year is known |
 | `start` / `end` | The **birth** date, all-day, one day (`end` = `start`) |
 | `recurrence` | `"FREQ=YEARLY"` |
-| `tags` | `["Birthday"]` |
+| `tags` | `["Birthday"]` — `["Geburtstag"]` for entries written to the legacy `"Geburtstage"` calendar, so one tag still covers all of it |
 | `visibility` | `"private"` |
 | `reminders` | `["-PT0M", "-P1D"]` — on the day itself and one day before |
 
@@ -858,7 +858,7 @@ Parameters:
 | `name` | yes | The person's name, without the cake and without the year — both are added. A title read back from an existing entry (`"🎂 Dad (1975)"`) works too: the cake is not doubled and the `(1975)` is read as the birth year |
 | `date` | yes | `"MM-DD"` (e.g. `"07-04"`), or a full `"YYYY-MM-DD"` whose year is the year of **birth** |
 | `year` | no | Year of birth. May instead come from `date` or from a trailing `"(1975)"` in `name` |
-| `calendar` | no | Target calendar display name, `"Birthdays"` by default |
+| `calendar` | no | Target calendar display name. Left out, it resolves per call — see below. Naming one always uses that one |
 
 The birth year may therefore be named by `year`, by `date` and by `name`.
 Naming it more than once is fine as long as the values agree; **conflicting
@@ -876,6 +876,28 @@ A `02-29` birthday stays `02-29` — a yearly rule then only fires in leap
 years, which is what that date means; pass `02-28` or `03-01` instead if the
 entry should show up every year. Without a birth year, a `02-29` entry starts
 on the next real leap day.
+
+### Which calendar an unnamed birthday goes to
+
+Passing no `calendar` resolves the target against the calendars the account
+actually has, rather than assuming a fixed name:
+
+| Calendars present | Target | Tag written |
+|---|---|---|
+| `Birthdays` | `Birthdays` | `Birthday` |
+| `Geburtstage` only | `Geburtstage` | `Geburtstag` |
+| both | `Birthdays` | `Birthday` |
+| neither | `Birthdays` | `Birthday` |
+
+`Geburtstage` is what this calendar was called before the tool vocabulary was
+translated to English. A server that already files birthdays there keeps
+filing them there, so the rename does not split one person's birthdays across
+two calendars. Display names are compared **exactly** — a calendar named
+`geburtstage` is not this calendar, the same rule every other tool resolves a
+calendar name by.
+
+This costs one extra calendar listing per call, and only when `calendar` is
+omitted; naming a calendar skips the lookup entirely.
 
 Returns the created event, same dict shape as `get_event`.
 

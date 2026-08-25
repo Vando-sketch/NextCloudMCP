@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -199,11 +200,21 @@ class EventFields:
 #: Default calendar `create_birthday` writes to.
 BIRTHDAY_CALENDAR = "Birthdays"
 
+#: What that calendar was called before the German vocabulary was translated.
+#: A caller who names no calendar gets `BIRTHDAY_CALENDAR`, unless only this
+#: one exists - see `resolve_birthday_calendar`. Renaming the tool vocabulary
+#: must not strand the birthdays an earlier version already filed.
+LEGACY_BIRTHDAY_CALENDAR = "Geburtstage"
+
 #: Title prefix; the birth year, when known, follows the name in parentheses.
 BIRTHDAY_TITLE_PREFIX = "🎂"
 
 #: The fixed field values every birthday entry gets.
 BIRTHDAY_TAG = "Birthday"
+#: The tag entries in `LEGACY_BIRTHDAY_CALENDAR` were written with. The tag
+#: follows the calendar (`birthday_tag_for`) so a legacy calendar keeps one
+#: tag across all its entries instead of ending up half-tagged either way.
+LEGACY_BIRTHDAY_TAG = "Geburtstag"
 BIRTHDAY_RRULE = "FREQ=YEARLY"
 BIRTHDAY_VISIBILITY = "private"
 #: On the day itself (00:00 of the all-day event) and one day before.
@@ -309,12 +320,45 @@ def _next_occurrence(month: int, day: int, today: date) -> date:
     )
 
 
+def resolve_birthday_calendar(existing_names: Iterable[str]) -> str:
+    """Pick the calendar `create_birthday` writes to when the caller names none.
+
+    `BIRTHDAY_CALENDAR` normally, but `LEGACY_BIRTHDAY_CALENDAR` when that is
+    the only one of the two that exists - a server set up before the German
+    vocabulary was translated already has its birthdays there, and new entries
+    belong with them rather than in a second, near-empty calendar. When both
+    exist the English one wins (it is the documented default, and having both
+    means the migration is already under way). When neither exists the English
+    name is returned, so a fresh install creates the English calendar.
+
+    Names are compared exactly, matching how `_resolve_collection` resolves a
+    display name to a collection - a differently-cased "geburtstage" would not
+    be resolvable by this name either, so treating it as a match would only
+    turn a clean "not found" into a confusing one.
+    """
+    names = set(existing_names)
+    if BIRTHDAY_CALENDAR not in names and LEGACY_BIRTHDAY_CALENDAR in names:
+        return LEGACY_BIRTHDAY_CALENDAR
+    return BIRTHDAY_CALENDAR
+
+
+def birthday_tag_for(calendar: str) -> str:
+    """The birthday tag that belongs with `calendar`.
+
+    Entries in the legacy German calendar carry the legacy German tag, so a
+    tag filter over that calendar keeps returning all of it. Every other
+    calendar - including one the caller named explicitly - gets `BIRTHDAY_TAG`.
+    """
+    return LEGACY_BIRTHDAY_TAG if calendar == LEGACY_BIRTHDAY_CALENDAR else BIRTHDAY_TAG
+
+
 def birthday_fields(
     name: str,
     date_text: str,
     year: int | None = None,
     *,
     today: date | None = None,
+    tag: str = BIRTHDAY_TAG,
 ) -> EventFields:
     """Build the `EventFields` for one birthday entry, per the fixed convention.
 
@@ -324,8 +368,8 @@ def birthday_fields(
       each occurrence minus the DTSTART year is the age being celebrated.
       With no birth year known, it starts on the next upcoming occurrence
       instead (the series is the same either way).
-    - `FREQ=YEARLY`, tag "Birthday", `visibility` "private", reminders on
-      the day and one day before.
+    - `FREQ=YEARLY`, tag `tag` (default "Birthday" - see `birthday_tag_for`),
+      `visibility` "private", reminders on the day and one day before.
 
     The birth year may come from `year`, from a "YYYY-MM-DD" `date_text`, or from
     a trailing "(1975)" in `name`; sources that disagree are an error, and a
@@ -369,7 +413,7 @@ def birthday_fields(
         title=title,
         start=iso,
         end=iso,  # all-day `end` is the inclusive last day: a one-day event
-        tags=[BIRTHDAY_TAG],
+        tags=[tag],
         visibility=BIRTHDAY_VISIBILITY,
         recurrence=BIRTHDAY_RRULE,
         reminders=list(BIRTHDAY_REMINDERS),

@@ -1073,7 +1073,7 @@ def build_server(
         name: str,
         date: str,
         year: int | None = None,
-        calendar: str = event_mapping.BIRTHDAY_CALENDAR,
+        calendar: str | None = None,
     ) -> dict[str, Any]:
         """Create a birthday entry, with the whole birthday convention filled in.
 
@@ -1089,7 +1089,9 @@ def build_server(
           Without a birth year it starts on the next upcoming occurrence.
         - recurrence "FREQ=YEARLY", tags ["Birthday"], visibility
           "private", reminders ["-PT0M", "-P1D"] (on the day itself and the
-          day before).
+          day before). Entries written to the legacy "Geburtstage" calendar
+          are tagged "Geburtstag" instead, matching the entries already in
+          it, so one tag still covers the whole calendar.
 
         Args:
             name: The person's name, without the cake and without the year
@@ -1111,19 +1113,34 @@ def build_server(
                 long as the values agree, and conflicting values are an error.
                 An unknown birth year is fine - leave it out and the title
                 carries no year. A birth date that is still ahead is rejected.
-            calendar: Display name of the target calendar, "Birthdays" by
-                default.
+            calendar: Display name of the target calendar. Left out, it is
+                "Birthdays", except on a server that still has the
+                "Geburtstage" calendar an earlier version of this tool wrote
+                to and no "Birthdays" - there the existing calendar is used,
+                so birthdays stay in one place instead of being split across
+                two. Naming a calendar explicitly always uses that one.
 
         Returns:
             The created event dict, same shape as get_event's return value
             (see get_event's docstring for the full key list).
         """
+        target = calendar
+        if target is None:
+            # One extra listing, only when the caller named no calendar: which
+            # of the two conventions this server is on is a property of the
+            # account, not something the caller can be expected to know.
+            calendars = await _call(caldav_service.list_calendars)
+            target = event_mapping.resolve_birthday_calendar(
+                str(entry["name"]) for entry in calendars
+            )
         try:
-            fields = event_mapping.birthday_fields(name, date, year)
+            fields = event_mapping.birthday_fields(
+                name, date, year, tag=event_mapping.birthday_tag_for(target)
+            )
         except TaskMcpError as exc:
             raise ToolError(str(exc)) from exc
-        new_uid = await _call(caldav_service.create_event, calendar, fields)
-        event: dict[str, Any] = await _call(caldav_service.get_event, calendar, new_uid)
+        new_uid = await _call(caldav_service.create_event, target, fields)
+        event: dict[str, Any] = await _call(caldav_service.get_event, target, new_uid)
         return event
 
     @mcp.tool(annotations=_MODIFY)
