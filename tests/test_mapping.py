@@ -44,60 +44,60 @@ def test_apply_and_parse_round_trip():
     todo = _new_todo()
     _apply(
         todo,
-        titel="Steuererklärung",
-        start_datum="2026-07-01",
-        faellig_datum="2026-07-20",
-        prioritaet="hoch",
-        fortschritt_prozent=20,
-        ort="Zuhause",
-        url="https://example.com/steuer",
-        tags=["Finanzen", "Wichtig"],
-        notizen="Belege sammeln",
-        sichtbarkeit="privat",
+        title="File taxes",
+        start_date="2026-07-01",
+        due_date="2026-07-20",
+        priority="high",
+        progress_percent=20,
+        location="Home",
+        url="https://example.com/taxes",
+        tags=["Finance", "Important"],
+        notes="Gather receipts",
+        visibility="private",
     )
     parsed = mapping.parse_vtodo(todo)
 
     assert parsed["uid"] == "task-1"
-    assert parsed["titel"] == "Steuererklärung"
+    assert parsed["title"] == "File taxes"
     # Date-only input (B1): all-day, not a midnight datetime.
-    assert parsed["start_datum"] == "2026-07-01"
-    assert parsed["faellig_datum"] == "2026-07-20"
-    assert parsed["prioritaet"] == "hoch"
-    assert parsed["fortschritt_prozent"] == 20
-    assert parsed["status"] == "offen"
-    assert parsed["ort"] == "Zuhause"
-    assert parsed["url"] == "https://example.com/steuer"
-    assert set(parsed["tags"]) == {"Finanzen", "Wichtig"}
-    assert parsed["notizen"] == "Belege sammeln"
-    assert parsed["erinnerungen"] == []
-    assert parsed["uebergeordnete_uid"] is None
+    assert parsed["start_date"] == "2026-07-01"
+    assert parsed["due_date"] == "2026-07-20"
+    assert parsed["priority"] == "high"
+    assert parsed["progress_percent"] == 20
+    assert parsed["status"] == "open"
+    assert parsed["location"] == "Home"
+    assert parsed["url"] == "https://example.com/taxes"
+    assert set(parsed["tags"]) == {"Finance", "Important"}
+    assert parsed["notes"] == "Gather receipts"
+    assert parsed["reminders"] == []
+    assert parsed["parent_uid"] is None
 
 
 def test_apply_task_fields_replaces_instead_of_appending():
     """Component.add() appends by default; applying twice must not duplicate values."""
     todo = _new_todo()
-    _apply(todo, titel="Erster Titel", faellig_datum="2026-07-20")
-    _apply(todo, titel="Zweiter Titel")
+    _apply(todo, title="First title", due_date="2026-07-20")
+    _apply(todo, title="Second title")
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["titel"] == "Zweiter Titel"
-    assert parsed["faellig_datum"] == "2026-07-20"  # untouched field survives
+    assert parsed["title"] == "Second title"
+    assert parsed["due_date"] == "2026-07-20"  # untouched field survives
 
 
 def test_apply_task_fields_leaves_unset_fields_untouched():
     todo = _new_todo()
-    _apply(todo, titel="Titel", ort="Büro")
-    _apply(todo, notizen="Neue Notiz")
+    _apply(todo, title="Title", location="Office")
+    _apply(todo, notes="New note")
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["titel"] == "Titel"
-    assert parsed["ort"] == "Büro"
-    assert parsed["notizen"] == "Neue Notiz"
+    assert parsed["title"] == "Title"
+    assert parsed["location"] == "Office"
+    assert parsed["notes"] == "New note"
 
 
 @pytest.mark.parametrize(
     ("label", "value"),
-    [("hoch", 1), ("mittel", 5), ("niedrig", 9)],
+    [("high", 1), ("medium", 5), ("low", 9)],
 )
 def test_priority_label_to_ical(label, value):
     assert mapping.priority_label_to_ical(label) == value
@@ -106,11 +106,11 @@ def test_priority_label_to_ical(label, value):
 @pytest.mark.parametrize(
     ("value", "label"),
     [
-        (1, "hoch"),
-        (4, "hoch"),
-        (5, "mittel"),
-        (6, "niedrig"),
-        (9, "niedrig"),
+        (1, "high"),
+        (4, "high"),
+        (5, "medium"),
+        (6, "low"),
+        (9, "low"),
         (0, None),
         (None, None),
     ],
@@ -121,23 +121,23 @@ def test_ical_priority_to_label(value, label):
 
 def test_invalid_priority_label_raises():
     with pytest.raises(InvalidTaskDataError):
-        mapping.priority_label_to_ical("super-dringend")
+        mapping.priority_label_to_ical("super-urgent")
 
 
 def test_invalid_visibility_label_raises():
     with pytest.raises(InvalidTaskDataError):
-        mapping.visibility_label_to_ical("geheim")
+        mapping.visibility_label_to_ical("secret")
 
 
 def test_percent_complete_out_of_range_raises():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError):
-        _apply(todo, fortschritt_prozent=150)
+        _apply(todo, progress_percent=150)
 
 
 def test_relative_reminder_relative_to_due():
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["-P1D"])
+    _apply(todo, title="Task", due_date="2026-07-20T10:00:00", reminders=["-P1D"])
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
     trigger = alarms[0]["trigger"]
@@ -146,7 +146,7 @@ def test_relative_reminder_relative_to_due():
 
 def test_relative_reminder_falls_back_to_start_when_no_due():
     todo = _new_todo()
-    _apply(todo, titel="Task", start_datum="2026-07-15T09:00:00", erinnerungen=["-PT1H"])
+    _apply(todo, title="Task", start_date="2026-07-15T09:00:00", reminders=["-PT1H"])
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     trigger = alarms[0]["trigger"]
     assert trigger.params.get("RELATED") == "START"
@@ -155,12 +155,12 @@ def test_relative_reminder_falls_back_to_start_when_no_due():
 def test_relative_reminder_without_start_or_due_raises():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError):
-        _apply(todo, titel="Task", erinnerungen=["-P1D"])
+        _apply(todo, title="Task", reminders=["-P1D"])
 
 
 def test_absolute_reminder_sets_value_date_time():
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["2026-07-19T09:00:00"])
+    _apply(todo, title="Task", due_date="2026-07-20", reminders=["2026-07-19T09:00:00"])
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     trigger = alarms[0]["trigger"]
     assert trigger.params.get("VALUE") == "DATE-TIME"
@@ -169,10 +169,10 @@ def test_absolute_reminder_sets_value_date_time():
 def test_relative_reminder_on_all_day_due_is_legal():
     """A relative VALARM trigger may RELATE to a DATE-valued DUE (B1 + reminders)."""
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-P1D"])
+    _apply(todo, title="Task", due_date="2026-07-20", reminders=["-P1D"])
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["faellig_datum"] == "2026-07-20"  # all-day, not midnight datetime
+    assert parsed["due_date"] == "2026-07-20"  # all-day, not midnight datetime
     assert isinstance(todo.get("due").dt, date)
 
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
@@ -184,47 +184,47 @@ def test_relative_reminder_on_all_day_due_is_legal():
 def test_invalid_reminder_spec_raises():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError):
-        _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["not-a-duration"])
+        _apply(todo, title="Task", due_date="2026-07-20", reminders=["not-a-duration"])
 
 
 def test_updating_reminders_replaces_old_alarms():
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-P1D", "-PT1H"])
+    _apply(todo, title="Task", due_date="2026-07-20", reminders=["-P1D", "-PT1H"])
     assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 2
 
-    _apply(todo, erinnerungen=["-P2D"])
+    _apply(todo, reminders=["-P2D"])
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
 
 
 def test_extract_alarms_round_trip_relative_with_due():
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    _apply(todo, title="Task", due_date="2026-07-20T10:00:00", reminders=["-PT30M"])
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+    assert parsed["reminders"] == ["-PT30M"]
 
 
 def test_extract_alarms_round_trip_relative_with_start_only():
     todo = _new_todo()
-    _apply(todo, titel="Task", start_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    _apply(todo, title="Task", start_date="2026-07-20T10:00:00", reminders=["-PT30M"])
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+    assert parsed["reminders"] == ["-PT30M"]
 
 
 def test_extract_alarms_round_trip_absolute():
     todo = _new_todo()
     _apply(
         todo,
-        titel="Task",
-        faellig_datum="2026-07-20",
-        erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
+        title="Task",
+        due_date="2026-07-20",
+        reminders=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
     )
     parsed = mapping.parse_vtodo(todo)
     # Both spellings name the same instant, so `apply_alarms` collapses them
     # into one alarm; reading it back formats it in the server's default
     # timezone (Europe/Berlin, +02:00 in August), the same convention
     # DTSTART/DUE follow.
-    assert parsed["erinnerungen"] == ["2026-08-07T11:00:00+02:00"]
+    assert parsed["reminders"] == ["2026-08-07T11:00:00+02:00"]
 
 
 @pytest.mark.parametrize("spec", ["-PT0M", "P0D", "PT0S", "-P0D", "PT0M"])
@@ -236,18 +236,18 @@ def test_extract_alarms_normalizes_every_zero_spelling(spec):
     differently depending on which client last wrote the alarm.
     """
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=[spec])
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT0M"]
+    _apply(todo, title="Task", due_date="2026-07-20T10:00:00", reminders=[spec])
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT0M"]
 
 
 def test_zero_reminder_read_back_is_accepted_as_input_again():
     """The normalized form has to survive being written straight back."""
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["P0D"])
-    read_back = mapping.parse_vtodo(todo)["erinnerungen"]
+    _apply(todo, title="Task", due_date="2026-07-20T10:00:00", reminders=["P0D"])
+    read_back = mapping.parse_vtodo(todo)["reminders"]
 
-    _apply(todo, erinnerungen=read_back)
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT0M"]
+    _apply(todo, reminders=read_back)
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT0M"]
     # Rewriting an unchanged reminder must not duplicate its alarm either.
     assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 1
 
@@ -256,11 +256,11 @@ def test_zero_and_nonzero_reminders_stay_distinct():
     todo = _new_todo()
     _apply(
         todo,
-        titel="Task",
-        faellig_datum="2026-07-20T10:00:00",
-        erinnerungen=["P0D", "-PT30M"],
+        title="Task",
+        due_date="2026-07-20T10:00:00",
+        reminders=["P0D", "-PT30M"],
     )
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT0M", "-PT30M"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT0M", "-PT30M"]
 
 
 @pytest.mark.parametrize("wire", ["-PT0M", "P0D", "PT0S"])
@@ -281,23 +281,23 @@ def test_extract_alarms_normalizes_a_zero_trigger_written_by_another_client(wire
 def test_extract_alarms_preserves_order():
     todo = _new_todo()
     reminders = ["-P1D", "-PT30M", "2026-08-07T11:00:00+02:00"]
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=reminders)
+    _apply(todo, title="Task", due_date="2026-07-20", reminders=reminders)
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == reminders
+    assert parsed["reminders"] == reminders
 
 
 def test_extract_alarms_no_valarm_returns_empty():
     todo = _new_todo()
-    _apply(todo, titel="Task")
+    _apply(todo, title="Task")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == []
+    assert parsed["reminders"] == []
 
 
 def test_extract_alarms_skips_valarm_without_trigger_or_invalid_trigger():
     from icalendar import Alarm
 
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["-PT30M"])
+    _apply(todo, title="Task", due_date="2026-07-20", reminders=["-PT30M"])
 
     alarm_without_trigger = Alarm()
     alarm_without_trigger.add("action", "DISPLAY")
@@ -309,19 +309,19 @@ def test_extract_alarms_skips_valarm_without_trigger_or_invalid_trigger():
     todo.add_component(alarm_with_invalid_trigger)
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+    assert parsed["reminders"] == ["-PT30M"]
 
 
 def test_extract_alarms_absolute_with_offset_formats_in_default_timezone():
     todo = _new_todo()
     _apply(
         todo,
-        titel="Task",
-        faellig_datum="2026-07-20",
-        erinnerungen=["2026-07-19T11:00:00+02:00"],
+        title="Task",
+        due_date="2026-07-20",
+        reminders=["2026-07-19T11:00:00+02:00"],
     )
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+    assert parsed["reminders"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def _todo_with_tzid_trigger(tzid: str) -> Todo:
@@ -356,20 +356,20 @@ def test_extract_alarms_resolves_foreign_tzid_trigger():
     follow.
     """
     todo = _todo_with_tzid_trigger("Europe/Berlin")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_extract_alarms_resolves_windows_tzid_trigger():
     """Outlook writes Windows zone names, which `zoneinfo` does not know."""
     todo = _todo_with_tzid_trigger("W. Europe Standard Time")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_extract_alarms_unknown_tzid_via_manual_alarm_is_skipped():
     """A TZID this server cannot resolve is not silently read as UTC.
 
     Guessing a zone would shift the reminder by hours, so it is left out of
-    `erinnerungen`, and the VALARM itself is left untouched - same behaviour
+    `reminders`, and the VALARM itself is left untouched - same behaviour
     as `test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm`
     below, exercised here through an alarm built directly with `icalendar`
     rather than parsed from ICS text.
@@ -377,7 +377,7 @@ def test_extract_alarms_unknown_tzid_via_manual_alarm_is_skipped():
     from icalendar import Alarm
 
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+    _apply(todo, title="Task", due_date="2026-07-20")
 
     alarm = Alarm()
     alarm.add("action", "DISPLAY")
@@ -386,14 +386,14 @@ def test_extract_alarms_unknown_tzid_via_manual_alarm_is_skipped():
     todo.add_component(alarm)
 
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["erinnerungen"] == []
+    assert parsed["reminders"] == []
     assert any(c.name == "VALARM" for c in todo.subcomponents)
 
 
 def test_extract_alarms_resolves_prefixed_tzid_trigger():
     """Evolution and older clients prefix the IANA name with a namespace path."""
     todo = _todo_with_tzid_trigger("/freeassociation.sourceforge.net/Europe/Berlin")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_extract_alarms_resolves_prefixed_three_segment_tzid_trigger():
@@ -404,7 +404,7 @@ def test_extract_alarms_resolves_prefixed_three_segment_tzid_trigger():
     in its stored zone, then rendered in the default one on the way out.
     """
     todo = _todo_with_tzid_trigger("/softwarestudio.org/Olson_20011030_5/America/Indiana/Knox")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T18:00:00+02:00"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["2026-07-19T18:00:00+02:00"]
 
 
 def test_extract_alarms_naive_trigger_without_tzid_is_utc():
@@ -414,19 +414,19 @@ def test_extract_alarms_naive_trigger_without_tzid_is_utc():
     (Europe/Berlin, +02:00 in July).
     """
     todo = _todo_with_tzid_trigger("")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T13:00:00+02:00"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["2026-07-19T13:00:00+02:00"]
 
 
 def test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm():
     """An unknown zone name is not silently read as UTC.
 
     Guessing a zone would move the reminder by hours, so the alarm is left out
-    of `erinnerungen` - and, being invisible, is left untouched by a write.
+    of `reminders` - and, being invisible, is left untouched by a write.
     """
     todo = _todo_with_tzid_trigger("Mars/Olympus")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+    assert mapping.parse_vtodo(todo)["reminders"] == []
 
-    _apply(todo, erinnerungen=["-PT30M"])
+    _apply(todo, reminders=["-PT30M"])
 
     assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 2
 
@@ -434,7 +434,7 @@ def test_extract_alarms_skips_unresolvable_tzid_trigger_but_keeps_the_alarm():
 def test_extract_alarms_tzid_naming_a_tzdata_directory_does_not_crash():
     """A TZID like "Europe" names a tzdata *directory*, not a zone."""
     todo = _todo_with_tzid_trigger("Europe")
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+    assert mapping.parse_vtodo(todo)["reminders"] == []
 
 
 _FOREIGN_ALARMS_ICS = """BEGIN:VTODO
@@ -482,7 +482,7 @@ def test_extract_alarms_skips_alarms_the_string_form_cannot_express():
     fires. Same for the trigger forms this server cannot write at all.
     """
     todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT30M"]
 
 
 _UNANCHORED_ALARM_ICS = """BEGIN:VTODO
@@ -507,7 +507,7 @@ def test_extract_alarms_lists_a_trigger_that_names_no_anchor():
     disappear from the API while still firing.
     """
     todo = _todo_from_ics(_UNANCHORED_ALARM_ICS)
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT30M"]
 
 
 def test_apply_task_fields_does_not_duplicate_a_trigger_that_names_no_anchor():
@@ -515,7 +515,7 @@ def test_apply_task_fields_does_not_duplicate_a_trigger_that_names_no_anchor():
     todo = _todo_from_ics(_UNANCHORED_ALARM_ICS)
     before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
 
-    _apply(todo, erinnerungen=["-PT30M"])
+    _apply(todo, reminders=["-PT30M"])
 
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
@@ -538,22 +538,22 @@ END:VALARM
 END:VTODO
 """
     )
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+    assert mapping.parse_vtodo(todo)["reminders"] == []
 
 
 def test_apply_task_fields_preserves_alarms_it_cannot_express():
-    """Writing `erinnerungen` must not delete what the reader could not show."""
+    """Writing `reminders` must not delete what the reader could not show."""
     todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
-    # The first VALARM in the fixture is the one `erinnerungen` can express;
+    # The first VALARM in the fixture is the one `reminders` can express;
     # every other one is a form this server has no string for.
     unexpressible = [c.to_ical() for c in todo.subcomponents if c.name == "VALARM"][1:]
 
-    _apply(todo, erinnerungen=["-PT30M", "-P1D"])
+    _apply(todo, reminders=["-PT30M", "-P1D"])
 
     kept = [c.to_ical() for c in todo.subcomponents if c.name == "VALARM"]
     for alarm in unexpressible:
         assert alarm in kept
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M", "-P1D"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT30M", "-P1D"]
 
 
 def test_apply_task_fields_leaves_an_already_present_reminder_untouched():
@@ -580,7 +580,7 @@ END:VTODO
     )
     before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
 
-    _apply(todo, titel="Renamed", erinnerungen=["-PT30M"])
+    _apply(todo, title="Renamed", reminders=["-PT30M"])
 
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
@@ -606,7 +606,7 @@ END:VTODO
     )
     before = next(c for c in todo.subcomponents if c.name == "VALARM").to_ical()
 
-    _apply(todo, erinnerungen=["-P7D"])
+    _apply(todo, reminders=["-P7D"])
 
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
@@ -614,11 +614,11 @@ END:VTODO
 
 
 def test_reminder_round_trip_leaves_the_component_unchanged():
-    """Read `erinnerungen`, write the same list back: nothing moves."""
+    """Read `reminders`, write the same list back: nothing moves."""
     todo = _todo_from_ics(_FOREIGN_ALARMS_ICS)
     before = todo.to_ical()
 
-    _apply(todo, erinnerungen=mapping.parse_vtodo(todo)["erinnerungen"])
+    _apply(todo, reminders=mapping.parse_vtodo(todo)["reminders"])
 
     assert todo.to_ical() == before
 
@@ -641,9 +641,9 @@ END:VALARM
 END:VTODO
 """
     )
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == []
+    assert mapping.parse_vtodo(todo)["reminders"] == []
 
-    _apply(todo, titel="Renamed")
+    _apply(todo, title="Renamed")
 
     assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 1
 
@@ -652,40 +652,40 @@ def test_duplicate_reminder_specs_produce_one_alarm():
     todo = _new_todo()
     _apply(
         todo,
-        titel="Task",
-        faellig_datum="2026-07-20T10:00:00",
-        erinnerungen=["-PT30M", "-PT30M", "-PT0H30M"],
+        title="Task",
+        due_date="2026-07-20T10:00:00",
+        reminders=["-PT30M", "-PT30M", "-PT0H30M"],
     )
     alarms = [c for c in todo.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["-PT30M"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["-PT30M"]
 
 
 def test_updating_other_fields_leaves_alarms_alone():
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20T10:00:00", erinnerungen=["-PT30M"])
+    _apply(todo, title="Task", due_date="2026-07-20T10:00:00", reminders=["-PT30M"])
     before = todo.to_ical()
 
-    _apply(todo, ort="Zuhause")
+    _apply(todo, location="Home")
 
     assert [c for c in todo.subcomponents if c.name == "VALARM"]
-    assert todo.to_ical().replace(b"LOCATION:Zuhause\r\n", b"") == before
+    assert todo.to_ical().replace(b"LOCATION:Home\r\n", b"") == before
 
 
 def test_parent_uid_set_and_extracted():
     todo = _new_todo()
-    _apply(todo, titel="Subtask", uebergeordnete_aufgabe="parent-uid-42")
+    _apply(todo, title="Subtask", parent_task="parent-uid-42")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["uebergeordnete_uid"] == "parent-uid-42"
+    assert parsed["parent_uid"] == "parent-uid-42"
 
 
 def test_mark_completed_sets_status_and_percent():
     todo = _new_todo()
-    _apply(todo, titel="Task")
+    _apply(todo, title="Task")
     mapping.mark_completed(todo)
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "erledigt"
-    assert parsed["fortschritt_prozent"] == 100
+    assert parsed["status"] == "completed"
+    assert parsed["progress_percent"] == 100
     assert "completed" in todo
 
 
@@ -695,10 +695,10 @@ def test_mark_completed_sets_status_and_percent():
 @pytest.mark.parametrize(
     ("label", "ical_value"),
     [
-        ("offen", "NEEDS-ACTION"),
-        ("in-arbeit", "IN-PROCESS"),
-        ("erledigt", "COMPLETED"),
-        ("abgesagt", "CANCELLED"),
+        ("open", "NEEDS-ACTION"),
+        ("in-progress", "IN-PROCESS"),
+        ("completed", "COMPLETED"),
+        ("cancelled", "CANCELLED"),
     ],
 )
 def test_task_status_label_to_ical(label, ical_value):
@@ -707,67 +707,67 @@ def test_task_status_label_to_ical(label, ical_value):
 
 def test_task_status_label_to_ical_unknown_raises():
     with pytest.raises(InvalidTaskDataError, match="Unknown status"):
-        mapping.task_status_label_to_ical("fertig")
+        mapping.task_status_label_to_ical("done")
 
 
 @pytest.mark.parametrize(
     "label",
-    ["offen", "in-arbeit", "erledigt", "abgesagt"],
+    ["open", "in-progress", "completed", "cancelled"],
 )
 def test_apply_task_fields_status_round_trips(label):
     """Every status label round-trips through apply_task_fields/parse_vtodo."""
     todo = _new_todo()
-    _apply(todo, titel="Task", status=label)
+    _apply(todo, title="Task", status=label)
     parsed = mapping.parse_vtodo(todo)
     assert parsed["status"] == label
 
 
-def test_apply_task_fields_status_erledigt_sets_percent_and_completed():
+def test_apply_task_fields_status_completed_sets_percent_and_completed():
     todo = _new_todo()
-    _apply(todo, titel="Task", status="erledigt")
+    _apply(todo, title="Task", status="completed")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "erledigt"
-    assert parsed["fortschritt_prozent"] == 100
+    assert parsed["status"] == "completed"
+    assert parsed["progress_percent"] == 100
     assert "completed" in todo
 
 
-def test_apply_task_fields_status_offen_reopens_completed_task():
-    """status="offen" is the reopen path: removes COMPLETED, resets percent to 0."""
+def test_apply_task_fields_status_open_reopens_completed_task():
+    """status="open" is the reopen path: removes COMPLETED, resets percent to 0."""
     todo = _new_todo()
-    _apply(todo, titel="Task", status="erledigt")
+    _apply(todo, title="Task", status="completed")
     assert "completed" in todo
 
-    _apply(todo, status="offen")
+    _apply(todo, status="open")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "offen"
-    assert parsed["fortschritt_prozent"] == 0
+    assert parsed["status"] == "open"
+    assert parsed["progress_percent"] == 0
     assert "completed" not in todo
 
 
-@pytest.mark.parametrize("label", ["in-arbeit", "abgesagt"])
-def test_apply_task_fields_status_in_arbeit_and_abgesagt_keep_progress(label):
-    """in-arbeit/abgesagt keep whatever progress was recorded."""
+@pytest.mark.parametrize("label", ["in-progress", "cancelled"])
+def test_apply_task_fields_status_in_work_and_cancelled_keep_progress(label):
+    """in-progress/cancelled keep whatever progress was recorded."""
     todo = _new_todo()
-    _apply(todo, titel="Task", fortschritt_prozent=42)
+    _apply(todo, title="Task", progress_percent=42)
     _apply(todo, status=label)
     parsed = mapping.parse_vtodo(todo)
     assert parsed["status"] == label
-    assert parsed["fortschritt_prozent"] == 42
+    assert parsed["progress_percent"] == 42
     assert "completed" not in todo
 
 
-@pytest.mark.parametrize("label", ["in-arbeit", "abgesagt", "offen"])
-def test_apply_task_fields_leaving_erledigt_drops_completed_timestamp(label):
+@pytest.mark.parametrize("label", ["in-progress", "cancelled", "open"])
+def test_apply_task_fields_leaving_completed_drops_completed_timestamp(label):
     """No non-completed status may keep a COMPLETED timestamp around.
 
-    caldav's pending filter (`todos(include_completed=False)`, what nur_offene
+    caldav's pending filter (`todos(include_completed=False)`, what only_open
     and get_agenda run on) drops any VTODO that merely *has* a COMPLETED
-    property, whatever its STATUS says - so a task moved off "erledigt" while
+    property, whatever its STATUS says - so a task moved off "completed" while
     keeping the timestamp would report its new status and still be invisible
     in every open-task listing.
     """
     todo = _new_todo()
-    _apply(todo, titel="Task", status="erledigt")
+    _apply(todo, title="Task", status="completed")
     assert "completed" in todo
 
     _apply(todo, status=label)
@@ -776,42 +776,42 @@ def test_apply_task_fields_leaving_erledigt_drops_completed_timestamp(label):
     assert "completed" not in todo
 
 
-def test_apply_task_fields_explicit_fortschritt_prozent_wins_over_status():
-    """status="erledigt" would derive 100%, but an explicit fortschritt_prozent
+def test_apply_task_fields_explicit_progress_percent_wins_over_status():
+    """status="completed" would derive 100%, but an explicit progress_percent
     in the same call must win (write-ordering requirement)."""
     todo = _new_todo()
-    _apply(todo, titel="Task", status="erledigt", fortschritt_prozent=55)
+    _apply(todo, title="Task", status="completed", progress_percent=55)
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "erledigt"
-    assert parsed["fortschritt_prozent"] == 55
+    assert parsed["status"] == "completed"
+    assert parsed["progress_percent"] == 55
 
-    # And the reverse: status="offen" would derive 0%, explicit wins here too.
-    _apply(todo, status="offen", fortschritt_prozent=10)
+    # And the reverse: status="open" would derive 0%, explicit wins here too.
+    _apply(todo, status="open", progress_percent=10)
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "offen"
-    assert parsed["fortschritt_prozent"] == 10
+    assert parsed["status"] == "open"
+    assert parsed["progress_percent"] == 10
 
 
 def test_apply_task_fields_unknown_status_raises_and_does_not_write():
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20")
+    _apply(todo, title="Task", due_date="2026-07-20")
     with pytest.raises(InvalidTaskDataError, match="Unknown status"):
-        _apply(todo, status="fertig")
+        _apply(todo, status="done")
     # Nothing about the task changed - not even STATUS was written.
     assert "status" not in todo
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "offen"
-    assert parsed["faellig_datum"] == "2026-07-20"
+    assert parsed["status"] == "open"
+    assert parsed["due_date"] == "2026-07-20"
 
 
 @pytest.mark.parametrize(
     ("raw_status", "label"),
     [
-        ("NEEDS-ACTION", "offen"),
-        ("IN-PROCESS", "in-arbeit"),
-        ("COMPLETED", "erledigt"),
-        ("CANCELLED", "abgesagt"),
-        ("SOME-OTHER-STATUS", "offen"),
+        ("NEEDS-ACTION", "open"),
+        ("IN-PROCESS", "in-progress"),
+        ("COMPLETED", "completed"),
+        ("CANCELLED", "cancelled"),
+        ("SOME-OTHER-STATUS", "open"),
     ],
 )
 def test_parse_vtodo_status_values(raw_status, label):
@@ -822,11 +822,11 @@ def test_parse_vtodo_status_values(raw_status, label):
     assert parsed["status"] == label
 
 
-def test_parse_vtodo_missing_status_reads_as_offen():
+def test_parse_vtodo_missing_status_reads_as_open():
     todo = _new_todo()
     todo.add("summary", "Task")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["status"] == "offen"
+    assert parsed["status"] == "open"
 
 
 # --- All-day dates (B1) ---
@@ -834,7 +834,7 @@ def test_parse_vtodo_missing_status_reads_as_offen():
 
 def test_date_only_input_produces_value_date_property():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20")
+    _apply(todo, due_date="2026-07-20")
     due_prop = todo.get("due")
     assert isinstance(due_prop.dt, date)
     assert due_prop.params.get("VALUE") == "DATE"
@@ -843,14 +843,14 @@ def test_date_only_input_produces_value_date_property():
 
 def test_date_only_input_round_trips_to_date_string_not_midnight_datetime():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20")
+    _apply(todo, due_date="2026-07-20")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["faellig_datum"] == "2026-07-20"
+    assert parsed["due_date"] == "2026-07-20"
 
 
 def test_full_datetime_input_still_produces_datetime():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20T14:00:00+02:00")
+    _apply(todo, due_date="2026-07-20T14:00:00+02:00")
     due_prop = todo.get("due")
     assert isinstance(due_prop.dt, datetime)
     assert due_prop.params.get("VALUE") != "DATE"
@@ -901,9 +901,9 @@ def test_set_default_timezone_utc_reproduces_old_expectations():
     assert result.hour == 14
 
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20T14:00:00")
+    _apply(todo, title="Task", due_date="2026-07-20T14:00:00")
     res = mapping.parse_vtodo(todo)
-    assert res["faellig_datum"] == "2026-07-20T14:00:00+00:00"
+    assert res["due_date"] == "2026-07-20T14:00:00+00:00"
 
 
 @pytest.mark.parametrize("zone_name", ["UTC", "Etc/UTC", "Etc/GMT", "Universal"])
@@ -960,17 +960,17 @@ def test_missing_tzdata_falls_back_to_utc_instead_of_crashing_on_import(monkeypa
 def test_naive_datetime_round_trip():
     """Write a naive datetime, read it back: same wall-clock time with local offset."""
     todo = _new_todo()
-    _apply(todo, titel="Roundtrip", faellig_datum="2026-07-20T14:00:00")
+    _apply(todo, title="Roundtrip", due_date="2026-07-20T14:00:00")
     res = mapping.parse_vtodo(todo)
-    assert res["faellig_datum"] == "2026-07-20T14:00:00+02:00"
+    assert res["due_date"] == "2026-07-20T14:00:00+02:00"
 
 
 def test_naive_datetime_round_trip_in_winter():
     """The output offset is resolved per date, not frozen at the summer one."""
     todo = _new_todo()
-    _apply(todo, titel="Roundtrip", faellig_datum="2026-01-20T14:00:00")
+    _apply(todo, title="Roundtrip", due_date="2026-01-20T14:00:00")
     res = mapping.parse_vtodo(todo)
-    assert res["faellig_datum"] == "2026-01-20T14:00:00+01:00"
+    assert res["due_date"] == "2026-01-20T14:00:00+01:00"
 
 
 @pytest.mark.parametrize(
@@ -1083,7 +1083,7 @@ def test_local_midnight_on_an_ordinary_day_is_midnight():
 
 
 def test_due_filter_bounds_are_real_readings_in_a_midnight_transition_zone():
-    """The same rule for the end-of-day bound `faellig_vor` builds."""
+    """The same rule for the end-of-day bound `due_before` builds."""
     mapping.set_default_timezone("America/Santiago")
     start = mapping._to_comparable_datetime("2026-09-06", end_of_day=False)
     end = mapping._to_comparable_datetime("2026-09-06", end_of_day=True)
@@ -1098,10 +1098,10 @@ def test_due_filter_bounds_are_real_readings_in_a_midnight_transition_zone():
 def test_absolute_reminder_is_written_to_the_wire_in_utc():
     """RFC 5545 demands a UTC absolute TRIGGER - only the *display* is local."""
     todo = _new_todo()
-    _apply(todo, titel="Task", faellig_datum="2026-07-20", erinnerungen=["2026-07-19T11:00:00"])
+    _apply(todo, title="Task", due_date="2026-07-20", reminders=["2026-07-19T11:00:00"])
     ical_text = todo.to_ical().decode()
     assert "TRIGGER;VALUE=DATE-TIME:20260719T090000Z" in ical_text
-    assert mapping.parse_vtodo(todo)["erinnerungen"] == ["2026-07-19T11:00:00+02:00"]
+    assert mapping.parse_vtodo(todo)["reminders"] == ["2026-07-19T11:00:00+02:00"]
 
 
 def test_named_timezone_input_resolves_dst_offset_for_the_date():
@@ -1158,37 +1158,37 @@ def test_invalid_input_raises():
 
 def test_clear_removes_due_date():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20")
+    _apply(todo, due_date="2026-07-20")
     assert "due" in todo
-    mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("due_date",)))
     assert "due" not in todo
 
 
-def test_clear_removes_start_datum():
+def test_clear_removes_start_date():
     todo = _new_todo()
-    _apply(todo, start_datum="2026-07-01")
-    mapping.apply_task_fields(todo, TaskFields(clear=("start_datum",)))
+    _apply(todo, start_date="2026-07-01")
+    mapping.apply_task_fields(todo, TaskFields(clear=("start_date",)))
     assert "dtstart" not in todo
 
 
 def test_clear_removes_priority():
     todo = _new_todo()
-    _apply(todo, prioritaet="hoch")
-    mapping.apply_task_fields(todo, TaskFields(clear=("prioritaet",)))
+    _apply(todo, priority="high")
+    mapping.apply_task_fields(todo, TaskFields(clear=("priority",)))
     assert "priority" not in todo
 
 
 def test_clear_removes_percent_complete():
     todo = _new_todo()
-    _apply(todo, fortschritt_prozent=42)
-    mapping.apply_task_fields(todo, TaskFields(clear=("fortschritt_prozent",)))
+    _apply(todo, progress_percent=42)
+    mapping.apply_task_fields(todo, TaskFields(clear=("progress_percent",)))
     assert "percent-complete" not in todo
 
 
 def test_clear_removes_location():
     todo = _new_todo()
-    _apply(todo, ort="Büro")
-    mapping.apply_task_fields(todo, TaskFields(clear=("ort",)))
+    _apply(todo, location="Office")
+    mapping.apply_task_fields(todo, TaskFields(clear=("location",)))
     assert "location" not in todo
 
 
@@ -1208,38 +1208,38 @@ def test_clear_removes_categories():
 
 def test_clear_removes_description():
     todo = _new_todo()
-    _apply(todo, notizen="Notiz")
-    mapping.apply_task_fields(todo, TaskFields(clear=("notizen",)))
+    _apply(todo, notes="Note")
+    mapping.apply_task_fields(todo, TaskFields(clear=("notes",)))
     assert "description" not in todo
 
 
 def test_clear_removes_class():
     todo = _new_todo()
-    _apply(todo, sichtbarkeit="privat")
-    mapping.apply_task_fields(todo, TaskFields(clear=("sichtbarkeit",)))
+    _apply(todo, visibility="private")
+    mapping.apply_task_fields(todo, TaskFields(clear=("visibility",)))
     assert "class" not in todo
 
 
 def test_clear_removes_related_to():
     todo = _new_todo()
-    _apply(todo, uebergeordnete_aufgabe="parent-uid")
-    mapping.apply_task_fields(todo, TaskFields(clear=("uebergeordnete_aufgabe",)))
+    _apply(todo, parent_task="parent-uid")
+    mapping.apply_task_fields(todo, TaskFields(clear=("parent_task",)))
     assert "related-to" not in todo
 
 
 def test_clear_removes_all_alarms():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20", erinnerungen=["-P1D", "-PT1H"])
+    _apply(todo, due_date="2026-07-20", reminders=["-P1D", "-PT1H"])
     assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 2
 
-    mapping.apply_task_fields(todo, TaskFields(clear=("erinnerungen",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("reminders",)))
     assert len([c for c in todo.subcomponents if c.name == "VALARM"]) == 0
 
 
 def test_clear_multiple_fields_at_once():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20", ort="Büro", prioritaet="hoch")
-    mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum", "ort", "prioritaet")))
+    _apply(todo, due_date="2026-07-20", location="Office", priority="high")
+    mapping.apply_task_fields(todo, TaskFields(clear=("due_date", "location", "priority")))
     assert "due" not in todo
     assert "location" not in todo
     assert "priority" not in todo
@@ -1251,36 +1251,34 @@ def test_clear_unknown_field_raises():
         mapping.apply_task_fields(todo, TaskFields(clear=("nonexistent_field",)))
 
 
-def test_clear_titel_raises():
-    """Clearing the title is not supported - "titel" isn't a valid clear name."""
+def test_clear_title_raises():
+    """Clearing the title is not supported - "title" isn't a valid clear name."""
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError):
-        mapping.apply_task_fields(todo, TaskFields(clear=("titel",)))
+        mapping.apply_task_fields(todo, TaskFields(clear=("title",)))
 
 
 def test_clear_and_set_same_field_raises():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError):
-        mapping.apply_task_fields(
-            todo, TaskFields(faellig_datum="2026-07-20", clear=("faellig_datum",))
-        )
+        mapping.apply_task_fields(todo, TaskFields(due_date="2026-07-20", clear=("due_date",)))
 
 
 def test_clear_does_not_affect_untouched_fields():
     todo = _new_todo()
-    _apply(todo, faellig_datum="2026-07-20", ort="Büro")
-    mapping.apply_task_fields(todo, TaskFields(clear=("faellig_datum",)))
+    _apply(todo, due_date="2026-07-20", location="Office")
+    mapping.apply_task_fields(todo, TaskFields(clear=("due_date",)))
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["ort"] == "Büro"
+    assert parsed["location"] == "Office"
 
 
 def test_clear_on_field_that_was_never_set_is_a_no_op():
     todo = _new_todo()
-    _apply(todo, titel="Task")
-    mapping.apply_task_fields(todo, TaskFields(clear=("ort",)))
+    _apply(todo, title="Task")
+    mapping.apply_task_fields(todo, TaskFields(clear=("location",)))
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["titel"] == "Task"
-    assert parsed["ort"] is None
+    assert parsed["title"] == "Task"
+    assert parsed["location"] is None
 
 
 # --- Remaining branch coverage (WP5, E1/E4 remainder) ---
@@ -1322,7 +1320,7 @@ def test_extract_parent_uid_ignores_non_parent_reltype():
     todo = _new_todo()
     todo.add("related-to", "sibling-uid", parameters={"RELTYPE": "CHILD"})
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["uebergeordnete_uid"] is None
+    assert parsed["parent_uid"] is None
 
 
 # --- Recurrence (RRULE), now writable ---
@@ -1332,44 +1330,44 @@ def test_parse_vtodo_surfaces_rrule_as_raw_text():
     todo = _new_todo()
     todo.add("rrule", {"FREQ": "WEEKLY", "BYDAY": ["MO"]})
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+    assert parsed["recurrence"] == "FREQ=WEEKLY;BYDAY=MO"
 
 
-def test_parse_vtodo_wiederholung_is_none_when_not_recurring():
+def test_parse_vtodo_recurrence_is_none_when_not_recurring():
     todo = _new_todo()
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["wiederholung"] is None
+    assert parsed["recurrence"] is None
 
 
-def test_wiederholung_round_trip():
+def test_recurrence_round_trip():
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+    assert parsed["recurrence"] == "FREQ=WEEKLY;BYDAY=MO"
 
 
-def test_wiederholung_can_be_changed():
+def test_recurrence_can_be_changed():
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
-    _apply(todo, wiederholung="FREQ=WEEKLY;BYDAY=TU")
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="FREQ=DAILY")
+    _apply(todo, recurrence="FREQ=WEEKLY;BYDAY=TU")
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=TU"
+    assert parsed["recurrence"] == "FREQ=WEEKLY;BYDAY=TU"
 
 
-def test_clear_removes_wiederholung():
+def test_clear_removes_recurrence():
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
-    mapping.apply_task_fields(todo, TaskFields(clear=("wiederholung",)))
-    assert mapping.parse_vtodo(todo)["wiederholung"] is None
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="FREQ=DAILY")
+    mapping.apply_task_fields(todo, TaskFields(clear=("recurrence",)))
+    assert mapping.parse_vtodo(todo)["recurrence"] is None
 
 
-def test_invalid_wiederholung_rejected():
+def test_invalid_recurrence_rejected():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError, match="RRULE"):
-        _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="kaputt")
+        _apply(todo, title="T", start_date="2026-07-20", recurrence="broken")
 
 
-def test_wiederholung_empty_result_is_invalid():
+def test_recurrence_empty_result_is_invalid():
     # vRecur.from_ical silently skips parts without '=' instead of raising, so
     # completely unparseable input yields an empty rule - must still be
     # treated as invalid, not silently written as a no-op RRULE.
@@ -1377,47 +1375,47 @@ def test_wiederholung_empty_result_is_invalid():
         mapping.parse_rrule_text("not-a-valid-rrule")
 
 
-def test_wiederholung_semantic_validations():
+def test_recurrence_semantic_validations():
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20")
+    _apply(todo, title="T", start_date="2026-07-20")
 
     # Missing FREQ
     with pytest.raises(InvalidTaskDataError, match="FREQ"):
-        _apply(todo, wiederholung="INTERVAL=2")
+        _apply(todo, recurrence="INTERVAL=2")
 
     # Duplicate parts
     with pytest.raises(InvalidTaskDataError, match="Duplicate"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;FREQ=DAILY")
+        _apply(todo, recurrence="FREQ=WEEKLY;FREQ=DAILY")
 
     # Values
     with pytest.raises(InvalidTaskDataError, match="INTERVAL must be >= 1"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;INTERVAL=0")
+        _apply(todo, recurrence="FREQ=WEEKLY;INTERVAL=0")
     with pytest.raises(InvalidTaskDataError, match="COUNT must be >= 1"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;COUNT=0")
+        _apply(todo, recurrence="FREQ=WEEKLY;COUNT=0")
     with pytest.raises(InvalidTaskDataError, match="BYMONTHDAY cannot be 0"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;BYMONTHDAY=0")
+        _apply(todo, recurrence="FREQ=WEEKLY;BYMONTHDAY=0")
     with pytest.raises(InvalidTaskDataError, match="BYMONTH must be between 1 and 12"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;BYMONTH=13")
+        _apply(todo, recurrence="FREQ=WEEKLY;BYMONTH=13")
     with pytest.raises(InvalidTaskDataError, match="BYHOUR must be between 0 and 23"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;BYHOUR=99")
+        _apply(todo, recurrence="FREQ=WEEKLY;BYHOUR=99")
 
     # UNTIL and COUNT together
     with pytest.raises(InvalidTaskDataError, match="UNTIL and COUNT"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;UNTIL=20261231T000000Z;COUNT=5")
+        _apply(todo, recurrence="FREQ=WEEKLY;UNTIL=20261231T000000Z;COUNT=5")
 
     # Unknown parts
     with pytest.raises(InvalidTaskDataError, match="Unknown"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;UNKNOWN=1")
+        _apply(todo, recurrence="FREQ=WEEKLY;UNKNOWN=1")
 
     # UNTIL before anchor
     with pytest.raises(InvalidTaskDataError, match="UNTIL cannot be before the start date"):
-        _apply(todo, wiederholung="FREQ=WEEKLY;UNTIL=20260101T000000Z")
+        _apply(todo, recurrence="FREQ=WEEKLY;UNTIL=20260101T000000Z")
 
 
-def test_wiederholung_strips_rrule_prefix():
+def test_recurrence_strips_rrule_prefix():
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="RRULE:FREQ=DAILY")
-    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="RRULE:FREQ=DAILY")
+    assert mapping.parse_vtodo(todo)["recurrence"] == "FREQ=DAILY"
 
 
 def test_extract_rrule_handles_duplicate_rrule_property():
@@ -1425,45 +1423,43 @@ def test_extract_rrule_handles_duplicate_rrule_property():
     todo = _todo_from_ics(
         "BEGIN:VTODO\nUID:task-1\nSUMMARY:Task\nRRULE:FREQ=DAILY\nRRULE:FREQ=WEEKLY\nEND:VTODO\n"
     )
-    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+    assert mapping.parse_vtodo(todo)["recurrence"] == "FREQ=DAILY"
 
 
-def test_wiederholung_without_start_rejected():
+def test_recurrence_without_start_rejected():
     todo = _new_todo()
-    with pytest.raises(InvalidTaskDataError, match="start_datum"):
-        _apply(todo, titel="T", wiederholung="FREQ=DAILY")
+    with pytest.raises(InvalidTaskDataError, match="start_date"):
+        _apply(todo, title="T", recurrence="FREQ=DAILY")
 
 
-def test_wiederholung_rejected_with_only_faellig_datum_as_anchor():
+def test_recurrence_rejected_with_only_due_date_as_anchor():
     """5.4: RFC 5545 builds the recurrence-set from DTSTART, not DUE - a task
-    with only a faellig_datum (DUE) is not a resolvable anchor for a
+    with only a due_date (DUE) is not a resolvable anchor for a
     recurrence, even though DUE alone is a perfectly valid non-recurring
     task. This must be rejected the same way as no anchor at all."""
     todo = _new_todo()
-    with pytest.raises(InvalidTaskDataError, match="start_datum"):
-        _apply(todo, titel="T", faellig_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    with pytest.raises(InvalidTaskDataError, match="start_date"):
+        _apply(todo, title="T", due_date="2026-07-20", recurrence="FREQ=DAILY")
 
 
-def test_wiederholung_succeeds_when_anchor_already_exists_on_the_task():
+def test_recurrence_succeeds_when_anchor_already_exists_on_the_task():
     """The anchor check runs against the component's final state (mirrors
     event_mapping._check_start_end_consistency), not just this call's fields -
-    so a call that sets only wiederholung succeeds when start_datum was
+    so a call that sets only recurrence succeeds when start_date was
     already set on the task by an earlier call."""
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20")
-    _apply(todo, wiederholung="FREQ=WEEKLY")
-    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY"
+    _apply(todo, title="T", start_date="2026-07-20")
+    _apply(todo, recurrence="FREQ=WEEKLY")
+    assert mapping.parse_vtodo(todo)["recurrence"] == "FREQ=WEEKLY"
 
 
-def test_wiederholung_rejected_when_call_clears_the_only_anchor():
-    """Setting wiederholung while clearing the task's only anchor in the same
+def test_recurrence_rejected_when_call_clears_the_only_anchor():
+    """Setting recurrence while clearing the task's only anchor in the same
     call must still be rejected - the final-state check catches this too."""
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20")
-    with pytest.raises(InvalidTaskDataError, match="start_datum"):
-        mapping.apply_task_fields(
-            todo, TaskFields(wiederholung="FREQ=WEEKLY", clear=("start_datum",))
-        )
+    _apply(todo, title="T", start_date="2026-07-20")
+    with pytest.raises(InvalidTaskDataError, match="start_date"):
+        mapping.apply_task_fields(todo, TaskFields(recurrence="FREQ=WEEKLY", clear=("start_date",)))
 
 
 def test_clearing_the_only_anchor_is_rejected_for_an_already_recurring_task():
@@ -1472,13 +1468,13 @@ def test_clearing_the_only_anchor_is_rejected_for_an_already_recurring_task():
     Clearing a recurring task's only anchor leaves an RRULE nothing can be
     resolved against, whether the recurrence arrived in this call or an
     earlier one - the check looks at the component, never at the fields.
-    Narrowing it to "only validate when wiederholung is being set" would slip
+    Narrowing it to "only validate when recurrence is being set" would slip
     past this and silently produce an unresolvable series.
     """
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=WEEKLY")
-    with pytest.raises(InvalidTaskDataError, match="start_datum"):
-        mapping.apply_task_fields(todo, TaskFields(clear=("start_datum",)))
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="FREQ=WEEKLY")
+    with pytest.raises(InvalidTaskDataError, match="start_date"):
+        mapping.apply_task_fields(todo, TaskFields(clear=("start_date",)))
 
 
 def test_anchorless_recurring_task_can_be_edited_without_touching_anchor():
@@ -1490,15 +1486,15 @@ def test_anchorless_recurring_task_can_be_edited_without_touching_anchor():
     todo = _new_todo()
     # Force it into an anchorless state like a foreign client might
     mapping.apply_task_fields(
-        todo, TaskFields(titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+        todo, TaskFields(title="T", start_date="2026-07-20", recurrence="FREQ=DAILY")
     )
     del todo["dtstart"]
     # Now edit only the title
-    mapping.apply_task_fields(todo, TaskFields(titel="Renamed"))
-    assert mapping.parse_vtodo(todo)["titel"] == "Renamed"
+    mapping.apply_task_fields(todo, TaskFields(title="Renamed"))
+    assert mapping.parse_vtodo(todo)["title"] == "Renamed"
 
 
-def test_wiederholung_is_normalized_to_canonical_rrule_form():
+def test_recurrence_is_normalized_to_canonical_rrule_form():
     """Non-canonical input reads back canonical, not verbatim.
 
     `icalendar`'s vRecur uppercases part names and emits them in its own
@@ -1507,20 +1503,20 @@ def test_wiederholung_is_normalized_to_canonical_rrule_form():
     guarantee is understood as semantic, not byte-for-byte.
     """
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="byday=mo;freq=weekly")
-    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="byday=mo;freq=weekly")
+    assert mapping.parse_vtodo(todo)["recurrence"] == "FREQ=WEEKLY;BYDAY=MO"
 
 
-def test_mark_completed_leaves_wiederholung_intact():
+def test_mark_completed_leaves_recurrence_intact():
     """Pins this server's own observed behaviour: complete_task only sets
     STATUS/COMPLETED/PERCENT-COMPLETE, it does not touch RRULE or roll the
     series forward to a next occurrence."""
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20", wiederholung="FREQ=DAILY")
+    _apply(todo, title="T", start_date="2026-07-20", recurrence="FREQ=DAILY")
     mapping.mark_completed(todo)
     parsed = mapping.parse_vtodo(todo)
-    assert parsed["wiederholung"] == "FREQ=DAILY"
-    assert parsed["status"] == "erledigt"
+    assert parsed["recurrence"] == "FREQ=DAILY"
+    assert parsed["status"] == "completed"
 
 
 # --- zone anchoring for tasks (5.7) ---
@@ -1532,7 +1528,7 @@ def test_naive_task_datetime_is_written_in_the_default_zone_not_collapsed_to_utc
     UTC instant. The instant is identical either way - what differs is whether
     a recurrence anchored on it survives a DST transition (5.7)."""
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00")
+    _apply(todo, title="T", start_date="2026-07-20T09:00:00")
 
     assert todo.get("dtstart").dt.tzinfo == ZoneInfo("Europe/Berlin")
     assert "DTSTART;TZID=Europe/Berlin:20260720T090000" in todo.to_ical().decode()
@@ -1543,10 +1539,10 @@ def test_task_due_is_anchored_to_the_zone_dtstart_already_uses():
     the same instant apart today and an hour apart after the next transition in
     either zone, silently changing the task's window (the VTODO half of 2.5)."""
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00 America/New_York")
+    _apply(todo, title="T", start_date="2026-07-20T09:00:00 America/New_York")
     # A bare offset is what parse_vtodo hands back, i.e. what a read/write
     # round trip through get_task -> update_task feeds in.
-    _apply(todo, faellig_datum="2026-07-20T17:00:00+02:00")
+    _apply(todo, due_date="2026-07-20T17:00:00+02:00")
 
     assert todo.get("due").dt.tzinfo == ZoneInfo("America/New_York")
     assert todo.get("due").dt.tzinfo == todo.get("dtstart").dt.tzinfo
@@ -1558,8 +1554,8 @@ def test_naming_a_zone_explicitly_re_anchors_the_task():
     """Naming an IANA zone is how a caller *moves* a task to one - it wins over
     the zone the component already has, unlike a bare offset."""
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-07-20T09:00:00 America/New_York")
-    _apply(todo, start_datum="2026-07-20T09:00:00 Europe/Berlin")
+    _apply(todo, title="T", start_date="2026-07-20T09:00:00 America/New_York")
+    _apply(todo, start_date="2026-07-20T09:00:00 Europe/Berlin")
 
     assert todo.get("dtstart").dt.tzinfo == ZoneInfo("Europe/Berlin")
 
@@ -1572,13 +1568,13 @@ def test_recurring_task_round_trip_keeps_its_wall_clock_across_dst():
     Collapsed to a UTC instant it would mean 08:00 local from November on.
     """
     todo = _new_todo()
-    _apply(todo, titel="T", start_datum="2026-09-01T09:00:00", wiederholung="FREQ=WEEKLY")
+    _apply(todo, title="T", start_date="2026-09-01T09:00:00", recurrence="FREQ=WEEKLY")
 
     # get_task -> update_task: the stored task already has its DTSTART, and the
     # value handed back in carries only a numeric offset.
-    round_tripped = mapping.parse_vtodo(todo)["start_datum"]
+    round_tripped = mapping.parse_vtodo(todo)["start_date"]
     assert round_tripped == "2026-09-01T09:00:00+02:00"
-    _apply(todo, titel="T (bearbeitet)", start_datum=round_tripped)
+    _apply(todo, title="T (edited)", start_date=round_tripped)
 
     anchor = todo.get("dtstart").dt
     assert anchor.tzinfo == ZoneInfo("Europe/Berlin")
@@ -1587,54 +1583,54 @@ def test_recurring_task_round_trip_keeps_its_wall_clock_across_dst():
     assert later.utcoffset() == timedelta(hours=1)
 
 
-# --- ausnahme_daten / EXDATE for tasks (5.8) ---
+# --- exception_dates / EXDATE for tasks (5.8) ---
 
 
-def test_ausnahme_daten_writes_exdate_and_reads_back():
+def test_exception_dates_writes_exdate_and_reads_back():
     todo = _new_todo()
     _apply(
         todo,
-        titel="Muell rausbringen",
-        start_datum="2026-07-20",
-        wiederholung="FREQ=DAILY",
-        ausnahme_daten=["2026-07-22", "2026-07-24"],
+        title="Take out the trash",
+        start_date="2026-07-20",
+        recurrence="FREQ=DAILY",
+        exception_dates=["2026-07-22", "2026-07-24"],
     )
 
     assert "EXDATE" in todo
-    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == ["2026-07-22", "2026-07-24"]
+    assert mapping.parse_vtodo(todo)["exception_dates"] == ["2026-07-22", "2026-07-24"]
 
 
-def test_ausnahme_daten_replaces_the_whole_exdate_set():
+def test_exception_dates_replaces_the_whole_exdate_set():
     """Set, not append - same as the event side."""
     todo = _new_todo()
     _apply(
         todo,
-        titel="T",
-        start_datum="2026-07-20",
-        wiederholung="FREQ=DAILY",
-        ausnahme_daten=["2026-07-22"],
+        title="T",
+        start_date="2026-07-20",
+        recurrence="FREQ=DAILY",
+        exception_dates=["2026-07-22"],
     )
-    _apply(todo, ausnahme_daten=["2026-07-24"])
+    _apply(todo, exception_dates=["2026-07-24"])
 
-    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == ["2026-07-24"]
+    assert mapping.parse_vtodo(todo)["exception_dates"] == ["2026-07-24"]
 
 
-def test_ausnahme_daten_of_the_wrong_value_kind_is_rejected():
+def test_exception_dates_of_the_wrong_value_kind_is_rejected():
     """An all-day series takes date-only exceptions; a datetime entry would be
     written under one EXDATE with a single TZID next to a DATE value (RFC 5545
     3.8.5.1 / 3.2.19) and would name no occurrence anyway."""
     todo = _new_todo()
-    with pytest.raises(InvalidTaskDataError, match="ausnahme_daten"):
+    with pytest.raises(InvalidTaskDataError, match="exception_dates"):
         _apply(
             todo,
-            titel="T",
-            start_datum="2026-07-20",
-            wiederholung="FREQ=DAILY",
-            ausnahme_daten=["2026-07-22T09:00:00"],
+            title="T",
+            start_date="2026-07-20",
+            recurrence="FREQ=DAILY",
+            exception_dates=["2026-07-22T09:00:00"],
         )
 
 
-def test_ausnahme_daten_naming_no_occurrence_is_rejected():
+def test_exception_dates_naming_no_occurrence_is_rejected():
     """An EXDATE that misses the recurrence set cancels nothing and says so
     nowhere - the task side must not get a weaker version of this check than
     the event side has."""
@@ -1642,35 +1638,35 @@ def test_ausnahme_daten_naming_no_occurrence_is_rejected():
     with pytest.raises(InvalidTaskDataError, match="does not name an occurrence"):
         _apply(
             todo,
-            titel="T",
-            start_datum="2026-07-20",
-            wiederholung="FREQ=WEEKLY",  # only Mondays: the 20th, 27th, ...
-            ausnahme_daten=["2026-07-22"],
+            title="T",
+            start_date="2026-07-20",
+            recurrence="FREQ=WEEKLY",  # only Mondays: the 20th, 27th, ...
+            exception_dates=["2026-07-22"],
         )
 
 
-def test_ausnahme_daten_rejection_message_names_the_task_tools():
+def test_exception_dates_rejection_message_names_the_task_tools():
     todo = _new_todo()
     with pytest.raises(InvalidTaskDataError) as excinfo:
         _apply(
             todo,
-            titel="T",
-            start_datum="2026-07-20",
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-22"],
+            title="T",
+            start_date="2026-07-20",
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-22"],
         )
     assert "list_tasks/get_task" in str(excinfo.value)
-    assert "start_datum" in str(excinfo.value)
+    assert "start_date" in str(excinfo.value)
     assert "event" not in str(excinfo.value)
 
 
-def test_clearing_wiederholung_also_drops_exdate_and_rdate():
+def test_clearing_recurrence_also_drops_exdate_and_rdate():
     """EXDATE/RDATE without an RRULE are orphans: they cancel and add nothing,
-    and come back to life the day someone sets wiederholung again (5.8)."""
+    and come back to life the day someone sets recurrence again (5.8)."""
     todo = _todo_from_ics(
         "BEGIN:VTODO\n"
         "UID:task-1\n"
-        "SUMMARY:Muell\n"
+        "SUMMARY:Trash\n"
         "DTSTART;VALUE=DATE:20260720\n"
         "RRULE:FREQ=DAILY\n"
         "EXDATE;VALUE=DATE:20260722\n"
@@ -1679,42 +1675,42 @@ def test_clearing_wiederholung_also_drops_exdate_and_rdate():
     )
     assert "EXDATE" in todo and "RDATE" in todo
 
-    mapping.apply_task_fields(todo, TaskFields(clear=("wiederholung",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("recurrence",)))
 
     assert "RRULE" not in todo
     assert "EXDATE" not in todo
     assert "RDATE" not in todo
-    assert mapping.parse_vtodo(todo)["ausnahme_daten"] == []
+    assert mapping.parse_vtodo(todo)["exception_dates"] == []
 
 
-def test_clearing_ausnahme_daten_leaves_the_series_intact():
+def test_clearing_exception_dates_leaves_the_series_intact():
     """The inverse: dropping the exceptions must not drop the rule."""
     todo = _new_todo()
     _apply(
         todo,
-        titel="T",
-        start_datum="2026-07-20",
-        wiederholung="FREQ=DAILY",
-        ausnahme_daten=["2026-07-22"],
+        title="T",
+        start_date="2026-07-20",
+        recurrence="FREQ=DAILY",
+        exception_dates=["2026-07-22"],
     )
 
-    mapping.apply_task_fields(todo, TaskFields(clear=("ausnahme_daten",)))
+    mapping.apply_task_fields(todo, TaskFields(clear=("exception_dates",)))
 
     assert "EXDATE" not in todo
-    assert mapping.parse_vtodo(todo)["wiederholung"] == "FREQ=DAILY"
+    assert mapping.parse_vtodo(todo)["recurrence"] == "FREQ=DAILY"
 
 
-def test_ausnahme_daten_is_anchored_to_the_tasks_own_zone():
+def test_exception_dates_is_anchored_to_the_tasks_own_zone():
     """One EXDATE property, one set of parameters: the values go on the wire in
     the zone DTSTART names, or an exception names a different instant than the
     occurrence it is meant to cancel."""
     todo = _new_todo()
     _apply(
         todo,
-        titel="T",
-        start_datum="2026-07-20T09:00:00 America/New_York",
-        wiederholung="FREQ=DAILY",
-        ausnahme_daten=["2026-07-22T15:00:00+02:00"],  # = 09:00 New York
+        title="T",
+        start_date="2026-07-20T09:00:00 America/New_York",
+        recurrence="FREQ=DAILY",
+        exception_dates=["2026-07-22T15:00:00+02:00"],  # = 09:00 New York
     )
 
     ical = todo.to_ical().decode()
@@ -1732,38 +1728,34 @@ def _recurring(uid: str = "task-1", **kwargs) -> dict:
     offsets `parse_vtodo` writes, which is what the expansion has to re-anchor.
     """
     todo = _new_todo(uid)
-    _apply(todo, titel=uid, **kwargs)
+    _apply(todo, title=uid, **kwargs)
     return mapping.parse_vtodo(todo)
 
 
 def test_recurring_task_without_an_upper_bound_stays_a_single_master_row():
     """An unfiltered `list_tasks` has no window to expand into: the series stays
-    the one row it has always been, `wiederholung` intact. Expanding here would
+    the one row it has always been, `recurrence` intact. Expanding here would
     put a hundred copies of every recurring task into every plain listing and
     strip the rule from all of them."""
-    tasks = [
-        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
-    ]
+    tasks = [_recurring(start_date="2026-09-01", due_date="2026-09-01", recurrence="FREQ=WEEKLY")]
 
     result = mapping.filter_tasks(tasks)
 
     assert len(result) == 1
     assert result[0]["uid"] == "task-1"
-    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
-    assert result[0]["wiederholung_von"] is None
-    assert result[0]["serie_uid"] is None
+    assert result[0]["recurrence"] == "FREQ=WEEKLY"
+    assert result[0]["recurrence_id"] is None
+    assert result[0]["series_uid"] is None
 
 
 def test_recurring_task_expands_into_the_queried_window():
     """The finding itself: a weekly task used to appear exactly once, at its
     original due date, and never again."""
-    tasks = [
-        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
-    ]
+    tasks = [_recurring(start_date="2026-09-01", due_date="2026-09-01", recurrence="FREQ=WEEKLY")]
 
     result = mapping.filter_tasks(tasks, due_before="2026-09-22")
 
-    assert [t["faellig_datum"] for t in result] == [
+    assert [t["due_date"] for t in result] == [
         "2026-09-01",
         "2026-09-08",
         "2026-09-15",
@@ -1775,15 +1767,13 @@ def test_expanded_instances_are_marked_and_carry_a_uid_no_write_path_accepts():
     """An instance must not be mistakable for the stored task: nothing about it
     recurs, it names its occurrence, it points at the series, and its uid is one
     `split_occurrence_uid` recognises so every write path can refuse it."""
-    tasks = [
-        _recurring(start_datum="2026-09-01", faellig_datum="2026-09-01", wiederholung="FREQ=WEEKLY")
-    ]
+    tasks = [_recurring(start_date="2026-09-01", due_date="2026-09-01", recurrence="FREQ=WEEKLY")]
 
     instance = mapping.filter_tasks(tasks, due_before="2026-09-08")[1]
 
-    assert instance["wiederholung"] is None
-    assert instance["wiederholung_von"] == "2026-09-08"
-    assert instance["serie_uid"] == "task-1"
+    assert instance["recurrence"] is None
+    assert instance["recurrence_id"] == "2026-09-08"
+    assert instance["series_uid"] == "task-1"
     assert instance["uid"] != "task-1"
     assert mapping.split_occurrence_uid(instance["uid"]) == ("task-1", "2026-09-08")
 
@@ -1792,9 +1782,9 @@ def test_expansion_stops_at_the_hard_instance_cap():
     """An unbounded rule inside a wide window must not fill the listing."""
     tasks = [
         _recurring(
-            start_datum="2026-09-01T00:00:00",
-            faellig_datum="2026-09-01T00:00:00",
-            wiederholung="FREQ=MINUTELY",
+            start_date="2026-09-01T00:00:00",
+            due_date="2026-09-01T00:00:00",
+            recurrence="FREQ=MINUTELY",
         )
     ]
 
@@ -1806,31 +1796,31 @@ def test_expansion_stops_at_the_hard_instance_cap():
 def test_expansion_honours_count():
     tasks = [
         _recurring(
-            start_datum="2026-09-01",
-            faellig_datum="2026-09-01",
-            wiederholung="FREQ=DAILY;COUNT=3",
+            start_date="2026-09-01",
+            due_date="2026-09-01",
+            recurrence="FREQ=DAILY;COUNT=3",
         )
     ]
 
     result = mapping.filter_tasks(tasks, due_before="2027-12-31")
 
-    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+    assert [t["due_date"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
 
 
 def test_expansion_honours_until():
     tasks = [
         _recurring(
-            start_datum="2026-09-01T09:00:00",
-            faellig_datum="2026-09-01T09:00:00",
+            start_date="2026-09-01T09:00:00",
+            due_date="2026-09-01T09:00:00",
             # 09:00 Europe/Berlin on the 3rd, the form RFC 5545 requires
             # alongside a DATE-TIME DTSTART.
-            wiederholung="FREQ=DAILY;UNTIL=20260903T070000Z",
+            recurrence="FREQ=DAILY;UNTIL=20260903T070000Z",
         )
     ]
 
     result = mapping.filter_tasks(tasks, due_before="2027-12-31")
 
-    assert [t["faellig_datum"] for t in result] == [
+    assert [t["due_date"] for t in result] == [
         "2026-09-01T09:00:00+02:00",
         "2026-09-02T09:00:00+02:00",
         "2026-09-03T09:00:00+02:00",
@@ -1843,9 +1833,9 @@ def test_a_rule_dateutil_refuses_leaves_the_master_row_alone():
     today's single master row, never to a wrong or empty answer."""
     tasks = [
         _recurring(
-            start_datum="2026-09-01",
-            faellig_datum="2026-09-01",
-            wiederholung="FREQ=DAILY;UNTIL=20260903T000000Z",
+            start_date="2026-09-01",
+            due_date="2026-09-01",
+            recurrence="FREQ=DAILY;UNTIL=20260903T000000Z",
         )
     ]
 
@@ -1853,8 +1843,8 @@ def test_a_rule_dateutil_refuses_leaves_the_master_row_alone():
 
     assert len(result) == 1
     assert result[0]["uid"] == "task-1"
-    assert result[0]["wiederholung"] == "FREQ=DAILY;UNTIL=20260903T000000Z"
-    assert result[0]["wiederholung_von"] is None
+    assert result[0]["recurrence"] == "FREQ=DAILY;UNTIL=20260903T000000Z"
+    assert result[0]["recurrence_id"] is None
 
 
 def test_expanded_occurrences_keep_their_wall_clock_across_dst():
@@ -1864,15 +1854,15 @@ def test_expanded_occurrences_keep_their_wall_clock_across_dst():
     preserves on the write side."""
     tasks = [
         _recurring(
-            start_datum="2026-10-19T09:00:00",
-            faellig_datum="2026-10-19T17:00:00",
-            wiederholung="FREQ=WEEKLY",
+            start_date="2026-10-19T09:00:00",
+            due_date="2026-10-19T17:00:00",
+            recurrence="FREQ=WEEKLY",
         )
     ]
 
     result = mapping.filter_tasks(tasks, due_before="2026-11-03")
 
-    assert [t["start_datum"] for t in result] == [
+    assert [t["start_date"] for t in result] == [
         "2026-10-19T09:00:00+02:00",
         "2026-10-26T09:00:00+01:00",  # not 08:00+01:00
         "2026-11-02T09:00:00+01:00",
@@ -1882,45 +1872,43 @@ def test_expanded_occurrences_keep_their_wall_clock_across_dst():
 def test_expansion_keeps_the_distance_between_start_and_due():
     tasks = [
         _recurring(
-            start_datum="2026-09-01T09:00:00",
-            faellig_datum="2026-09-03T17:00:00",
-            wiederholung="FREQ=WEEKLY",
+            start_date="2026-09-01T09:00:00",
+            due_date="2026-09-03T17:00:00",
+            recurrence="FREQ=WEEKLY",
         )
     ]
 
     result = mapping.filter_tasks(tasks, due_before="2026-09-11")
 
-    assert [(t["start_datum"], t["faellig_datum"]) for t in result] == [
+    assert [(t["start_date"], t["due_date"]) for t in result] == [
         ("2026-09-01T09:00:00+02:00", "2026-09-03T17:00:00+02:00"),
         ("2026-09-08T09:00:00+02:00", "2026-09-10T17:00:00+02:00"),
     ]
 
 
-def test_expansion_skips_ausnahme_daten():
+def test_expansion_skips_exception_dates():
     tasks = [
         _recurring(
-            start_datum="2026-09-01",
-            faellig_datum="2026-09-01",
-            wiederholung="FREQ=DAILY",
-            ausnahme_daten=["2026-09-02"],
+            start_date="2026-09-01",
+            due_date="2026-09-01",
+            recurrence="FREQ=DAILY",
+            exception_dates=["2026-09-02"],
         )
     ]
 
     result = mapping.filter_tasks(tasks, due_before="2026-09-04")
 
-    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-03", "2026-09-04"]
+    assert [t["due_date"] for t in result] == ["2026-09-01", "2026-09-03", "2026-09-04"]
 
 
 def test_occurrences_before_the_window_do_not_consume_the_instance_cap():
-    """A daily series started long before `faellig_nach` must still fill the
+    """A daily series started long before `due_after` must still fill the
     queried window, not be truncated by the occurrences it skipped to get there."""
-    tasks = [
-        _recurring(start_datum="2026-01-01", faellig_datum="2026-01-01", wiederholung="FREQ=DAILY")
-    ]
+    tasks = [_recurring(start_date="2026-01-01", due_date="2026-01-01", recurrence="FREQ=DAILY")]
 
     result = mapping.filter_tasks(tasks, due_after="2026-12-01", due_before="2026-12-05")
 
-    assert [t["faellig_datum"] for t in result] == [
+    assert [t["due_date"] for t in result] == [
         "2026-12-01",
         "2026-12-02",
         "2026-12-03",
@@ -1930,13 +1918,13 @@ def test_occurrences_before_the_window_do_not_consume_the_instance_cap():
 
 
 def test_non_recurring_tasks_are_left_alone_by_expansion():
-    tasks = [_recurring(faellig_datum="2026-09-01")]
+    tasks = [_recurring(due_date="2026-09-01")]
 
     result = mapping.filter_tasks(tasks, due_before="2026-09-22")
 
     assert len(result) == 1
     assert result[0]["uid"] == "task-1"
-    assert result[0]["wiederholung_von"] is None
+    assert result[0]["recurrence_id"] is None
 
 
 def test_a_series_whose_start_and_due_disagree_in_kind_is_not_expanded():
@@ -1956,8 +1944,8 @@ def test_a_series_whose_start_and_due_disagree_in_kind_is_not_expanded():
     result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-22")
 
     assert len(result) == 1
-    assert result[0]["wiederholung"] == "FREQ=WEEKLY"
-    assert result[0]["wiederholung_von"] is None
+    assert result[0]["recurrence"] == "FREQ=WEEKLY"
+    assert result[0]["recurrence_id"] is None
 
 
 def test_a_series_with_an_unreadable_anchor_is_not_expanded():
@@ -1978,7 +1966,7 @@ def test_a_series_with_an_unreadable_anchor_is_not_expanded():
 
     assert len(result) == 1
     assert result[0]["uid"] == "task-1"
-    assert result[0]["wiederholung_von"] is None
+    assert result[0]["recurrence_id"] is None
 
 
 def test_an_unreadable_exception_date_cancels_nothing_and_does_not_raise():
@@ -1997,7 +1985,7 @@ def test_an_unreadable_exception_date_cancels_nothing_and_does_not_raise():
 
     result = mapping.filter_tasks([mapping.parse_vtodo(todo)], due_before="2026-09-03")
 
-    assert [t["faellig_datum"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+    assert [t["due_date"] for t in result] == ["2026-09-01", "2026-09-02", "2026-09-03"]
 
 
 def test_split_occurrence_uid_leaves_an_ordinary_uid_alone():
@@ -2007,21 +1995,21 @@ def test_split_occurrence_uid_leaves_an_ordinary_uid_alone():
     assert mapping.split_occurrence_uid("u1#2026-09-08") == ("u1", "2026-09-08")
 
 
-def _task(uid: str, faellig_datum: str | None) -> dict:
+def _task(uid: str, due_date: str | None) -> dict:
     return {
         "uid": uid,
-        "titel": uid,
-        "start_datum": None,
-        "faellig_datum": faellig_datum,
-        "prioritaet": None,
-        "fortschritt_prozent": 0,
-        "status": "offen",
-        "ort": None,
+        "title": uid,
+        "start_date": None,
+        "due_date": due_date,
+        "priority": None,
+        "progress_percent": 0,
+        "status": "open",
+        "location": None,
         "url": None,
         "tags": [],
-        "notizen": None,
-        "uebergeordnete_uid": None,
-        "wiederholung": None,
+        "notes": None,
+        "parent_uid": None,
+        "recurrence": None,
     }
 
 
@@ -2061,7 +2049,7 @@ def test_filter_tasks_due_before_and_after_combined_is_a_range():
 
 
 def test_filter_tasks_date_only_due_before_bound_includes_all_day_task_on_boundary():
-    # An all-day task due exactly on the faellig_vor date must still be
+    # An all-day task due exactly on the due_before date must still be
     # included: the bound expands to the end of that day (23:59:59 in the
     # server's default timezone), and the task's own all-day due date
     # compares as its start-of-day instant.
@@ -2077,7 +2065,7 @@ def test_filter_tasks_date_only_due_after_bound_includes_all_day_task_on_boundar
 
 
 def test_filter_tasks_datetime_due_before_bound_excludes_all_day_task_next_day():
-    # An all-day task due the day *after* a datetime faellig_vor bound must be
+    # An all-day task due the day *after* a datetime due_before bound must be
     # excluded, even though the bound's date matches - the bound is a precise
     # instant here, not expanded to end-of-day (only date-only bounds are).
     tasks = [_task("next-day", "2026-07-21")]
@@ -2122,46 +2110,46 @@ def test_filter_tasks_invalid_due_bound_raises():
         mapping.filter_tasks([], due_before="not-a-date")
 
 
-def test_filter_tasks_prioritaet():
+def test_filter_tasks_priority():
     tasks = [
-        dict(_task("1", "2026-07-01"), prioritaet="hoch"),
-        dict(_task("2", "2026-07-01"), prioritaet="mittel"),
-        dict(_task("3", "2026-07-01"), prioritaet="niedrig"),
+        dict(_task("1", "2026-07-01"), priority="high"),
+        dict(_task("2", "2026-07-01"), priority="medium"),
+        dict(_task("3", "2026-07-01"), priority="low"),
     ]
-    res = mapping.filter_tasks(tasks, prioritaet="hoch")
+    res = mapping.filter_tasks(tasks, priority="high")
     assert [t["uid"] for t in res] == ["1"]
 
 
-def test_filter_tasks_unknown_prioritaet_raises():
-    with pytest.raises(InvalidTaskDataError, match="Unknown prioritaet 'dringend'"):
-        mapping.filter_tasks([], prioritaet="dringend")
+def test_filter_tasks_unknown_priority_raises():
+    with pytest.raises(InvalidTaskDataError, match="Unknown priority 'urgent'"):
+        mapping.filter_tasks([], priority="urgent")
 
 
 def test_filter_tasks_tag():
     tasks = [
-        dict(_task("1", "2026-07-01"), tags=["Finanzen", "Wichtig"]),
-        dict(_task("2", "2026-07-01"), tags=["Arbeit"]),
+        dict(_task("1", "2026-07-01"), tags=["Finance", "Important"]),
+        dict(_task("2", "2026-07-01"), tags=["Work"]),
     ]
-    res = mapping.filter_tasks(tasks, tag="finanzen")
+    res = mapping.filter_tasks(tasks, tag="finance")
     assert [t["uid"] for t in res] == ["1"]
 
 
-def test_filter_tasks_suchtext():
+def test_filter_tasks_search_text():
     tasks = [
-        dict(_task("1", "2026-07-01"), titel="Milch kaufen", notizen=None),
-        dict(_task("2", "2026-07-01"), titel="Einkauf", notizen="Vollmilch besorgen"),
-        dict(_task("3", "2026-07-01"), titel="Post", notizen="Brief senden"),
+        dict(_task("1", "2026-07-01"), title="Buy milk", notes=None),
+        dict(_task("2", "2026-07-01"), title="Shopping", notes="Get whole milk"),
+        dict(_task("3", "2026-07-01"), title="Post", notes="Send letter"),
     ]
-    res = mapping.filter_tasks(tasks, suchtext="milch")
-    assert [t["uid"] for t in res] == ["2", "1"]
+    res = mapping.filter_tasks(tasks, search_text="milk")
+    assert [t["uid"] for t in res] == ["1", "2"]
 
 
-def test_filter_tasks_sorting_due_date_and_no_due_date_and_titel():
+def test_filter_tasks_sorting_due_date_and_no_due_date_and_title():
     tasks = [
-        dict(_task("z-due-later", "2026-08-10"), titel="Z Task"),
-        dict(_task("a-due-earlier", "2026-08-01"), titel="A Task"),
-        dict(_task("b-no-due", None), titel="B Task"),
-        dict(_task("a-no-due", None), titel="A Task"),
+        dict(_task("z-due-later", "2026-08-10"), title="Z Task"),
+        dict(_task("a-due-earlier", "2026-08-01"), title="A Task"),
+        dict(_task("b-no-due", None), title="B Task"),
+        dict(_task("a-no-due", None), title="A Task"),
     ]
     res = mapping.filter_tasks(tasks)
     assert [t["uid"] for t in res] == ["a-due-earlier", "z-due-later", "a-no-due", "b-no-due"]
@@ -2171,38 +2159,38 @@ def test_filter_tasks_combination():
     tasks = [
         dict(
             _task("1", "2026-07-10"),
-            prioritaet="hoch",
+            priority="high",
             tags=["work"],
-            titel="Bericht schreiben",
-            notizen="Wichtig",
+            title="Write summary",
+            notes="Important",
         ),
         dict(
             _task("2", "2026-07-05"),
-            prioritaet="hoch",
+            priority="high",
             tags=["work"],
-            titel="Bericht abgeben",
-            notizen="Dringend",
+            title="File invoice",
+            notes="Urgent",
         ),
         dict(
             _task("3", "2026-07-01"),
-            prioritaet="niedrig",
+            priority="low",
             tags=["work"],
-            titel="Bericht lesen",
-            notizen="Fine",
+            title="Read summary",
+            notes="Fine",
         ),
         dict(
             _task("4", "2026-07-02"),
-            prioritaet="hoch",
+            priority="high",
             tags=["home"],
-            titel="Bericht zuhause",
-            notizen=None,
+            title="File taxes",
+            notes=None,
         ),
     ]
     res = mapping.filter_tasks(
         tasks,
-        prioritaet="hoch",
+        priority="high",
         tag="WORK",
-        suchtext="bericht",
+        search_text="invoice",
         due_before="2026-07-15",
         limit=1,
     )
@@ -2212,15 +2200,15 @@ def test_filter_tasks_combination():
 def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
     """A VTODO whose DUE this server can't parse must not poison its whole list.
 
-    Sorting reads *every* task's `faellig_datum`, so a single odd value (a
+    Sorting reads *every* task's `due_date`, so a single odd value (a
     bare time, a period, whatever a foreign client wrote) would otherwise
     turn an entire healthy listing into an error. It sorts with the tasks
     that have no due date instead.
     """
     tasks = [
-        dict(_task("bad", "12:00:00"), titel="Kaputt"),
-        dict(_task("good", "2026-07-01"), titel="Heil"),
-        dict(_task("none", None), titel="Ohne"),
+        dict(_task("bad", "12:00:00"), title="Broken"),
+        dict(_task("good", "2026-07-01"), title="Fine"),
+        dict(_task("none", None), title="Empty"),
     ]
 
     res = mapping.filter_tasks(tasks)
@@ -2231,8 +2219,8 @@ def test_filter_tasks_one_unreadable_due_date_does_not_break_the_listing():
 def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
     """It can't be judged "before"/"after" anything, exactly like a missing one."""
     tasks = [
-        dict(_task("bad", "(2026-07-01, 2026-07-02)"), titel="Kaputt"),
-        dict(_task("good", "2026-07-01"), titel="Heil"),
+        dict(_task("bad", "(2026-07-01, 2026-07-02)"), title="Broken"),
+        dict(_task("good", "2026-07-01"), title="Fine"),
     ]
 
     res = mapping.filter_tasks(tasks, due_before="2026-07-31")
@@ -2241,7 +2229,7 @@ def test_filter_tasks_due_filter_skips_an_unreadable_due_date():
 
 
 def test_filter_tasks_tag_matches_across_unicode_spellings():
-    """ "ü" has two spellings and "ß" uppercases to "SS" - a German API must match both."""
+    """ "ü" has two spellings and "ß" uppercases to "SS" - both spellings must match."""
     tasks = [
         dict(_task("1", "2026-07-01"), tags=["Büro"]),  # u + combining diaeresis
         dict(_task("2", "2026-07-01"), tags=["Straße"]),
@@ -2251,21 +2239,21 @@ def test_filter_tasks_tag_matches_across_unicode_spellings():
     assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="STRASSE")] == ["2"]
 
 
-def test_filter_tasks_suchtext_matches_across_unicode_spellings():
+def test_filter_tasks_search_text_matches_across_unicode_spellings():
     tasks = [
-        dict(_task("1", "2026-07-01"), titel="Große Wäsche", notizen=None),
+        dict(_task("1", "2026-07-01"), title="Große Wäsche", notes=None),
     ]
 
-    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="wäsche")] == ["1"]
-    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="GROSSE")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, search_text="wäsche")] == ["1"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, search_text="GROSSE")] == ["1"]
 
 
-def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
+def test_filter_tasks_title_tiebreak_sorts_umlauts_next_to_their_base_letter():
     """Raw codepoint order files every umlaut after "Z", which reads as random."""
     tasks = [
-        dict(_task("z", "2026-07-01"), titel="Zahnarzt"),
-        dict(_task("ae", "2026-07-01"), titel="Ärztin"),
-        dict(_task("a", "2026-07-01"), titel="Apotheke"),
+        dict(_task("z", "2026-07-01"), title="Dentist"),
+        dict(_task("ae", "2026-07-01"), title="Ärztin"),
+        dict(_task("a", "2026-07-01"), title="Apple"),
     ]
 
     res = mapping.filter_tasks(tasks)
@@ -2276,17 +2264,17 @@ def test_filter_tasks_titel_tiebreak_sorts_umlauts_next_to_their_base_letter():
 def test_filter_tasks_empty_filter_value_means_no_filter():
     """ "" is how a client spells "unset"; every string filter reads it that way.
 
-    They used to disagree: `prioritaet=""` raised, `tag=""` matched nothing,
-    `suchtext=""` matched everything, and an empty due bound raised too.
+    They used to disagree: `priority=""` raised, `tag=""` matched nothing,
+    `search_text=""` matched everything, and an empty due bound raised too.
     """
     tasks = [
-        dict(_task("1", "2026-07-01"), prioritaet="hoch", tags=["work"], titel="Bericht"),
-        dict(_task("2", "2026-07-02"), prioritaet=None, tags=[], titel="Anruf"),
+        dict(_task("1", "2026-07-01"), priority="high", tags=["work"], title="Report"),
+        dict(_task("2", "2026-07-02"), priority=None, tags=[], title="Call"),
     ]
 
-    assert [t["uid"] for t in mapping.filter_tasks(tasks, prioritaet="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, priority="")] == ["1", "2"]
     assert [t["uid"] for t in mapping.filter_tasks(tasks, tag="")] == ["1", "2"]
-    assert [t["uid"] for t in mapping.filter_tasks(tasks, suchtext="")] == ["1", "2"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, search_text="")] == ["1", "2"]
     assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="", due_after="")] == [
         "1",
         "2",
@@ -2296,11 +2284,11 @@ def test_filter_tasks_empty_filter_value_means_no_filter():
 def test_filter_tasks_empty_due_bound_does_not_exclude_tasks_without_a_due_date():
     """An empty bound is no bound, so it must not drag in the "has to have a due date" rule."""
     tasks = [
-        dict(_task("mit", "2026-07-01")),
-        dict(_task("ohne", None)),
+        dict(_task("with", "2026-07-01")),
+        dict(_task("without", None)),
     ]
 
-    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["mit", "ohne"]
+    assert [t["uid"] for t in mapping.filter_tasks(tasks, due_before="")] == ["with", "without"]
 
 
 def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
@@ -2309,52 +2297,52 @@ def test_filter_tasks_non_positive_limit_still_raises_despite_the_falsy_rule():
         mapping.filter_tasks([], limit=0)
 
 
-# --- Cleanup filters (ohne_erinnerung / ohne_sichtbarkeit / ohne_tags / uid_regex) ---
+# --- Cleanup filters (without_reminder / without_visibility / without_tags / uid_regex) ---
 
 
-def test_parse_vtodo_reads_class_as_sichtbarkeit():
+def test_parse_vtodo_reads_class_as_visibility():
     todo = _new_todo()
     todo.add("summary", "S")
     todo.add("class", "PRIVATE")
-    assert mapping.parse_vtodo(todo)["sichtbarkeit"] == "privat"
+    assert mapping.parse_vtodo(todo)["visibility"] == "private"
 
 
 def test_parse_vtodo_missing_or_unknown_class_reads_as_none():
     plain = _new_todo()
     plain.add("summary", "S")
-    assert mapping.parse_vtodo(plain)["sichtbarkeit"] is None
+    assert mapping.parse_vtodo(plain)["visibility"] is None
 
     foreign = _new_todo()
     foreign.add("summary", "S")
     foreign.add("class", "X-CORP-INTERNAL")  # a foreign extension must not break a listing
-    assert mapping.parse_vtodo(foreign)["sichtbarkeit"] is None
+    assert mapping.parse_vtodo(foreign)["visibility"] is None
 
 
-def test_filter_tasks_ohne_erinnerung_keeps_only_tasks_without_reminders():
+def test_filter_tasks_without_reminder_keeps_only_tasks_without_reminders():
     tasks = [
-        dict(_task("nackt", "2026-07-01"), erinnerungen=[]),
-        dict(_task("erinnert", "2026-07-02"), erinnerungen=["-PT30M"]),
+        dict(_task("bare", "2026-07-01"), reminders=[]),
+        dict(_task("reminded", "2026-07-02"), reminders=["-PT30M"]),
     ]
-    res = mapping.filter_tasks(tasks, ohne_erinnerung=True)
-    assert [t["uid"] for t in res] == ["nackt"]
+    res = mapping.filter_tasks(tasks, without_reminder=True)
+    assert [t["uid"] for t in res] == ["bare"]
 
 
-def test_filter_tasks_ohne_sichtbarkeit_keeps_only_tasks_without_class():
+def test_filter_tasks_without_visibility_keeps_only_tasks_without_class():
     tasks = [
-        dict(_task("nackt", "2026-07-01"), sichtbarkeit=None),
-        dict(_task("privat", "2026-07-02"), sichtbarkeit="privat"),
+        dict(_task("bare", "2026-07-01"), visibility=None),
+        dict(_task("private", "2026-07-02"), visibility="private"),
     ]
-    res = mapping.filter_tasks(tasks, ohne_sichtbarkeit=True)
-    assert [t["uid"] for t in res] == ["nackt"]
+    res = mapping.filter_tasks(tasks, without_visibility=True)
+    assert [t["uid"] for t in res] == ["bare"]
 
 
-def test_filter_tasks_ohne_tags_keeps_only_untagged_tasks():
+def test_filter_tasks_without_tags_keeps_only_untagged_tasks():
     tasks = [
-        dict(_task("nackt", "2026-07-01"), tags=[]),
-        dict(_task("getaggt", "2026-07-02"), tags=["Arbeit"]),
+        dict(_task("bare", "2026-07-01"), tags=[]),
+        dict(_task("tagged", "2026-07-02"), tags=["Work"]),
     ]
-    res = mapping.filter_tasks(tasks, ohne_tags=True)
-    assert [t["uid"] for t in res] == ["nackt"]
+    res = mapping.filter_tasks(tasks, without_tags=True)
+    assert [t["uid"] for t in res] == ["bare"]
 
 
 def test_filter_tasks_uid_regex_is_case_sensitive_search():
@@ -2381,7 +2369,7 @@ def test_filter_tasks_uid_regex_matches_the_series_uid_not_expanded_occurrence_u
     the synthetic "<uid>#<occurrence>" uid could never satisfy still keeps
     every expanded row of a matching series."""
     todo = _new_todo("AB12-SERIES")
-    todo.add("summary", "Woche")
+    todo.add("summary", "Week")
     todo.add("due", date(2026, 9, 1))
     todo.add("rrule", {"FREQ": ["DAILY"]})
 
@@ -2398,21 +2386,21 @@ def test_filter_tasks_cleanup_filters_combined_shortlist_phone_created_tasks():
     uppercase UUIDs and no reminders/visibility/tags."""
     phone = dict(
         _task("5D3A2F00-90AB-4CDE-9AAF-000000000001", "2026-07-01"),
-        erinnerungen=[],
-        sichtbarkeit=None,
+        reminders=[],
+        visibility=None,
         tags=[],
     )
     curated = dict(
         _task("gepflegt-1", "2026-07-02"),
-        erinnerungen=["-PT30M"],
-        sichtbarkeit="privat",
-        tags=["Arbeit"],
+        reminders=["-PT30M"],
+        visibility="private",
+        tags=["Work"],
     )
     res = mapping.filter_tasks(
         [phone, curated],
-        ohne_erinnerung=True,
-        ohne_sichtbarkeit=True,
-        ohne_tags=True,
+        without_reminder=True,
+        without_visibility=True,
+        without_tags=True,
         uid_regex=r"^[A-F0-9-]+$",
     )
     assert [t["uid"] for t in res] == ["5D3A2F00-90AB-4CDE-9AAF-000000000001"]

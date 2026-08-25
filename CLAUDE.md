@@ -45,5 +45,5 @@ For a task large enough to naturally split into independent subtasks:
 
 - **Server Default Timezone**: Configured via `MCP_DEFAULT_TIMEZONE` (default `Europe/Berlin`). `MCP_DEFAULT_TIMEZONE=UTC` restores previous UTC behavior.
 - **Naive Inputs**: Any naive datetime input (no UTC offset) is interpreted in the server's default timezone.
-- **Day Windows**: Day bounds (agenda, `faellig_vor`/`faellig_nach`, `von`/`bis`) are constructed in the default timezone.
+- **Day Windows**: Day bounds (agenda, `due_before`/`due_after`, `start`/`end`) are constructed in the default timezone.
 - **Output Timestamps**: Timestamps returned to callers are formatted in the server's default timezone with offset (e.g. `+02:00`). All-day dates remain bare `YYYY-MM-DD` strings.

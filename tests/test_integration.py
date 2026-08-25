@@ -13,7 +13,7 @@ from conftest import run_async
 
 from nextcloud_task_mcp import mapping
 from nextcloud_task_mcp.caldav_client import CalDavService
-from nextcloud_task_mcp.errors import EventNotFoundError, NotizNotFoundError
+from nextcloud_task_mcp.errors import EventNotFoundError, NoteNotFoundError
 from nextcloud_task_mcp.notes_client import NotesService
 from nextcloud_task_mcp.notes_mapping import NoteFields
 
@@ -53,8 +53,8 @@ def test_full_task_lifecycle(live_service, test_list_name):
     uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            titel="nextcloud-task-mcp integration test task",
-            notizen="Created by the automated integration test suite; safe to delete.",
+            title="nextcloud-task-mcp integration test task",
+            notes="Created by the automated integration test suite; safe to delete.",
         ),
     )
     try:
@@ -64,18 +64,18 @@ def test_full_task_lifecycle(live_service, test_list_name):
         fetched = live_service.get_task(test_list_name, uid)
         assert fetched["uid"] == uid
 
-        live_service.update_task(test_list_name, uid, mapping.TaskFields(notizen="updated notes"))
+        live_service.update_task(test_list_name, uid, mapping.TaskFields(notes="updated notes"))
         updated = next(t for t in live_service.list_tasks(test_list_name) if t["uid"] == uid)
-        assert updated["notizen"] == "updated notes"
+        assert updated["notes"] == "updated notes"
 
-        live_service.update_task(test_list_name, uid, mapping.TaskFields(clear=("notizen",)))
+        live_service.update_task(test_list_name, uid, mapping.TaskFields(clear=("notes",)))
         cleared = live_service.get_task(test_list_name, uid)
-        assert cleared["notizen"] is None
+        assert cleared["notes"] is None
 
         live_service.complete_task(test_list_name, uid)
         all_tasks = live_service.list_tasks(test_list_name, only_open=False)
         completed = next(t for t in all_tasks if t["uid"] == uid)
-        assert completed["status"] == "erledigt"
+        assert completed["status"] == "completed"
     finally:
         live_service.delete_task(test_list_name, uid)
 
@@ -88,7 +88,7 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
     only ever PUTs STATUS/PERCENT-COMPLETE/COMPLETED (mapping.mark_completed
     never touches RRULE - see the pure-unit pins in test_caldav_client.py's
     test_complete_task_leaves_rrule_intact and test_mapping.py's
-    test_mark_completed_leaves_wiederholung_intact), and CalDAV storage is a
+    test_mark_completed_leaves_recurrence_intact), and CalDAV storage is a
     dumb object store: nothing server-side rewrites the ICS a PUT sends it or
     conjures a new VTODO object out of a completed one. So what this test
     below asserts - RRULE unchanged, no new task object - is the behaviour
@@ -108,25 +108,25 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
     uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            titel="nextcloud-task-mcp integration test recurring task",
-            faellig_datum="2026-07-20",
-            wiederholung="FREQ=DAILY",
-            notizen="Created by the automated integration test suite; safe to delete.",
+            title="nextcloud-task-mcp integration test recurring task",
+            due_date="2026-07-20",
+            recurrence="FREQ=DAILY",
+            notes="Created by the automated integration test suite; safe to delete.",
         ),
     )
     try:
         created = live_service.get_task(test_list_name, uid)
-        assert created["wiederholung"] == "FREQ=DAILY"
+        assert created["recurrence"] == "FREQ=DAILY"
 
         live_service.complete_task(test_list_name, uid)
 
         all_tasks = live_service.list_tasks(test_list_name, only_open=False)
         completed = next(t for t in all_tasks if t["uid"] == uid)
-        assert completed["status"] == "erledigt"
-        assert completed.get("wiederholung") == "FREQ=DAILY"
+        assert completed["status"] == "completed"
+        assert completed.get("recurrence") == "FREQ=DAILY"
 
         open_tasks = live_service.list_tasks(test_list_name, only_open=True)
-        assert not any(t["uid"] != uid and t["titel"] == created["titel"] for t in open_tasks)
+        assert not any(t["uid"] != uid and t["title"] == created["title"] for t in open_tasks)
     finally:
         live_service.delete_task(test_list_name, uid)
 
@@ -152,7 +152,7 @@ def _reused_collection(live_service, name: str, *, kind: str) -> str:
     """
     if kind == "VEVENT":
         if not any(entry["name"] == name for entry in live_service.list_calendars()):
-            live_service.create_calendar(name, farbe="#00679e")
+            live_service.create_calendar(name, color="#00679e")
     elif not any(entry["name"] == name for entry in live_service.list_task_lists()):
         live_service.create_task_list(name)
     return name
@@ -167,16 +167,16 @@ def test_calendar(live_service):
 def test_calendar_lifecycle(live_service):
     name_a = f"MCP-Cal-Lifecycle-{_RUN_SUFFIX}"
     name_b = f"MCP-Cal-Renamed-{_RUN_SUFFIX}"
-    created = live_service.create_calendar(name_a, farbe="#FF7A66")
+    created = live_service.create_calendar(name_a, color="#FF7A66")
     try:
         assert created["name"] == name_a
 
         calendars = live_service.list_calendars()
         entry = next(c for c in calendars if c["name"] == name_a)
-        assert "VEVENT" in entry["komponenten"]
-        assert entry["farbe"].upper().startswith("#FF7A66")
+        assert "VEVENT" in entry["components"]
+        assert entry["color"].upper().startswith("#FF7A66")
 
-        renamed = live_service.update_calendar(name_a, new_display_name=name_b, farbe="#00679e")
+        renamed = live_service.update_calendar(name_a, new_display_name=name_b, color="#00679e")
         assert renamed["name"] == name_b
         calendars = live_service.list_calendars()
         assert any(c["name"] == name_b for c in calendars)
@@ -193,42 +193,42 @@ def test_event_lifecycle(live_service, test_calendar):
     uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
-            titel="Integrationstest-Termin",
+            title="Integration-Test-Event",
             start="2026-09-01T14:00:00",
-            ende="2026-09-01T15:00:00",
-            ort="Testort",
-            beschreibung="Vom Integrationstest erstellt; kann weg.",
+            end="2026-09-01T15:00:00",
+            location="Test location",
+            description="Created by the integration test; safe to delete.",
             tags=["MCP-Test"],
-            status="bestätigt",
-            erinnerungen=["-PT30M"],
+            status="confirmed",
+            reminders=["-PT30M"],
         ),
     )
 
     fetched = live_service.get_event(test_calendar, uid)
-    assert fetched["titel"] == "Integrationstest-Termin"
+    assert fetched["title"] == "Integration-Test-Event"
     assert fetched["start"] == "2026-09-01T14:00:00+02:00"
-    assert fetched["ende"] == "2026-09-01T15:00:00+02:00"
-    assert fetched["status"] == "bestätigt"
+    assert fetched["end"] == "2026-09-01T15:00:00+02:00"
+    assert fetched["status"] == "confirmed"
     assert fetched["tags"] == ["MCP-Test"]
 
     listed = live_service.list_events(
-        calendar_names=[test_calendar], von="2026-09-01", bis="2026-09-01"
+        calendar_names=[test_calendar], start="2026-09-01", end="2026-09-01"
     )
     assert any(e["uid"] == uid for e in listed)
 
     live_service.update_event(
-        test_calendar, uid, event_mapping.EventFields(ort="Neuer Ort", status="vorläufig")
+        test_calendar, uid, event_mapping.EventFields(location="New location", status="tentative")
     )
     updated = live_service.get_event(test_calendar, uid)
-    assert updated["ort"] == "Neuer Ort"
-    assert updated["status"] == "vorläufig"
+    assert updated["location"] == "New location"
+    assert updated["status"] == "tentative"
 
-    live_service.update_event(test_calendar, uid, event_mapping.EventFields(clear=("ort",)))
-    assert live_service.get_event(test_calendar, uid)["ort"] is None
+    live_service.update_event(test_calendar, uid, event_mapping.EventFields(clear=("location",)))
+    assert live_service.get_event(test_calendar, uid)["location"] is None
 
     live_service.delete_event(test_calendar, uid)
     remaining = live_service.list_events(
-        calendar_names=[test_calendar], von="2026-09-01", bis="2026-09-01"
+        calendar_names=[test_calendar], start="2026-09-01", end="2026-09-01"
     )
     assert not any(e["uid"] == uid for e in remaining)
 
@@ -238,13 +238,13 @@ def test_all_day_event_round_trip(live_service, test_calendar):
 
     uid = live_service.create_event(
         test_calendar,
-        event_mapping.EventFields(titel="Ganztags-Test", start="2026-09-02", ende="2026-09-03"),
+        event_mapping.EventFields(title="All_day-Test", start="2026-09-02", end="2026-09-03"),
     )
     try:
         fetched = live_service.get_event(test_calendar, uid)
-        assert fetched["ganztaegig"] is True
+        assert fetched["all_day"] is True
         assert fetched["start"] == "2026-09-02"
-        assert fetched["ende"] == "2026-09-03"  # inclusive last day
+        assert fetched["end"] == "2026-09-03"  # inclusive last day
     finally:
         live_service.delete_event(test_calendar, uid)
 
@@ -255,25 +255,25 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
     series_uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
-            titel="Wöchentlicher Test",
+            title="Weekly-Test",
             start="2026-09-07T10:00:00",
-            ende="2026-09-07T11:00:00",
-            wiederholung="FREQ=WEEKLY;BYDAY=MO;COUNT=4",
-            ausnahme_daten=["2026-09-14T10:00:00"],
+            end="2026-09-07T11:00:00",
+            recurrence="FREQ=WEEKLY;BYDAY=MO;COUNT=4",
+            exception_dates=["2026-09-14T10:00:00"],
         ),
     )
 
     # Time-range query must match a later occurrence of the series.
     hits = live_service.list_events(
-        calendar_names=[test_calendar], von="2026-09-20", bis="2026-09-22"
+        calendar_names=[test_calendar], start="2026-09-20", end="2026-09-22"
     )
-    assert any(e["titel"] == "Wöchentlicher Test" for e in hits)
+    assert any(e["title"] == "Weekly-Test" for e in hits)
 
     # Expansion yields the individual occurrences, minus the EXDATE one.
     expanded = live_service.list_events(
-        calendar_names=[test_calendar], von="2026-09-01", bis="2026-09-30", expand=True
+        calendar_names=[test_calendar], start="2026-09-01", end="2026-09-30", expand=True
     )
-    occurrences = [e for e in expanded if e["titel"] == "Wöchentlicher Test"]
+    occurrences = [e for e in expanded if e["title"] == "Weekly-Test"]
     starts = sorted(e["start"] for e in occurrences)
     try:
         assert len(occurrences) == 3  # 4 occurrences minus 1 exception
@@ -288,9 +288,9 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
     task_uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            titel="Verknüpfungstest-Aufgabe",
-            faellig_datum="2026-09-03T16:00:00",
-            notizen="Vom Integrationstest erstellt; kann weg.",
+            title="Link-Test-Task",
+            due_date="2026-09-03T16:00:00",
+            notes="Created by the integration test; safe to delete.",
         ),
     )
     event_uid: str | None = None
@@ -298,28 +298,28 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
     try:
         # Task -> event conversion (timeboxing).
         event_uid = live_service.create_event_from_task(
-            test_list_name, task_uid, test_calendar, dauer_minuten=45
+            test_list_name, task_uid, test_calendar, duration_minutes=45
         )
         event = live_service.get_event(test_calendar, event_uid)
-        assert event["titel"] == "Verknüpfungstest-Aufgabe"
+        assert event["title"] == "Link-Test-Task"
         assert event["start"] == "2026-09-03T16:00:00+02:00"
-        assert event["ende"] == "2026-09-03T16:45:00+02:00"
-        assert {"uid": task_uid, "beziehung": "zeitblock"} in event["verknuepfte_aufgaben"]
+        assert event["end"] == "2026-09-03T16:45:00+02:00"
+        assert {"uid": task_uid, "relation": "time_block"} in event["linked_tasks"]
 
         # Explicit linking with the other relation.
         second_uid = live_service.create_event(
             test_calendar,
             event_mapping.EventFields(
-                titel="Voraussetzungs-Termin",
+                title="Prerequisite-Event",
                 start="2026-09-02T10:00:00",
-                ende="2026-09-02T11:00:00",
+                end="2026-09-02T11:00:00",
             ),
         )
         live_service.link_task_to_event(
-            test_list_name, task_uid, test_calendar, second_uid, beziehung="voraussetzung"
+            test_list_name, task_uid, test_calendar, second_uid, relation="prerequisite"
         )
         linked = live_service.get_event(test_calendar, second_uid)
-        assert {"uid": task_uid, "beziehung": "voraussetzung"} in linked["verknuepfte_aufgaben"]
+        assert {"uid": task_uid, "relation": "prerequisite"} in linked["linked_tasks"]
     finally:
         live_service.delete_task(test_list_name, task_uid)
         for created in (event_uid, second_uid):
@@ -332,21 +332,21 @@ def test_get_agenda_combines_events_and_tasks(live_service, test_list_name, test
 
     task_uid = live_service.create_task(
         test_list_name,
-        mapping.TaskFields(titel="Agenda-Test-Aufgabe", faellig_datum="2026-09-04T09:00:00"),
+        mapping.TaskFields(title="Agenda-Test-Task", due_date="2026-09-04T09:00:00"),
     )
     event_uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
-            titel="Agenda-Test-Termin",
+            title="Agenda-Test-Event",
             start="2026-09-04T14:00:00",
-            ende="2026-09-04T15:00:00",
+            end="2026-09-04T15:00:00",
         ),
     )
     try:
         agenda = live_service.get_agenda("2026-09-04")
-        assert any(e["uid"] == event_uid for e in agenda["termine"])
-        matching_tasks = [t for t in agenda["aufgaben"] if t["uid"] == task_uid]
-        assert matching_tasks and matching_tasks[0]["liste"] == test_list_name
+        assert any(e["uid"] == event_uid for e in agenda["events"])
+        matching_tasks = [t for t in agenda["tasks"] if t["uid"] == task_uid]
+        assert matching_tasks and matching_tasks[0]["list"] == test_list_name
     finally:
         live_service.delete_task(test_list_name, task_uid)
         live_service.delete_event(test_calendar, event_uid)
@@ -356,8 +356,8 @@ def test_get_agenda_combines_events_and_tasks(live_service, test_list_name, test
 # move / list_tags / batch round-trips (write -> read -> same value)
 # ---------------------------------------------------------------------------
 
-_MOVE_TARGET_CALENDAR = "MCP-Move-Ziel-Test"
-_MOVE_TARGET_LIST = "MCP-Move-Ziel-Liste-Test"
+_MOVE_TARGET_CALENDAR = "MCP-Move-Target-Test"
+_MOVE_TARGET_LIST = "MCP-Move-Target-List-Test"
 
 
 @pytest.fixture(scope="session")
@@ -379,13 +379,13 @@ def test_move_event_keeps_uid_and_every_property(live_service, test_calendar, mo
     uid = live_service.create_event(
         test_calendar,
         event_mapping.EventFields(
-            titel="Verschiebe-Test",
+            title="Move-Test",
             start="2026-09-10T09:00:00",
-            ende="2026-09-10T10:00:00",
-            ort="Quelle",
+            end="2026-09-10T10:00:00",
+            location="Source",
             tags=["MCP-Test"],
-            wiederholung="FREQ=WEEKLY;COUNT=3",
-            erinnerungen=["-PT15M"],
+            recurrence="FREQ=WEEKLY;COUNT=3",
+            reminders=["-PT15M"],
         ),
     )
     before = live_service.get_event(test_calendar, uid)
@@ -393,14 +393,14 @@ def test_move_event_keeps_uid_and_every_property(live_service, test_calendar, mo
     try:
         result = live_service.move_event(test_calendar, uid, move_target_calendar)
         assert result["uid"] == uid
-        assert result["von"] == test_calendar
-        assert result["nach"] == move_target_calendar
-        assert result["methode"] in ("MOVE", "kopiert")
+        assert result["from"] == test_calendar
+        assert result["to"] == move_target_calendar
+        assert result["method"] in ("MOVE", "copied")
 
         after = live_service.get_event(move_target_calendar, uid)
-        for field in ("uid", "titel", "start", "ende", "ort", "tags", "wiederholung"):
+        for field in ("uid", "title", "start", "end", "location", "tags", "recurrence"):
             assert after[field] == before[field], field
-        assert after["erinnerungen"] == before["erinnerungen"]
+        assert after["reminders"] == before["reminders"]
 
         with pytest.raises(EventNotFoundError):
             live_service.get_event(test_calendar, uid)
@@ -416,11 +416,11 @@ def test_move_task_keeps_uid_and_fields(live_service, test_list_name, move_targe
     uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            titel="Verschiebe-Test-Aufgabe",
-            faellig_datum="2026-09-11",
-            prioritaet="hoch",
+            title="Move-Test-Task",
+            due_date="2026-09-11",
+            priority="high",
             tags=["MCP-Test"],
-            notizen="Vom Integrationstest erstellt; kann weg.",
+            notes="Created by the integration test; safe to delete.",
         ),
     )
     before = live_service.get_task(test_list_name, uid)
@@ -428,10 +428,10 @@ def test_move_task_keeps_uid_and_fields(live_service, test_list_name, move_targe
     try:
         result = live_service.move_task(test_list_name, uid, move_target_list)
         assert result["uid"] == uid
-        assert result["nach"] == move_target_list
+        assert result["to"] == move_target_list
 
         after = live_service.get_task(move_target_list, uid)
-        for field in ("uid", "titel", "faellig_datum", "prioritaet", "tags", "notizen"):
+        for field in ("uid", "title", "due_date", "priority", "tags", "notes"):
             assert after[field] == before[field], field
     finally:
         for list_name in (move_target_list, test_list_name):
@@ -448,28 +448,28 @@ def test_move_task_reports_the_subtask_link_it_orphans(
     actually stores: that a moved subtask keeps its RELATED-TO, and that the
     parent left behind is still listed under the source list."""
     parent_uid = live_service.create_task(
-        test_list_name, mapping.TaskFields(titel="Verwaist-Test-Elternaufgabe")
+        test_list_name, mapping.TaskFields(title="Orphaned-Test-Elternaufgabe")
     )
     child_uid = live_service.create_task(
         test_list_name,
-        mapping.TaskFields(titel="Verwaist-Test-Unteraufgabe", uebergeordnete_aufgabe=parent_uid),
+        mapping.TaskFields(title="Orphaned-Test-Subtask", parent_task=parent_uid),
     )
 
     try:
         result = live_service.move_task(test_list_name, child_uid, move_target_list)
 
-        assert result["verwaiste_verknuepfungen"] == [
+        assert result["orphaned_subtask_links"] == [
             {
                 "uid": child_uid,
-                "titel": "Verwaist-Test-Unteraufgabe",
-                "liste": move_target_list,
-                "fehlende_uebergeordnete_uid": parent_uid,
+                "title": "Orphaned-Test-Subtask",
+                "list": move_target_list,
+                "fehlende_parent_uid": parent_uid,
             }
         ]
         # The link itself survives the move untouched - that is exactly why it
         # needs reporting rather than fixing.
         moved = live_service.get_task(move_target_list, child_uid)
-        assert moved["uebergeordnete_uid"] == parent_uid
+        assert moved["parent_uid"] == parent_uid
     finally:
         for list_name, uid in (
             (move_target_list, child_uid),
@@ -482,16 +482,16 @@ def test_move_task_reports_the_subtask_link_it_orphans(
                 pass
 
 
-def test_create_task_with_status_erledigt_reads_back_as_completed(live_service, test_list_name):
+def test_create_task_with_status_completed_reads_back_as_completed(live_service, test_list_name):
     """One call instead of create_task + complete_task, verified end to end."""
     uid = live_service.create_task(
         test_list_name,
-        mapping.TaskFields(titel="Direkt-erledigt-Test", status="erledigt"),
+        mapping.TaskFields(title="Direkt-completed-Test", status="completed"),
     )
     try:
         task = live_service.get_task(test_list_name, uid)
-        assert task["status"] == "erledigt"
-        assert task["fortschritt_prozent"] == 100
+        assert task["status"] == "completed"
+        assert task["progress_percent"] == 100
     finally:
         try:
             live_service.delete_task(test_list_name, uid)
@@ -503,37 +503,37 @@ def test_move_task_reparents_in_the_target_list(live_service, test_list_name, mo
     """The whole point of the hierarchy shortcut: one call, and the parent is the new one."""
     parent_uid = live_service.create_task(
         move_target_list,
-        mapping.TaskFields(titel="Neue Eltern-Aufgabe", notizen="Integrationstest; kann weg."),
+        mapping.TaskFields(title="New parent task", notes="Integration test; safe to delete."),
     )
     child_uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            titel="Verschiebe-und-Umhaenge-Test",
-            uebergeordnete_aufgabe="alter-parent-uid",
-            notizen="Integrationstest; kann weg.",
+            title="Move-and-Reparent-Test",
+            parent_task="old-parent-uid",
+            notes="Integration test; safe to delete.",
         ),
     )
 
     try:
         result = live_service.move_task(test_list_name, child_uid, move_target_list, parent_uid)
-        assert result["nach"] == move_target_list
-        assert result["hierarchie"] == "gesetzt"
+        assert result["to"] == move_target_list
+        assert result["hierarchy"] == "set"
         # The re-parent repaired the very link this move would have orphaned,
         # and it ran before the scan, so there is nothing left to warn about.
-        assert result["verwaiste_verknuepfungen"] == []
+        assert result["orphaned_subtask_links"] == []
 
         moved = live_service.get_task(move_target_list, child_uid)
-        assert moved["uebergeordnete_uid"] == parent_uid
+        assert moved["parent_uid"] == parent_uid
 
         # ... and the same call can detach it again.
         detached = live_service.move_task(
             move_target_list,
             child_uid,
             move_target_list,
-            clear=("uebergeordnete_aufgabe",),
+            clear=("parent_task",),
         )
-        assert detached["hierarchie"] == "geleert"
-        assert live_service.get_task(move_target_list, child_uid)["uebergeordnete_uid"] is None
+        assert detached["hierarchy"] == "cleared"
+        assert live_service.get_task(move_target_list, child_uid)["parent_uid"] is None
     finally:
         for list_name in (move_target_list, test_list_name):
             for uid in (child_uid, parent_uid):
@@ -550,23 +550,23 @@ def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_na
     tag = f"MCP-Tag-Test-{_RUN_SUFFIX}"
     event_uid = live_service.create_event(
         test_calendar,
-        event_mapping.EventFields(titel="Tag-Test-Termin", start="2026-09-12", tags=[tag]),
+        event_mapping.EventFields(title="Tag-Test-Event", start="2026-09-12", tags=[tag]),
     )
     task_uid = live_service.create_task(
-        test_list_name, mapping.TaskFields(titel="Tag-Test-Aufgabe", tags=[tag])
+        test_list_name, mapping.TaskFields(title="Tag-Test-Task", tags=[tag])
     )
 
     try:
         tags = live_service.list_tags(calendar_names=[test_calendar], list_names=[test_list_name])
         entry = next(e for e in tags if e["tag"] == tag)
-        assert entry["anzahl"] == 2
+        assert entry["count"] == 2
 
         # Completed tasks keep counting - that is why include_completed is set.
         live_service.complete_task(test_list_name, task_uid)
         tags_after = live_service.list_tags(
             calendar_names=[test_calendar], list_names=[test_list_name]
         )
-        assert next(e for e in tags_after if e["tag"] == tag)["anzahl"] == 2
+        assert next(e for e in tags_after if e["tag"] == tag)["count"] == 2
     finally:
         try:
             live_service.delete_event(test_calendar, event_uid)
@@ -586,9 +586,9 @@ def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
         live_service.create_event(
             test_calendar,
             event_mapping.EventFields(
-                titel=f"Batch-Test {index}",
+                title=f"Batch-Test {index}",
                 start=f"2026-09-1{index}T08:00:00",
-                ende=f"2026-09-1{index}T09:00:00",
+                end=f"2026-09-1{index}T09:00:00",
             ),
         )
         for index in (3, 4, 5)
@@ -597,21 +597,21 @@ def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
     try:
         result = live_service.update_events(
             test_calendar,
-            [*uids, "gibt-es-nicht-mcp-test"],
-            event_mapping.EventFields(ort="Batch-Ort", tags=["MCP-Test"]),
+            [*uids, "does-not-exist-mcp-test"],
+            event_mapping.EventFields(location="Batch-Location", tags=["MCP-Test"]),
         )
-        assert result["erfolgreich"] == 3
-        assert result["fehlgeschlagen"] == 1
-        assert result["ergebnisse"][-1]["status"] == "fehler"
+        assert result["succeeded"] == 3
+        assert result["failed"] == 1
+        assert result["results"][-1]["status"] == "error"
 
         for uid in uids:
             fetched = live_service.get_event(test_calendar, uid)
-            assert fetched["ort"] == "Batch-Ort"
+            assert fetched["location"] == "Batch-Location"
             assert fetched["tags"] == ["MCP-Test"]
     finally:
         deleted = live_service.delete_events(test_calendar, uids)
 
-    assert deleted["erfolgreich"] == 3
+    assert deleted["succeeded"] == 3
     for uid in uids:
         with pytest.raises(EventNotFoundError):
             live_service.get_event(test_calendar, uid)
@@ -656,113 +656,115 @@ def test_notes_full_lifecycle() -> None:
         initial_content = "Initial content for live notes integration test."
 
         created = await service.create_note(
-            NoteFields(titel=title, kategorie=category, inhalt=initial_content)
+            NoteFields(title=title, category=category, content=initial_content)
         )
-        notiz_id: int = created["id"]
+        note_id: int = created["id"]
 
         try:
             # 1. create_note -> get_note: content comes back exactly as written.
-            fetched = await service.get_note(notiz_id)
-            assert fetched["id"] == notiz_id
-            assert fetched["titel"] == title
-            assert fetched["kategorie"] == category
-            assert fetched["inhalt"] == initial_content
+            fetched = await service.get_note(note_id)
+            assert fetched["id"] == note_id
+            assert fetched["title"] == title
+            assert fetched["category"] == category
+            assert fetched["content"] == initial_content
 
-            # 2. update_note(inhalt=...) replaces the content wholesale. The
+            # 2. update_note(content=...) replaces the content wholesale. The
             # payload is deliberately awkward - several lines, umlauts, an
             # emoji, a fenced code block, trailing spaces, a trailing newline -
             # since that is what a rules note actually contains.
             demanding_payload = (
-                "Erste Zeile mit Umlauten: ÄÖÜäöüß.\n"
-                "Zweite Zeile mit Emoji: 🚀 und 📝.\n"
-                "Dritte Zeile mit Leerzeichen am Ende:   \n"
+                "First line with umlauts: ÄÖÜäöüß.\n"
+                "Second line with emoji: 🚀 and 📝.\n"
+                "Third line with trailing spaces:   \n"
                 "```python\n"
                 "def hello_world():\n"
-                '    print("Hallo Welt!")\n'
+                '    print("Hello world!")\n'
                 "```\n"
             )
-            updated = await service.update_note(notiz_id, NoteFields(inhalt=demanding_payload))
-            assert updated["inhalt"] == demanding_payload
-            assert (await service.get_note(notiz_id))["inhalt"] == demanding_payload
+            updated = await service.update_note(note_id, NoteFields(content=demanding_payload))
+            assert updated["content"] == demanding_payload
+            assert (await service.get_note(note_id))["content"] == demanding_payload
 
             # 2b. A note the size of a real rules note must survive a full
             # replacement untruncated - the whole point of this suite is that
             # the deployment's rules live in a note of roughly this size.
             large_payload = "\n".join(
-                f"{index:04d} Regelzeile mit Umlauten äöü und etwas Fülltext zur Länge."
+                f"{index:04d} Rule line with umlauts äöü and some filler text for length."
                 for index in range(300)
             )
             assert len(large_payload) > 12_000
-            await service.update_note(notiz_id, NoteFields(inhalt=large_payload))
-            assert (await service.get_note(notiz_id))["inhalt"] == large_payload
+            await service.update_note(note_id, NoteFields(content=large_payload))
+            assert (await service.get_note(note_id))["content"] == large_payload
 
             # Restore the smaller payload so the append assertions below stay
             # readable.
-            await service.update_note(notiz_id, NoteFields(inhalt=demanding_payload))
+            await service.update_note(note_id, NoteFields(content=demanding_payload))
 
             # 3. Renaming must not touch the content (the data-loss case).
             # Keeps the "-test" suffix: a stray leftover has to stay
             # identifiable as test data by its name alone.
             renamed = "mcp-notes-renamed-test"
-            await service.update_note(notiz_id, NoteFields(titel=renamed))
-            after_rename = await service.get_note(notiz_id)
-            assert after_rename["titel"] == renamed
-            assert after_rename["inhalt"] == demanding_payload
+            await service.update_note(note_id, NoteFields(title=renamed))
+            after_rename = await service.get_note(note_id)
+            assert after_rename["title"] == renamed
+            assert after_rename["content"] == demanding_payload
 
             # 4. Appending twice keeps everything that was there before.
-            first_block = "Erster Anhang block-test"
-            second_block = "Zweiter Anhang block-test"
-            await service.append_note(notiz_id, first_block)
-            await service.append_note(notiz_id, second_block)
-            appended = await service.get_note(notiz_id)
-            assert appended["inhalt"] == (f"{demanding_payload}\n\n{first_block}\n\n{second_block}")
+            first_block = "First attachment block-test"
+            second_block = "Second attachment block-test"
+            await service.append_note(note_id, first_block)
+            await service.append_note(note_id, second_block)
+            appended = await service.get_note(note_id)
+            assert appended["content"] == (
+                f"{demanding_payload}\n\n{first_block}\n\n{second_block}"
+            )
 
             # 5. Listing finds it, and the category filter returns that
             # category only.
-            assert any(note["id"] == notiz_id for note in await service.list_notes())
+            assert any(note["id"] == note_id for note in await service.list_notes())
             in_category = await service.list_notes(category=category)
-            assert any(note["id"] == notiz_id for note in in_category)
-            assert all(note["kategorie"] == category for note in in_category)
+            assert any(note["id"] == note_id for note in in_category)
+            assert all(note["category"] == category for note in in_category)
 
             # 6. Search matches content and title. Upper-case on purpose: the
             # title is lower-case, so a hit proves the search folds case rather
             # than matching by accident.
             assert any(
-                note["id"] == notiz_id for note in await service.search_notes("erster anhang")
+                note["id"] == note_id for note in await service.search_notes("first attachment")
             )
             assert any(
-                note["id"] == notiz_id for note in await service.search_notes("MCP-NOTES-RENAMED")
+                note["id"] == note_id for note in await service.search_notes("MCP-NOTES-RENAMED")
             )
             assert not any(
-                note["id"] == notiz_id
+                note["id"] == note_id
                 for note in await service.search_notes("unrelated-random-string-mcp-test-999")
             )
 
             # 7. Delete the note using delete_note, then verify it is really gone.
-            await service.delete_note(notiz_id)
-            with pytest.raises(NotizNotFoundError):
-                await service.get_note(notiz_id)
+            await service.delete_note(note_id)
+            with pytest.raises(NoteNotFoundError):
+                await service.get_note(note_id)
         finally:
             # Unconditional cleanup: attempt deletion if step 7 was not reached
             # due to an assertion failure earlier in the try block.
-            # We swallow NotizNotFoundError here because if step 7 succeeded,
+            # We swallow NoteNotFoundError here because if step 7 succeeded,
             # the note is already gone, and cleanup must not blow up the test.
             try:
-                await service.delete_note(notiz_id)
-            except NotizNotFoundError:
+                await service.delete_note(note_id)
+            except NoteNotFoundError:
                 pass
             await service.aclose()
 
     run_async(scenario())
 
 
-def test_get_nonexistent_note_raises_notiz_not_found() -> None:
-    """A missing note must surface as NotizNotFoundError, not a raw HTTP error."""
+def test_get_nonexistent_note_raises_note_not_found() -> None:
+    """A missing note must surface as NoteNotFoundError, not a raw HTTP error."""
 
     async def scenario() -> None:
         service = _live_notes_service()
         try:
-            with pytest.raises(NotizNotFoundError):
+            with pytest.raises(NoteNotFoundError):
                 await service.get_note(999999999)
         finally:
             await service.aclose()

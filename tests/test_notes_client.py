@@ -17,8 +17,8 @@ import pytest
 from nextcloud_task_mcp.errors import (
     AuthenticationFailedError,
     ConnectionFailedError,
-    InvalidNotizDataError,
-    NotizNotFoundError,
+    InvalidNoteDataError,
+    NoteNotFoundError,
     TaskMcpError,
 )
 from nextcloud_task_mcp.notes_client import NotesService
@@ -99,11 +99,11 @@ def test_list_notes_excludes_content_and_parses_summaries():
     assert result == [
         {
             "id": 1,
-            "titel": "Foo",
-            "kategorie": None,
-            "favorit": False,
+            "title": "Foo",
+            "category": None,
+            "favorite": False,
             # Output timestamps carry the server's default timezone.
-            "geaendert": "1970-01-01T01:00:00+01:00",
+            "modified": "1970-01-01T01:00:00+01:00",
         }
     ]
     assert captured[0].url.params["exclude"] == "content"
@@ -118,9 +118,9 @@ def test_list_notes_passes_category_filter():
         return _json_response(200, [])
 
     service = _service(handler)
-    _run(service.list_notes(category="Arbeit"))
+    _run(service.list_notes(category="Work"))
 
-    assert captured[0].url.params["category"] == "Arbeit"
+    assert captured[0].url.params["category"] == "Work"
 
 
 # --- get_note ---
@@ -134,7 +134,7 @@ def test_get_note_parses_full_note():
             {
                 "id": 42,
                 "title": "Foo",
-                "category": "Arbeit",
+                "category": "Work",
                 "favorite": True,
                 "modified": 0,
                 "content": "Body",
@@ -146,8 +146,8 @@ def test_get_note_parses_full_note():
     result = _run(service.get_note(42))
 
     assert result["id"] == 42
-    assert result["inhalt"] == "Body"
-    assert result["schreibgeschuetzt"] is False
+    assert result["content"] == "Body"
+    assert result["read_only"] is False
 
 
 def test_get_note_not_found_raises():
@@ -155,7 +155,7 @@ def test_get_note_not_found_raises():
         return httpx.Response(404)
 
     service = _service(handler)
-    with pytest.raises(NotizNotFoundError):
+    with pytest.raises(NoteNotFoundError):
         _run(service.get_note(999))
 
 
@@ -181,7 +181,7 @@ def test_delete_note_not_found_raises():
         return httpx.Response(404)
 
     service = _service(handler)
-    with pytest.raises(NotizNotFoundError):
+    with pytest.raises(NoteNotFoundError):
         _run(service.delete_note(999))
 
 
@@ -197,9 +197,9 @@ def test_delete_note_401_raises_authentication_failed_error():
 # --- create_note ---
 
 
-def test_create_note_requires_titel():
+def test_create_note_requires_title():
     service = _service(lambda request: _json_response(200, {}))
-    with pytest.raises(InvalidNotizDataError, match="titel"):
+    with pytest.raises(InvalidNoteDataError, match="title"):
         _run(service.create_note(NoteFields()))
 
 
@@ -221,7 +221,7 @@ def test_create_note_posts_request_body():
         )
 
     service = _service(handler)
-    _run(service.create_note(NoteFields(titel="Foo")))
+    _run(service.create_note(NoteFields(title="Foo")))
 
     assert captured[0].method == "POST"
     assert json.loads(captured[0].content) == {"title": "Foo"}
@@ -232,7 +232,7 @@ def test_create_note_posts_request_body():
 
 def test_update_note_requires_at_least_one_field():
     service = _service(lambda request: _json_response(200, {}))
-    with pytest.raises(InvalidNotizDataError):
+    with pytest.raises(InvalidNoteDataError):
         _run(service.update_note(1, NoteFields()))
 
 
@@ -254,7 +254,7 @@ def test_update_note_sends_partial_body():
         )
 
     service = _service(handler)
-    _run(service.update_note(1, NoteFields(titel="New")))
+    _run(service.update_note(1, NoteFields(title="New")))
 
     assert captured[0].method == "PUT"
     assert captured[0].url.path.endswith("/notes/1")
@@ -278,7 +278,7 @@ def test_append_note_reads_then_writes_with_separator():
                     "category": "",
                     "favorite": False,
                     "modified": 0,
-                    "content": "Alt",
+                    "content": "Old",
                 },
             )
         return _json_response(
@@ -289,16 +289,16 @@ def test_append_note_reads_then_writes_with_separator():
                 "category": "",
                 "favorite": False,
                 "modified": 0,
-                "content": "Alt\n\nNeu",
+                "content": "Old\n\nNew",
             },
         )
 
     service = _service(handler)
-    result = _run(service.append_note(1, "Neu"))
+    result = _run(service.append_note(1, "New"))
 
     put_call = next(c for c in calls if c.method == "PUT")
-    assert json.loads(put_call.content) == {"content": "Alt\n\nNeu"}
-    assert result["inhalt"] == "Alt\n\nNeu"
+    assert json.loads(put_call.content) == {"content": "Old\n\nNew"}
+    assert result["content"] == "Old\n\nNew"
 
 
 def test_append_note_to_empty_note_has_no_leading_separator():
@@ -326,15 +326,15 @@ def test_append_note_to_empty_note_has_no_leading_separator():
                 "category": "",
                 "favorite": False,
                 "modified": 0,
-                "content": "Neu",
+                "content": "New_text",
             },
         )
 
     service = _service(handler)
-    _run(service.append_note(1, "Neu"))
+    _run(service.append_note(1, "New"))
 
     put_call = next(c for c in calls if c.method == "PUT")
-    assert json.loads(put_call.content) == {"content": "Neu"}
+    assert json.loads(put_call.content) == {"content": "New"}
 
 
 # --- replace_in_note ---
@@ -357,33 +357,33 @@ def test_replace_in_note_replaces_single_occurrence():
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         if request.method == "GET":
-            return _json_response(200, _note_body("Anfang\n\nAlter Absatz.\n\nEnde"))
-        return _json_response(200, _note_body("Anfang\n\nNeuer Absatz.\n\nEnde"))
+            return _json_response(200, _note_body("Beginning\n\nOld paragraph.\n\nEnd"))
+        return _json_response(200, _note_body("Beginning\n\nNew paragraph.\n\nEnd"))
 
     service = _service(handler)
-    result = _run(service.replace_in_note(1, "Alter Absatz.", "Neuer Absatz."))
+    result = _run(service.replace_in_note(1, "Old paragraph.", "New paragraph."))
 
     put_call = next(c for c in calls if c.method == "PUT")
-    assert json.loads(put_call.content) == {"content": "Anfang\n\nNeuer Absatz.\n\nEnde"}
-    assert result["inhalt"] == "Anfang\n\nNeuer Absatz.\n\nEnde"
+    assert json.loads(put_call.content) == {"content": "Beginning\n\nNew paragraph.\n\nEnd"}
+    assert result["content"] == "Beginning\n\nNew paragraph.\n\nEnd"
 
 
 def test_replace_in_note_handles_multiline_markdown_passages():
     calls: list[httpx.Request] = []
-    old = "- [Link](https://a.example)\n- **fett** und *kursiv*"
-    new = "- [Link](https://b.example)\n- nur noch Text"
+    old = "- [Link](https://a.example)\n- **bold** and *italic*"
+    new = "- [Link](https://b.example)\n- just text now"
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
         if request.method == "GET":
-            return _json_response(200, _note_body(f"Kopf\n\n{old}\n\nFuss"))
-        return _json_response(200, _note_body("egal"))
+            return _json_response(200, _note_body(f"Header\n\n{old}\n\nFooter"))
+        return _json_response(200, _note_body("whatever"))
 
     service = _service(handler)
     _run(service.replace_in_note(1, old, new))
 
     put_call = next(c for c in calls if c.method == "PUT")
-    assert json.loads(put_call.content) == {"content": f"Kopf\n\n{new}\n\nFuss"}
+    assert json.loads(put_call.content) == {"content": f"Header\n\n{new}\n\nFooter"}
 
 
 def test_replace_in_note_rejects_zero_matches_without_writing():
@@ -391,11 +391,11 @@ def test_replace_in_note_rejects_zero_matches_without_writing():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return _json_response(200, _note_body("Inhalt"))
+        return _json_response(200, _note_body("Content"))
 
     service = _service(handler)
-    with pytest.raises(InvalidNotizDataError, match="not found"):
-        _run(service.replace_in_note(1, "fehlt", "neu"))
+    with pytest.raises(InvalidNoteDataError, match="not found"):
+        _run(service.replace_in_note(1, "missing", "new_text"))
     assert all(c.method == "GET" for c in calls)
 
 
@@ -404,15 +404,15 @@ def test_replace_in_note_rejects_multiple_matches_without_writing():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return _json_response(200, _note_body("x doppelt y doppelt z"))
+        return _json_response(200, _note_body("x double y double z"))
 
     service = _service(handler)
-    with pytest.raises(InvalidNotizDataError, match="occurs 2 times"):
-        _run(service.replace_in_note(1, "doppelt", "einfach"))
+    with pytest.raises(InvalidNoteDataError, match="occurs 2 times"):
+        _run(service.replace_in_note(1, "double", "single"))
     assert all(c.method == "GET" for c in calls)
 
 
-def test_replace_in_note_rejects_empty_alt_without_any_request():
+def test_replace_in_note_rejects_empty_old_text_without_any_request():
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -420,8 +420,8 @@ def test_replace_in_note_rejects_empty_alt_without_any_request():
         return _json_response(200, _note_body(""))
 
     service = _service(handler)
-    with pytest.raises(InvalidNotizDataError, match="alt"):
-        _run(service.replace_in_note(1, "", "neu"))
+    with pytest.raises(InvalidNoteDataError, match="old_text"):
+        _run(service.replace_in_note(1, "", "new_text"))
     assert calls == []
 
 
@@ -449,10 +449,10 @@ def test_replace_note_section_missing_heading_does_not_write():
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        return _json_response(200, _note_body("Nur Text, keine Ueberschrift"))
+        return _json_response(200, _note_body("Just text, no heading"))
 
     service = _service(handler)
-    with pytest.raises(InvalidNotizDataError, match="No heading matching"):
+    with pytest.raises(InvalidNoteDataError, match="No heading matching"):
         _run(service.replace_note_section(1, "## A", "## A\n\nneu"))
     assert all(c.method == "GET" for c in calls)
 
@@ -467,7 +467,7 @@ def test_search_notes_filters_by_title_and_content_case_insensitively():
             [
                 {
                     "id": 1,
-                    "title": "Projekt X",
+                    "title": "Project X",
                     "category": "",
                     "favorite": False,
                     "modified": 0,
@@ -475,11 +475,11 @@ def test_search_notes_filters_by_title_and_content_case_insensitively():
                 },
                 {
                     "id": 2,
-                    "title": "Anderes",
+                    "title": "Other",
                     "category": "",
                     "favorite": False,
                     "modified": 0,
-                    "content": "erwähnt projekt x hier",
+                    "content": "mentions project x here",
                 },
                 {
                     "id": 3,
@@ -493,10 +493,10 @@ def test_search_notes_filters_by_title_and_content_case_insensitively():
         )
 
     service = _service(handler)
-    result = _run(service.search_notes("projekt x"))
+    result = _run(service.search_notes("project x"))
 
     assert {note["id"] for note in result} == {1, 2}
-    assert "inhalt" not in result[0]
+    assert "content" not in result[0]
 
 
 def test_search_notes_passes_category_filter():
@@ -507,9 +507,9 @@ def test_search_notes_passes_category_filter():
         return _json_response(200, [])
 
     service = _service(handler)
-    _run(service.search_notes("x", kategorie="Arbeit"))
+    _run(service.search_notes("x", category="Work"))
 
-    assert captured[0].url.params["category"] == "Arbeit"
+    assert captured[0].url.params["category"] == "Work"
     assert "exclude" not in captured[0].url.params
 
 
@@ -522,9 +522,9 @@ def test_401_becomes_authentication_failed_error():
         _run(service.list_notes())
 
 
-def test_400_becomes_invalid_notiz_data_error():
+def test_400_becomes_invalid_note_data_error():
     service = _service(lambda request: httpx.Response(400))
-    with pytest.raises(InvalidNotizDataError):
+    with pytest.raises(InvalidNoteDataError):
         _run(service.list_notes())
 
 

@@ -51,34 +51,34 @@ def test_apply_and_parse_round_trip():
     event = _new_event()
     _apply(
         event,
-        titel="Team-Meeting",
+        title="Team meeting",
         start="2026-07-20T14:00:00",
-        ende="2026-07-20T15:30:00",
-        ort="Konferenzraum",
-        beschreibung="Sprint-Planung",
-        tags=["Arbeit", "Wichtig"],
-        status="bestätigt",
-        sichtbarkeit="privat",
+        end="2026-07-20T15:30:00",
+        location="Conference room",
+        description="Sprint planning",
+        tags=["Work", "Important"],
+        status="confirmed",
+        visibility="private",
         url="https://example.com/meeting",
     )
     parsed = event_mapping.parse_vevent(event)
 
     assert parsed["uid"] == "event-1"
-    assert parsed["titel"] == "Team-Meeting"
+    assert parsed["title"] == "Team meeting"
     # Naive datetimes are interpreted in default timezone (Europe/Berlin, +02:00 in July).
     assert parsed["start"] == "2026-07-20T14:00:00+02:00"
-    assert parsed["ende"] == "2026-07-20T15:30:00+02:00"
-    assert parsed["ganztaegig"] is False
-    assert parsed["ort"] == "Konferenzraum"
-    assert parsed["beschreibung"] == "Sprint-Planung"
-    assert set(parsed["tags"]) == {"Arbeit", "Wichtig"}
-    assert parsed["erinnerungen"] == []
-    assert parsed["status"] == "bestätigt"
-    assert parsed["sichtbarkeit"] == "privat"
+    assert parsed["end"] == "2026-07-20T15:30:00+02:00"
+    assert parsed["all_day"] is False
+    assert parsed["location"] == "Conference room"
+    assert parsed["description"] == "Sprint planning"
+    assert set(parsed["tags"]) == {"Work", "Important"}
+    assert parsed["reminders"] == []
+    assert parsed["status"] == "confirmed"
+    assert parsed["visibility"] == "private"
     assert parsed["url"] == "https://example.com/meeting"
-    assert parsed["wiederholung"] is None
-    assert parsed["ausnahme_daten"] == []
-    assert parsed["verknuepfte_aufgaben"] == []
+    assert parsed["recurrence"] is None
+    assert parsed["exception_dates"] == []
+    assert parsed["linked_tasks"] == []
 
 
 def test_explicit_offset_start_is_stored_and_round_trips_in_utc():
@@ -92,7 +92,7 @@ def test_explicit_offset_start_is_stored_and_round_trips_in_utc():
 
     parsed = event_mapping.parse_vevent(event)
     assert parsed["start"] == "2026-07-30T07:50:00+02:00"
-    assert parsed["wiederholung_von"] is None
+    assert parsed["recurrence_id"] is None
 
 
 def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
@@ -101,8 +101,8 @@ def test_named_timezone_start_keeps_iana_zone_instead_of_utc():
     _apply(
         event,
         start="2026-07-20T09:00:00 Europe/Berlin",
-        ende="2026-07-20T10:00:00 Europe/Berlin",
-        wiederholung="FREQ=DAILY",
+        end="2026-07-20T10:00:00 Europe/Berlin",
+        recurrence="FREQ=DAILY",
     )
 
     dtstart = _dt(event.get("dtstart"))
@@ -129,14 +129,14 @@ def test_get_event_update_event_round_trip_keeps_the_zone_anchor():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        ende="2026-07-20T09:15:00 Europe/Berlin",
-        wiederholung="FREQ=WEEKLY",
+        end="2026-07-20T09:15:00 Europe/Berlin",
+        recurrence="FREQ=WEEKLY",
     )
     parsed = event_mapping.parse_vevent(event)
 
-    _apply(event, start=parsed["start"], ende=parsed["ende"])
+    _apply(event, start=parsed["start"], end=parsed["end"])
 
     dtstart = _dt(event.get("dtstart"))
     dtend = _dt(event.get("dtend"))
@@ -160,13 +160,13 @@ def test_updating_only_the_end_keeps_the_events_own_zone():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        ende="2026-07-20T10:00:00 Europe/Berlin",
-        wiederholung="FREQ=WEEKLY",
+        end="2026-07-20T10:00:00 Europe/Berlin",
+        recurrence="FREQ=WEEKLY",
     )
 
-    _apply(event, ende="2026-07-20T10:30:00+02:00")
+    _apply(event, end="2026-07-20T10:30:00+02:00")
 
     dtend = _dt(event.get("dtend"))
     assert isinstance(dtend, datetime)
@@ -188,9 +188,9 @@ def test_naive_input_still_means_the_servers_default_zone_not_the_events():
     pinned finding 2.5's failure mode as if it were the intended behaviour.
     """
     event = _new_event()
-    _apply(event, titel="Call", start="2026-07-20T09:00:00 Asia/Tokyo")
+    _apply(event, title="Call", start="2026-07-20T09:00:00 Asia/Tokyo")
 
-    _apply(event, ende="2026-07-20T09:00:00")  # 09:00 Berlin = 16:00 Tokyo
+    _apply(event, end="2026-07-20T09:00:00")  # 09:00 Berlin = 16:00 Tokyo
 
     dtend = _dt(event.get("dtend"))
     assert isinstance(dtend, datetime)
@@ -203,15 +203,15 @@ def test_naive_input_still_means_the_servers_default_zone_not_the_events():
 def test_both_ends_share_one_anchor_on_a_utc_event():
     """A UTC-anchored event takes a UTC end, whatever zone the input resolved in.
 
-    `create_event(start="...Z")` then `update_event(ende="17:00")` used to
+    `create_event(start="...Z")` then `update_event(end="17:00")` used to
     write `DTSTART:...Z` next to `DTEND;TZID=Europe/Berlin:...`: the same
     instant apart today, an hour different after the next Berlin transition,
     and nothing in the write path notices - finding 2.5 exactly.
     """
     event = _new_event()
-    _apply(event, titel="Standup", start="2026-07-20T14:00:00Z", wiederholung="FREQ=WEEKLY")
+    _apply(event, title="Standup", start="2026-07-20T14:00:00Z", recurrence="FREQ=WEEKLY")
 
-    _apply(event, ende="2026-07-20T17:00:00")  # 17:00 Berlin = 15:00 UTC
+    _apply(event, end="2026-07-20T17:00:00")  # 17:00 Berlin = 15:00 UTC
 
     ical_text = event.to_ical().decode()
     assert "DTSTART:20260720T140000Z" in ical_text
@@ -228,13 +228,13 @@ def test_an_explicitly_named_zone_re_anchors_the_event():
     event = _new_event()
     _apply(
         event,
-        titel="Call",
+        title="Call",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        ende="2026-07-20T10:00:00 Europe/Berlin",
-        wiederholung="FREQ=WEEKLY",
+        end="2026-07-20T10:00:00 Europe/Berlin",
+        recurrence="FREQ=WEEKLY",
     )
 
-    _apply(event, start="2026-07-21T09:00:00 Asia/Tokyo", ende="2026-07-21T10:00:00 Asia/Tokyo")
+    _apply(event, start="2026-07-21T09:00:00 Asia/Tokyo", end="2026-07-21T10:00:00 Asia/Tokyo")
 
     ical_text = event.to_ical().decode()
     assert "DTSTART;TZID=Asia/Tokyo:20260721T090000" in ical_text
@@ -243,57 +243,57 @@ def test_an_explicitly_named_zone_re_anchors_the_event():
 
 def test_z_suffix_datetime_input_formatted_in_default_timezone():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00Z", ende="2026-07-20T15:00:00Z")
+    _apply(event, title="T", start="2026-07-20T14:00:00Z", end="2026-07-20T15:00:00Z")
     parsed = event_mapping.parse_vevent(event)
     assert parsed["start"] == "2026-07-20T16:00:00+02:00"
-    assert parsed["ende"] == "2026-07-20T17:00:00+02:00"
+    assert parsed["end"] == "2026-07-20T17:00:00+02:00"
 
 
-# --- all-day handling: `ende` is the inclusive last day, DTEND is exclusive ---
+# --- all-day handling: `end` is the inclusive last day, DTEND is exclusive ---
 
 
 def test_all_day_single_day_round_trip():
     event = _new_event()
-    _apply(event, titel="Feiertag", start="2026-08-01", ende="2026-08-01")
+    _apply(event, title="Holiday", start="2026-08-01", end="2026-08-01")
     assert _dt(event["dtend"]) == date(2026, 8, 2)  # stored exclusive
     parsed = event_mapping.parse_vevent(event)
     assert parsed["start"] == "2026-08-01"
-    assert parsed["ende"] == "2026-08-01"  # returned inclusive
-    assert parsed["ganztaegig"] is True
+    assert parsed["end"] == "2026-08-01"  # returned inclusive
+    assert parsed["all_day"] is True
 
 
 def test_all_day_multi_day_round_trip():
     event = _new_event()
-    _apply(event, titel="Urlaub", start="2026-08-01", ende="2026-08-03")
+    _apply(event, title="Vacation", start="2026-08-01", end="2026-08-03")
     assert _dt(event["dtend"]) == date(2026, 8, 4)
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["ende"] == "2026-08-03"
+    assert parsed["end"] == "2026-08-03"
 
 
 def test_mixed_date_and_datetime_rejected():
     event = _new_event()
     with pytest.raises(InvalidEventDataError, match="both"):
-        _apply(event, titel="T", start="2026-08-01", ende="2026-08-01T10:00:00")
+        _apply(event, title="T", start="2026-08-01", end="2026-08-01T10:00:00")
 
 
-def test_update_only_ende_checked_against_existing_start():
+def test_update_only_end_checked_against_existing_start():
     """Consistency is validated against the final component state, not the call args."""
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    _apply(event, title="T", start="2026-07-20T14:00:00")
     with pytest.raises(InvalidEventDataError, match="both"):
-        _apply(event, ende="2026-07-21")  # date-only end onto a datetime start
+        _apply(event, end="2026-07-21")  # date-only end onto a datetime start
 
 
-def test_ende_before_start_rejected():
+def test_end_before_start_rejected():
     event = _new_event()
     with pytest.raises(InvalidEventDataError, match="before"):
-        _apply(event, titel="T", start="2026-07-20T14:00:00", ende="2026-07-20T13:00:00")
+        _apply(event, title="T", start="2026-07-20T14:00:00", end="2026-07-20T13:00:00")
 
 
-def test_all_day_ende_before_start_rejected():
+def test_all_day_end_before_start_rejected():
     event = _new_event()
     with pytest.raises(InvalidEventDataError, match="before"):
-        _apply(event, titel="T", start="2026-08-03", ende="2026-08-01")
+        _apply(event, title="T", start="2026-08-03", end="2026-08-01")
 
 
 # --- recurrence (RRULE) and exceptions (EXDATE) ---
@@ -301,41 +301,41 @@ def test_all_day_ende_before_start_rejected():
 
 def test_rrule_round_trip():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+    _apply(event, title="T", start="2026-07-20T14:00:00", recurrence="FREQ=WEEKLY;BYDAY=MO")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["wiederholung"] == "FREQ=WEEKLY;BYDAY=MO"
+    assert parsed["recurrence"] == "FREQ=WEEKLY;BYDAY=MO"
 
 
 def test_invalid_rrule_rejected():
     event = _new_event()
     with pytest.raises(InvalidEventDataError, match="RRULE"):
-        _apply(event, titel="T", start="2026-07-20T14:00:00", wiederholung="kaputt")
+        _apply(event, title="T", start="2026-07-20T14:00:00", recurrence="broken")
 
 
 def test_exdate_set_parse_and_clear():
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-07-27T14:00:00", "2026-08-03T14:00:00"],
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-07-27T14:00:00", "2026-08-03T14:00:00"],
     )
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["ausnahme_daten"] == [
+    assert parsed["exception_dates"] == [
         "2026-07-27T14:00:00+02:00",
         "2026-08-03T14:00:00+02:00",
     ]
 
-    _apply(event, clear=("ausnahme_daten",))
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+    _apply(event, clear=("exception_dates",))
+    assert event_mapping.parse_vevent(event)["exception_dates"] == []
 
 
 def test_exdate_replaces_instead_of_appending():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", ausnahme_daten=["2026-07-27T14:00:00"])
-    _apply(event, ausnahme_daten=["2026-08-03T14:00:00"])
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-03T14:00:00+02:00"]
+    _apply(event, title="T", start="2026-07-20T14:00:00", exception_dates=["2026-07-27T14:00:00"])
+    _apply(event, exception_dates=["2026-08-03T14:00:00"])
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-08-03T14:00:00+02:00"]
 
 
 def test_exdate_is_anchored_to_the_zone_of_its_own_dtstart():
@@ -350,10 +350,10 @@ def test_exdate_is_anchored_to_the_zone_of_its_own_dtstart():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-07-27T09:00:00+02:00"],
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-07-27T09:00:00+02:00"],
     )
 
     exdate_line = [
@@ -374,10 +374,10 @@ def test_exdate_entries_in_mixed_zones_share_one_representation():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-07-27T09:00:00", "2026-08-03T07:00:00+00:00"],
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-07-27T09:00:00", "2026-08-03T07:00:00+00:00"],
     )
 
     exdate_line = [
@@ -398,10 +398,10 @@ def test_exdate_on_a_utc_event_stays_utc_for_every_entry():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T07:00:00+00:00",
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-07-27T09:00:00", "2026-08-03T07:00:00Z"],
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-07-27T09:00:00", "2026-08-03T07:00:00Z"],
     )
 
     exdate_line = [
@@ -420,13 +420,13 @@ def test_exdate_mixing_dates_and_datetimes_is_rejected():
     reads back plausibly, so nothing would ever report it.
     """
     event = _new_event()
-    with pytest.raises(InvalidEventDataError, match="ausnahme_daten"):
+    with pytest.raises(InvalidEventDataError, match="exception_dates"):
         _apply(
             event,
-            titel="Standup",
+            title="Standup",
             start="2026-07-20T09:00:00 Europe/Berlin",
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-27", "2026-08-03T09:00:00"],
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-27", "2026-08-03T09:00:00"],
         )
 
 
@@ -440,21 +440,21 @@ def test_exdate_must_match_the_events_own_kind():
     with pytest.raises(InvalidEventDataError, match="all-day"):
         _apply(
             timed,
-            titel="Standup",
+            title="Standup",
             start="2026-07-20T09:00:00 Europe/Berlin",
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-27"],
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-27"],
         )
 
     all_day = _new_event()
     with pytest.raises(InvalidEventDataError, match="all-day"):
         _apply(
             all_day,
-            titel="Urlaub",
+            title="Vacation",
             start="2026-07-20",
-            ende="2026-07-20",
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-27T09:00:00"],
+            end="2026-07-20",
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-27T09:00:00"],
         )
 
 
@@ -462,7 +462,7 @@ def test_exdate_mixed_kinds_without_a_start_is_still_rejected():
     """With no DTSTART to match, the entries must at least agree with each other."""
     event = _new_event()
     with pytest.raises(InvalidEventDataError, match="one kind"):
-        _apply(event, titel="T", ausnahme_daten=["2026-07-27", "2026-08-03T09:00:00"])
+        _apply(event, title="T", exception_dates=["2026-07-27", "2026-08-03T09:00:00"])
 
 
 def test_exdate_all_day_event_takes_date_entries():
@@ -470,11 +470,11 @@ def test_exdate_all_day_event_takes_date_entries():
     event = _new_event()
     _apply(
         event,
-        titel="Urlaub",
+        title="Vacation",
         start="2026-07-20",
-        ende="2026-07-20",
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-07-27", "2026-08-03"],
+        end="2026-07-20",
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-07-27", "2026-08-03"],
     )
 
     exdate_line = [
@@ -495,21 +495,21 @@ def test_exdate_that_cancels_nothing_is_reported():
     with pytest.raises(InvalidEventDataError, match="cancel"):
         _apply(
             event,
-            titel="Standup",
+            title="Standup",
             start="2026-07-20T09:00:00 Asia/Tokyo",
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-27T09:00:00"],
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-27T09:00:00"],
         )
 
     # Naming the event's zone (or passing back what get_event reported) works.
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T09:00:00 Asia/Tokyo",
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-07-27T09:00:00 Asia/Tokyo"],
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-07-27T09:00:00 Asia/Tokyo"],
     )
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T02:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T02:00:00+02:00"]
 
 
 def test_exdate_on_a_day_the_series_skips_is_reported():
@@ -518,10 +518,10 @@ def test_exdate_on_a_day_the_series_skips_is_reported():
     with pytest.raises(InvalidEventDataError, match="does not name an occurrence"):
         _apply(
             event,
-            titel="Standup",
+            title="Standup",
             start="2026-07-20T09:00:00 Europe/Berlin",  # a Monday
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-28T09:00:00"],  # Tuesday
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-28T09:00:00"],  # Tuesday
         )
 
 
@@ -530,10 +530,10 @@ def test_exdate_after_the_series_has_ended_is_reported():
     with pytest.raises(InvalidEventDataError, match="does not name an occurrence"):
         _apply(
             event,
-            titel="Standup",
+            title="Standup",
             start="2026-07-20T09:00:00 Europe/Berlin",
-            wiederholung="FREQ=WEEKLY;COUNT=3",
-            ausnahme_daten=["2026-09-07T09:00:00"],
+            recurrence="FREQ=WEEKLY;COUNT=3",
+            exception_dates=["2026-09-07T09:00:00"],
         )
 
 
@@ -547,12 +547,12 @@ def test_exdate_matching_an_occurrence_after_a_dst_change_is_accepted():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-10-19T09:00:00 Europe/Berlin",  # +02:00
-        wiederholung="FREQ=WEEKLY",
-        ausnahme_daten=["2026-10-26T09:00:00 Europe/Berlin"],  # +01:00
+        recurrence="FREQ=WEEKLY",
+        exception_dates=["2026-10-26T09:00:00 Europe/Berlin"],  # +01:00
     )
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-10-26T09:00:00+01:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-10-26T09:00:00+01:00"]
 
 
 def test_exdate_on_an_all_day_series_is_checked_by_date():
@@ -560,22 +560,22 @@ def test_exdate_on_an_all_day_series_is_checked_by_date():
     with pytest.raises(InvalidEventDataError, match="does not name an occurrence"):
         _apply(
             event,
-            titel="Urlaub",
+            title="Vacation",
             start="2026-07-20",
-            ende="2026-07-20",
-            wiederholung="FREQ=WEEKLY",
-            ausnahme_daten=["2026-07-28"],
+            end="2026-07-20",
+            recurrence="FREQ=WEEKLY",
+            exception_dates=["2026-07-28"],
         )
 
 
 def test_exdate_may_name_an_rdate_occurrence():
     """RDATE dates are part of the recurrence set too."""
     event = _new_event()
-    _apply(event, titel="Standup", start="2026-07-20T09:00:00 Europe/Berlin")
+    _apply(event, title="Standup", start="2026-07-20T09:00:00 Europe/Berlin")
     event.add("rdate", [datetime(2026, 7, 22, 9, 0, tzinfo=ZoneInfo("Europe/Berlin"))])
 
-    _apply(event, wiederholung="FREQ=WEEKLY", ausnahme_daten=["2026-07-22T09:00:00"])
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-22T09:00:00+02:00"]
+    _apply(event, recurrence="FREQ=WEEKLY", exception_dates=["2026-07-22T09:00:00"])
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-22T09:00:00+02:00"]
 
 
 def test_exdate_without_a_recurrence_is_not_second_guessed():
@@ -583,11 +583,11 @@ def test_exdate_without_a_recurrence_is_not_second_guessed():
     event = _new_event()
     _apply(
         event,
-        titel="Einzeltermin",
+        title="Single_event",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        ausnahme_daten=["2026-08-15T18:30:00"],
+        exception_dates=["2026-08-15T18:30:00"],
     )
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-15T18:30:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-08-15T18:30:00+02:00"]
 
 
 def test_exdate_check_skips_a_rule_it_cannot_expand():
@@ -600,13 +600,13 @@ def test_exdate_check_skips_a_rule_it_cannot_expand():
     event = _new_event()
     _apply(
         event,
-        titel="Urlaub",
+        title="Vacation",
         start="2026-07-20",
-        ende="2026-07-20",
-        wiederholung="FREQ=WEEKLY;UNTIL=20260831T235959Z",
-        ausnahme_daten=["2026-07-28"],
+        end="2026-07-20",
+        recurrence="FREQ=WEEKLY;UNTIL=20260831T235959Z",
+        exception_dates=["2026-07-28"],
     )
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-28"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-28"]
 
 
 def test_exdate_check_gives_up_rather_than_walking_an_unbounded_series():
@@ -614,12 +614,12 @@ def test_exdate_check_gives_up_rather_than_walking_an_unbounded_series():
     event = _new_event()
     _apply(
         event,
-        titel="Ticker",
+        title="Ticker",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        wiederholung="FREQ=SECONDLY",
-        ausnahme_daten=["2027-07-20T09:00:00"],
+        recurrence="FREQ=SECONDLY",
+        exception_dates=["2027-07-20T09:00:00"],
     )
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2027-07-20T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2027-07-20T09:00:00+02:00"]
 
 
 def test_exdate_parses_repeated_properties_from_other_clients():
@@ -629,7 +629,7 @@ def test_exdate_parses_repeated_properties_from_other_clients():
     event.add("exdate", datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc))
     event.add("exdate", datetime(2026, 8, 3, 14, 0, tzinfo=timezone.utc))
     parsed = event_mapping.parse_vevent(event)
-    assert len(parsed["ausnahme_daten"]) == 2
+    assert len(parsed["exception_dates"]) == 2
 
 
 # --- reminders (VALARM) ---
@@ -637,7 +637,7 @@ def test_exdate_parses_repeated_properties_from_other_clients():
 
 def test_relative_reminder_related_to_start():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["-PT30M"])
+    _apply(event, title="T", start="2026-07-20T14:00:00", reminders=["-PT30M"])
     alarms = [c for c in event.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
     trigger = alarms[0]["trigger"]
@@ -647,15 +647,15 @@ def test_relative_reminder_related_to_start():
 
 def test_absolute_reminder():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["2026-07-20T08:00:00Z"])
+    _apply(event, title="T", start="2026-07-20T14:00:00", reminders=["2026-07-20T08:00:00Z"])
     alarms = [c for c in event.subcomponents if c.name == "VALARM"]
     assert _dt(alarms[0]["trigger"]) == datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
 
 
 def test_reminders_replace_instead_of_appending():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["-PT30M", "-P1D"])
-    _apply(event, erinnerungen=["-PT10M"])
+    _apply(event, title="T", start="2026-07-20T14:00:00", reminders=["-PT30M", "-P1D"])
+    _apply(event, reminders=["-PT10M"])
     alarms = [c for c in event.subcomponents if c.name == "VALARM"]
     assert len(alarms) == 1
 
@@ -663,48 +663,48 @@ def test_reminders_replace_instead_of_appending():
 def test_invalid_reminder_raises_event_error():
     event = _new_event()
     with pytest.raises(InvalidEventDataError):
-        _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["quatsch"])
+        _apply(event, title="T", start="2026-07-20T14:00:00", reminders=["quatsch"])
 
 
-def test_parse_vevent_erinnerungen_relative_round_trip():
+def test_parse_vevent_reminders_relative_round_trip():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=["-PT30M"])
+    _apply(event, title="T", start="2026-07-20T14:00:00", reminders=["-PT30M"])
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+    assert parsed["reminders"] == ["-PT30M"]
 
 
-def test_parse_vevent_erinnerungen_absolute_round_trip():
+def test_parse_vevent_reminders_absolute_round_trip():
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        erinnerungen=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
+        reminders=["2026-08-07T09:00:00+00:00", "2026-08-07T09:00:00Z"],
     )
     parsed = event_mapping.parse_vevent(event)
     # Both spellings name the same instant, so `apply_alarms` collapses them
     # into one alarm; reading it back formats it in the server's default
     # timezone (Europe/Berlin, +02:00 in August), the same convention
     # DTSTART/DTEND follow.
-    assert parsed["erinnerungen"] == ["2026-08-07T11:00:00+02:00"]
+    assert parsed["reminders"] == ["2026-08-07T11:00:00+02:00"]
 
 
-def test_parse_vevent_erinnerungen_preserves_order():
+def test_parse_vevent_reminders_preserves_order():
     event = _new_event()
     reminders = ["-P1D", "-PT30M", "2026-08-07T11:00:00+02:00"]
-    _apply(event, titel="T", start="2026-07-20T14:00:00", erinnerungen=reminders)
+    _apply(event, title="T", start="2026-07-20T14:00:00", reminders=reminders)
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["erinnerungen"] == reminders
+    assert parsed["reminders"] == reminders
 
 
-def test_parse_vevent_erinnerungen_no_valarm_returns_empty():
+def test_parse_vevent_reminders_no_valarm_returns_empty():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    _apply(event, title="T", start="2026-07-20T14:00:00")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["erinnerungen"] == []
+    assert parsed["reminders"] == []
 
 
-def test_parse_vevent_erinnerungen_skips_valarm_without_trigger_or_invalid_trigger():
+def test_parse_vevent_reminders_skips_valarm_without_trigger_or_invalid_trigger():
     event = _event_from_ics(
         """BEGIN:VEVENT
 UID:event-1
@@ -728,7 +728,7 @@ END:VEVENT
 """
     )
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["erinnerungen"] == ["-PT30M"]
+    assert parsed["reminders"] == ["-PT30M"]
 
 
 _END_ANCHORED_EVENT_ICS = """BEGIN:VEVENT
@@ -745,17 +745,17 @@ END:VEVENT
 """
 
 
-def test_parse_vevent_erinnerungen_skips_end_anchored_alarm():
-    """An alarm anchored to DTEND has no `erinnerungen` spelling.
+def test_parse_vevent_reminders_skips_end_anchored_alarm():
+    """An alarm anchored to DTEND has no `reminders` spelling.
 
     Reporting it as "-PT30M" would claim it fires 30 minutes before the event
     *starts* - here that is a two-hour lie, the length of the event.
     """
     event = _event_from_ics(_END_ANCHORED_EVENT_ICS)
-    assert event_mapping.parse_vevent(event)["erinnerungen"] == []
+    assert event_mapping.parse_vevent(event)["reminders"] == []
 
 
-def test_parse_vevent_erinnerungen_lists_end_anchored_alarm_on_event_without_an_end():
+def test_parse_vevent_reminders_lists_end_anchored_alarm_on_event_without_an_end():
     """Without DTEND/DURATION the event has no end distinct from its start.
 
     `RELATED=END` then names the same moment as `RELATED=START`, so "-PT30M"
@@ -775,18 +775,18 @@ END:VALARM
 END:VEVENT
 """
     )
-    assert event_mapping.parse_vevent(event)["erinnerungen"] == ["-PT30M"]
+    assert event_mapping.parse_vevent(event)["reminders"] == ["-PT30M"]
 
 
 def test_apply_event_fields_preserves_end_anchored_alarm():
     event = _event_from_ics(_END_ANCHORED_EVENT_ICS)
     end_anchored = next(c for c in event.subcomponents if c.name == "VALARM").to_ical()
 
-    _apply(event, erinnerungen=["-PT15M"])
+    _apply(event, reminders=["-PT15M"])
 
     alarms = [c.to_ical() for c in event.subcomponents if c.name == "VALARM"]
     assert end_anchored in alarms
-    assert event_mapping.parse_vevent(event)["erinnerungen"] == ["-PT15M"]
+    assert event_mapping.parse_vevent(event)["reminders"] == ["-PT15M"]
 
 
 # --- status / visibility labels ---
@@ -795,19 +795,19 @@ def test_apply_event_fields_preserves_end_anchored_alarm():
 def test_status_labels():
     for label, ical_value in event_mapping.STATUS_LABELS.items():
         event = _new_event()
-        _apply(event, titel="T", start="2026-07-20T14:00:00", status=label)
+        _apply(event, title="T", start="2026-07-20T14:00:00", status=label)
         assert str(event["status"]) == ical_value
         assert event_mapping.parse_vevent(event)["status"] == label
 
 
 def test_unknown_status_rejected():
     with pytest.raises(InvalidEventDataError, match="status"):
-        _apply(_new_event(), titel="T", start="2026-07-20T14:00:00", status="vielleicht")
+        _apply(_new_event(), title="T", start="2026-07-20T14:00:00", status="maybe")
 
 
 def test_unknown_visibility_raises_event_error():
-    with pytest.raises(InvalidEventDataError, match="sichtbarkeit"):
-        _apply(_new_event(), titel="T", start="2026-07-20T14:00:00", sichtbarkeit="geheim")
+    with pytest.raises(InvalidEventDataError, match="visibility"):
+        _apply(_new_event(), title="T", start="2026-07-20T14:00:00", visibility="secret")
 
 
 def test_unknown_ical_status_parses_as_none():
@@ -816,61 +816,61 @@ def test_unknown_ical_status_parses_as_none():
     assert event_mapping.parse_vevent(event)["status"] is None
 
 
-# --- clear (felder_leeren) ---
+# --- clear (clear_fields) ---
 
 
 def test_clear_unknown_field_rejected():
-    with pytest.raises(InvalidEventDataError, match="felder_leeren"):
-        _apply(_new_event(), clear=("unbekannt",))
+    with pytest.raises(InvalidEventDataError, match="clear_fields"):
+        _apply(_new_event(), clear=("unknown",))
 
 
-@pytest.mark.parametrize("name", ["titel", "start"])
-def test_titel_and_start_not_clearable(name):
-    with pytest.raises(InvalidEventDataError, match="felder_leeren"):
+@pytest.mark.parametrize("name", ["title", "start"])
+def test_title_and_start_not_clearable(name):
+    with pytest.raises(InvalidEventDataError, match="clear_fields"):
         _apply(_new_event(), clear=(name,))
 
 
 def test_set_and_clear_same_field_rejected():
     with pytest.raises(InvalidEventDataError, match="both set and clear"):
-        _apply(_new_event(), ort="Büro", clear=("ort",))
+        _apply(_new_event(), location="Office", clear=("location",))
 
 
 def test_clear_removes_properties():
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        ende="2026-07-20T15:00:00",
-        ort="Büro",
-        erinnerungen=["-PT30M"],
+        end="2026-07-20T15:00:00",
+        location="Office",
+        reminders=["-PT30M"],
     )
-    _apply(event, clear=("ende", "ort", "erinnerungen"))
+    _apply(event, clear=("end", "location", "reminders"))
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["ende"] is None
-    assert parsed["ort"] is None
+    assert parsed["end"] is None
+    assert parsed["location"] is None
     assert not [c for c in event.subcomponents if c.name == "VALARM"]
 
 
 # --- RELATED-TO links ---
 
 
-def test_verknuepfte_aufgabe_written_as_parent_relation():
+def test_linked_task_written_as_parent_relation():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", verknuepfte_aufgabe="task-42")
+    _apply(event, title="T", start="2026-07-20T14:00:00", linked_task="task-42")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-42", "beziehung": "zeitblock"}]
+    assert parsed["linked_tasks"] == [{"uid": "task-42", "relation": "time_block"}]
 
 
 def test_add_relation_appends_and_is_idempotent():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", verknuepfte_aufgabe="task-1")
+    _apply(event, title="T", start="2026-07-20T14:00:00", linked_task="task-1")
     event_mapping.add_relation(event, "task-2", "CHILD")
     event_mapping.add_relation(event, "task-2", "CHILD")  # no-op duplicate
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [
-        {"uid": "task-1", "beziehung": "zeitblock"},
-        {"uid": "task-2", "beziehung": "voraussetzung"},
+    assert parsed["linked_tasks"] == [
+        {"uid": "task-1", "relation": "time_block"},
+        {"uid": "task-2", "relation": "prerequisite"},
     ]
 
 
@@ -878,180 +878,180 @@ def test_related_without_reltype_defaults_to_parent():
     event = _new_event()
     event.add("related-to", "task-7")
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-7", "beziehung": "zeitblock"}]
+    assert parsed["linked_tasks"] == [{"uid": "task-7", "relation": "time_block"}]
 
 
-def test_related_to_parent_reltype_round_trips_as_zeitblock():
-    """Round-trip check for the beziehung vocabulary fix: a RELATED-TO written
-    with RELTYPE=PARENT (as link_task_to_event writes for beziehung="zeitblock")
-    must parse back with the same "zeitblock" label, not a different word for
+def test_related_to_parent_reltype_round_trips_as_time_block():
+    """Round-trip check for the relation vocabulary fix: a RELATED-TO written
+    with RELTYPE=PARENT (as link_task_to_event writes for relation="time_block")
+    must parse back with the same "time_block" label, not a different word for
     the same relation."""
     event = _new_event()
     event.add("related-to", "task-99", parameters={"RELTYPE": "PARENT"})
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-99", "beziehung": "zeitblock"}]
+    assert parsed["linked_tasks"] == [{"uid": "task-99", "relation": "time_block"}]
 
 
-def test_related_to_child_reltype_parses_as_voraussetzung():
+def test_related_to_child_reltype_parses_as_prerequisite():
     event = _new_event()
     event.add("related-to", "task-100", parameters={"RELTYPE": "CHILD"})
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["verknuepfte_aufgaben"] == [{"uid": "task-100", "beziehung": "voraussetzung"}]
+    assert parsed["linked_tasks"] == [{"uid": "task-100", "relation": "prerequisite"}]
 
 
-# --- attendees / organizer (teilnehmer / organisator) ---
+# --- attendees / organizer (attendees / organizer) ---
 
 
 def test_no_organizer_or_attendees_parses_as_empty():
     event = _new_event()
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["organisator"] is None
-    assert parsed["teilnehmer"] == []
+    assert parsed["organizer"] is None
+    assert parsed["attendees"] == []
 
 
-def test_teilnehmer_round_trip_sets_organizer_and_attendees():
+def test_attendees_round_trip_sets_organizer_and_attendees():
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        teilnehmer=[
+        attendees=[
             {"email": "a@example.com", "name": "Alice"},
-            {"email": "b@example.com", "rolle": "optional", "rsvp": False},
+            {"email": "b@example.com", "role": "optional", "rsvp": False},
         ],
         own_organizer="mailto:me@example.com",
     )
     parsed = event_mapping.parse_vevent(event)
 
-    assert parsed["organisator"] == {"email": "me@example.com", "name": None}
-    assert parsed["teilnehmer"] == [
+    assert parsed["organizer"] == {"email": "me@example.com", "name": None}
+    assert parsed["attendees"] == [
         {
             "email": "a@example.com",
             "name": "Alice",
-            "status": "ausstehend",
-            "rolle": "erforderlich",
+            "status": "pending",
+            "role": "required",
             "rsvp": True,
         },
         {
             "email": "b@example.com",
             "name": None,
-            "status": "ausstehend",
-            "rolle": "optional",
+            "status": "pending",
+            "role": "optional",
             "rsvp": False,
         },
     ]
 
 
-def test_teilnehmer_without_own_organizer_leaves_organizer_unset():
+def test_attendees_without_own_organizer_leaves_organizer_unset():
     """event_mapping makes no network calls; without an own_organizer supplied
     (the pure-unit-test case), ORGANIZER is simply left unset rather than
     guessed at."""
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        teilnehmer=[{"email": "a@example.com"}],
+        attendees=[{"email": "a@example.com"}],
     )
     assert "organizer" not in event
-    assert event_mapping.parse_vevent(event)["organisator"] is None
+    assert event_mapping.parse_vevent(event)["organizer"] is None
 
 
-def test_teilnehmer_does_not_overwrite_existing_organizer():
+def test_attendees_does_not_overwrite_existing_organizer():
     event = _new_event()
     event.add("organizer", "mailto:existing@example.com")
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        teilnehmer=[{"email": "a@example.com"}],
+        attendees=[{"email": "a@example.com"}],
         own_organizer="mailto:me@example.com",
     )
-    assert event_mapping.parse_vevent(event)["organisator"] == {
+    assert event_mapping.parse_vevent(event)["organizer"] == {
         "email": "existing@example.com",
         "name": None,
     }
 
 
-def test_teilnehmer_replaces_instead_of_appending():
+def test_attendees_replaces_instead_of_appending():
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        teilnehmer=[{"email": "a@example.com"}],
+        attendees=[{"email": "a@example.com"}],
         own_organizer="mailto:me@example.com",
     )
-    _apply(event, teilnehmer=[{"email": "b@example.com"}])
+    _apply(event, attendees=[{"email": "b@example.com"}])
     parsed = event_mapping.parse_vevent(event)
-    assert [t["email"] for t in parsed["teilnehmer"]] == ["b@example.com"]
+    assert [t["email"] for t in parsed["attendees"]] == ["b@example.com"]
 
 
-def test_teilnehmer_missing_email_rejected():
+def test_attendees_missing_email_rejected():
     with pytest.raises(InvalidEventDataError, match="email"):
         _apply(
             _new_event(),
-            titel="T",
+            title="T",
             start="2026-07-20T14:00:00",
-            teilnehmer=[{"name": "Alice"}],
+            attendees=[{"name": "Alice"}],
         )
 
 
-def test_teilnehmer_unknown_rolle_rejected():
-    with pytest.raises(InvalidEventDataError, match="rolle"):
+def test_attendees_unknown_role_rejected():
+    with pytest.raises(InvalidEventDataError, match="role"):
         _apply(
             _new_event(),
-            titel="T",
+            title="T",
             start="2026-07-20T14:00:00",
-            teilnehmer=[{"email": "a@example.com", "rolle": "irgendwas"}],
+            attendees=[{"email": "a@example.com", "role": "nonsense"}],
         )
 
 
-def test_teilnehmer_clear_removes_attendees_and_organizer():
+def test_attendees_clear_removes_attendees_and_organizer():
     event = _new_event()
     _apply(
         event,
-        titel="T",
+        title="T",
         start="2026-07-20T14:00:00",
-        teilnehmer=[{"email": "a@example.com"}],
+        attendees=[{"email": "a@example.com"}],
         own_organizer="mailto:me@example.com",
     )
     assert "attendee" in event
     assert "organizer" in event
 
-    _apply(event, clear=("teilnehmer",))
+    _apply(event, clear=("attendees",))
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["teilnehmer"] == []
-    assert parsed["organisator"] is None
+    assert parsed["attendees"] == []
+    assert parsed["organizer"] is None
     assert "attendee" not in event
     assert "organizer" not in event
 
 
-def test_teilnehmer_clear_and_set_conflict_rejected():
+def test_attendees_clear_and_set_conflict_rejected():
     with pytest.raises(InvalidEventDataError, match="both set and clear"):
         _apply(
             _new_event(),
-            teilnehmer=[{"email": "a@example.com"}],
-            clear=("teilnehmer",),
+            attendees=[{"email": "a@example.com"}],
+            clear=("attendees",),
         )
 
 
 @pytest.mark.parametrize(
     ("ical_value", "label"),
     [
-        ("NEEDS-ACTION", "ausstehend"),
-        ("ACCEPTED", "zugesagt"),
-        ("DECLINED", "abgesagt"),
-        ("TENTATIVE", "vorläufig"),
-        ("DELEGATED", "delegiert"),
+        ("NEEDS-ACTION", "pending"),
+        ("ACCEPTED", "accepted"),
+        ("DECLINED", "cancelled"),
+        ("TENTATIVE", "tentative"),
+        ("DELEGATED", "delegated"),
     ],
 )
 def test_partstat_label_mapping(ical_value, label):
     assert event_mapping.ical_partstat_to_label(ical_value) == label
 
 
-def test_partstat_missing_defaults_to_ausstehend():
-    assert event_mapping.ical_partstat_to_label(None) == "ausstehend"
+def test_partstat_missing_defaults_to_pending():
+    assert event_mapping.ical_partstat_to_label(None) == "pending"
 
 
 def test_partstat_unknown_value_passes_through_lowercased():
@@ -1061,18 +1061,18 @@ def test_partstat_unknown_value_passes_through_lowercased():
 @pytest.mark.parametrize(
     ("ical_value", "label"),
     [
-        ("CHAIR", "leitung"),
-        ("REQ-PARTICIPANT", "erforderlich"),
+        ("CHAIR", "chair"),
+        ("REQ-PARTICIPANT", "required"),
         ("OPT-PARTICIPANT", "optional"),
-        ("NON-PARTICIPANT", "keine-teilnahme"),
+        ("NON-PARTICIPANT", "non-participant"),
     ],
 )
 def test_role_label_mapping(ical_value, label):
     assert event_mapping.ical_role_to_label(ical_value) == label
 
 
-def test_role_missing_defaults_to_erforderlich():
-    assert event_mapping.ical_role_to_label(None) == "erforderlich"
+def test_role_missing_defaults_to_required():
+    assert event_mapping.ical_role_to_label(None) == "required"
 
 
 def test_role_unknown_value_passes_through_lowercased():
@@ -1080,16 +1080,16 @@ def test_role_unknown_value_passes_through_lowercased():
 
 
 def test_response_label_to_partstat_valid_values():
-    assert event_mapping.response_label_to_partstat("zugesagt") == "ACCEPTED"
-    assert event_mapping.response_label_to_partstat("abgesagt") == "DECLINED"
-    assert event_mapping.response_label_to_partstat("vorläufig") == "TENTATIVE"
+    assert event_mapping.response_label_to_partstat("accepted") == "ACCEPTED"
+    assert event_mapping.response_label_to_partstat("cancelled") == "DECLINED"
+    assert event_mapping.response_label_to_partstat("tentative") == "TENTATIVE"
 
 
-def test_response_label_to_partstat_rejects_ausstehend():
-    """ausstehend/delegiert are valid PARTSTAT read-labels but not valid
+def test_response_label_to_partstat_rejects_pending():
+    """pending/delegated are valid PARTSTAT read-labels but not valid
     respond_to_event replies - you can't RSVP with "no reply yet"."""
-    with pytest.raises(InvalidEventDataError, match="antwort"):
-        event_mapping.response_label_to_partstat("ausstehend")
+    with pytest.raises(InvalidEventDataError, match="response"):
+        event_mapping.response_label_to_partstat("pending")
 
 
 # --- respond_to_event's pure counterpart: apply_own_attendee_response ---
@@ -1103,8 +1103,8 @@ def test_apply_own_attendee_response_sets_partstat():
     event_mapping.apply_own_attendee_response(event, ["mailto:me@example.com"], "ACCEPTED")
 
     parsed = event_mapping.parse_vevent(event)
-    statuses = {t["email"]: t["status"] for t in parsed["teilnehmer"]}
-    assert statuses == {"me@example.com": "zugesagt", "other@example.com": "ausstehend"}
+    statuses = {t["email"]: t["status"] for t in parsed["attendees"]}
+    assert statuses == {"me@example.com": "accepted", "other@example.com": "pending"}
 
 
 def test_apply_own_attendee_response_matches_case_insensitively_and_ignores_mailto():
@@ -1113,7 +1113,7 @@ def test_apply_own_attendee_response_matches_case_insensitively_and_ignores_mail
 
     event_mapping.apply_own_attendee_response(event, ["me@example.com"], "DECLINED")
 
-    assert event_mapping.parse_vevent(event)["teilnehmer"][0]["status"] == "abgesagt"
+    assert event_mapping.parse_vevent(event)["attendees"][0]["status"] == "cancelled"
 
 
 def test_apply_own_attendee_response_writes_comment():
@@ -1121,10 +1121,10 @@ def test_apply_own_attendee_response_writes_comment():
     event.add("attendee", "mailto:me@example.com", parameters={"PARTSTAT": "NEEDS-ACTION"})
 
     event_mapping.apply_own_attendee_response(
-        event, ["mailto:me@example.com"], "TENTATIVE", comment="Vielleicht"
+        event, ["mailto:me@example.com"], "TENTATIVE", comment="Maybe"
     )
 
-    assert str(event.get("comment")) == "Vielleicht"
+    assert str(event.get("comment")) == "Maybe"
 
 
 def test_apply_own_attendee_response_not_an_attendee_raises():
@@ -1150,68 +1150,68 @@ def test_parse_duration_instead_of_dtend():
     event.add("dtstart", datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc))
     event.add("duration", timedelta(hours=2))
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["ende"] == "2026-07-20T18:00:00+02:00"
+    assert parsed["end"] == "2026-07-20T18:00:00+02:00"
 
 
-def test_parse_recurrence_id_as_wiederholung_von():
+def test_parse_recurrence_id_as_recurrence_id():
     event = _new_event()
     event.add("dtstart", datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc))
     event.add("recurrence-id", datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc))
     parsed = event_mapping.parse_vevent(event)
-    assert parsed["wiederholung_von"] == "2026-07-27T16:00:00+02:00"
+    assert parsed["recurrence_id"] == "2026-07-27T16:00:00+02:00"
 
 
 # --- filter_events ---
 
 
-def _event_dict(titel="E", start=None, beschreibung=None, ort=None, tags=None):
+def _event_dict(title="E", start=None, description=None, location=None, tags=None):
     return {
-        "titel": titel,
+        "title": title,
         "start": start,
-        "beschreibung": beschreibung,
-        "ort": ort,
+        "description": description,
+        "location": location,
         "tags": tags or [],
     }
 
 
-def test_filter_events_suchtext_matches_title_description_location():
+def test_filter_events_search_text_matches_title_description_location():
     events = [
-        _event_dict(titel="Zahnarzt", start="2026-07-20T09:00:00"),
-        _event_dict(titel="Meeting", beschreibung="Zahnarzt nachbereiten", start="2026-07-21"),
-        _event_dict(titel="Sport", ort="ZAHNARZTPRAXIS", start="2026-07-22T18:00:00"),
-        _event_dict(titel="Kino", start="2026-07-23T20:00:00"),
+        _event_dict(title="Dentist", start="2026-07-20T09:00:00"),
+        _event_dict(title="Meeting", description="Dentist follow-up", start="2026-07-21"),
+        _event_dict(title="Sport", location="DENTIST PRACTICE", start="2026-07-22T18:00:00"),
+        _event_dict(title="Cinema", start="2026-07-23T20:00:00"),
     ]
-    result = event_mapping.filter_events(events, suchtext="zahnarzt")
-    assert [e["titel"] for e in result] == ["Zahnarzt", "Meeting", "Sport"]
+    result = event_mapping.filter_events(events, search_text="dentist")
+    assert [e["title"] for e in result] == ["Dentist", "Meeting", "Sport"]
 
 
 def test_filter_events_tag_exact_case_insensitive():
     events = [
-        _event_dict(titel="A", tags=["Arbeit"], start="2026-07-20"),
-        _event_dict(titel="B", tags=["Arbeitsamt"], start="2026-07-21"),
+        _event_dict(title="A", tags=["Work"], start="2026-07-20"),
+        _event_dict(title="B", tags=["Job Center"], start="2026-07-21"),
     ]
-    result = event_mapping.filter_events(events, tag="arbeit")
-    assert [e["titel"] for e in result] == ["A"]
+    result = event_mapping.filter_events(events, tag="work")
+    assert [e["title"] for e in result] == ["A"]
 
 
 def test_filter_events_sorts_dates_and_datetimes_chronologically():
     events = [
-        _event_dict(titel="spät", start="2026-07-20T18:00:00"),
-        _event_dict(titel="ganztags", start="2026-07-20"),
-        _event_dict(titel="ohne start"),
-        _event_dict(titel="früher Tag", start="2026-07-19T23:00:00"),
+        _event_dict(title="late", start="2026-07-20T18:00:00"),
+        _event_dict(title="all_day", start="2026-07-20"),
+        _event_dict(title="no start"),
+        _event_dict(title="earlier day", start="2026-07-19T23:00:00"),
     ]
     result = event_mapping.filter_events(events)
-    assert [e["titel"] for e in result] == ["früher Tag", "ganztags", "spät", "ohne start"]
+    assert [e["title"] for e in result] == ["earlier day", "all_day", "late", "no start"]
 
 
 def test_filter_events_limit_returns_earliest():
     events = [
-        _event_dict(titel="B", start="2026-07-21"),
-        _event_dict(titel="A", start="2026-07-20"),
+        _event_dict(title="B", start="2026-07-21"),
+        _event_dict(title="A", start="2026-07-20"),
     ]
     result = event_mapping.filter_events(events, limit=1)
-    assert [e["titel"] for e in result] == ["A"]
+    assert [e["title"] for e in result] == ["A"]
 
 
 def test_filter_events_limit_must_be_positive():
@@ -1219,48 +1219,48 @@ def test_filter_events_limit_must_be_positive():
         event_mapping.filter_events([], limit=0)
 
 
-def test_filter_events_ohne_erinnerung_keeps_only_events_without_reminders():
+def test_filter_events_without_reminder_keeps_only_events_without_reminders():
     events = [
-        dict(_event_dict(titel="nackt", start="2026-07-20"), erinnerungen=[]),
-        dict(_event_dict(titel="erinnert", start="2026-07-21"), erinnerungen=["-PT30M"]),
+        dict(_event_dict(title="bare", start="2026-07-20"), reminders=[]),
+        dict(_event_dict(title="reminded", start="2026-07-21"), reminders=["-PT30M"]),
     ]
-    res = event_mapping.filter_events(events, ohne_erinnerung=True)
-    assert [e["titel"] for e in res] == ["nackt"]
+    res = event_mapping.filter_events(events, without_reminder=True)
+    assert [e["title"] for e in res] == ["bare"]
 
 
-def test_filter_events_ohne_sichtbarkeit_keeps_only_events_without_class():
+def test_filter_events_without_visibility_keeps_only_events_without_class():
     events = [
-        dict(_event_dict(titel="nackt", start="2026-07-20"), sichtbarkeit=None),
-        dict(_event_dict(titel="privat", start="2026-07-21"), sichtbarkeit="privat"),
+        dict(_event_dict(title="bare", start="2026-07-20"), visibility=None),
+        dict(_event_dict(title="private", start="2026-07-21"), visibility="private"),
     ]
-    res = event_mapping.filter_events(events, ohne_sichtbarkeit=True)
-    assert [e["titel"] for e in res] == ["nackt"]
+    res = event_mapping.filter_events(events, without_visibility=True)
+    assert [e["title"] for e in res] == ["bare"]
 
 
-def test_filter_events_ohne_tags_keeps_only_untagged_events():
+def test_filter_events_without_tags_keeps_only_untagged_events():
     events = [
-        _event_dict(titel="nackt", start="2026-07-20"),
-        _event_dict(titel="getaggt", start="2026-07-21", tags=["Arbeit"]),
+        _event_dict(title="bare", start="2026-07-20"),
+        _event_dict(title="tagged", start="2026-07-21", tags=["Work"]),
     ]
-    res = event_mapping.filter_events(events, ohne_tags=True)
-    assert [e["titel"] for e in res] == ["nackt"]
+    res = event_mapping.filter_events(events, without_tags=True)
+    assert [e["title"] for e in res] == ["bare"]
 
 
 def test_filter_events_uid_regex_is_case_sensitive_search():
     events = [
-        dict(_event_dict(titel="phone", start="2026-07-20"), uid="5D3A2F00-90AB-4CDE-9AAF-01"),
-        dict(_event_dict(titel="server", start="2026-07-21"), uid="5d3a2f00-90ab-4cde-9aaf-02"),
+        dict(_event_dict(title="phone", start="2026-07-20"), uid="5D3A2F00-90AB-4CDE-9AAF-01"),
+        dict(_event_dict(title="server", start="2026-07-21"), uid="5d3a2f00-90ab-4cde-9aaf-02"),
     ]
     res = event_mapping.filter_events(events, uid_regex=r"^[A-F0-9-]+$")
-    assert [e["titel"] for e in res] == ["phone"]
+    assert [e["title"] for e in res] == ["phone"]
 
 
 def test_filter_events_uid_regex_empty_string_is_no_filter():
     events = [
-        dict(_event_dict(titel="a", start="2026-07-20"), uid="x"),
-        dict(_event_dict(titel="b", start="2026-07-21"), uid="y"),
+        dict(_event_dict(title="a", start="2026-07-20"), uid="x"),
+        dict(_event_dict(title="b", start="2026-07-21"), uid="y"),
     ]
-    assert [e["titel"] for e in event_mapping.filter_events(events, uid_regex="")] == ["a", "b"]
+    assert [e["title"] for e in event_mapping.filter_events(events, uid_regex="")] == ["a", "b"]
 
 
 def test_filter_events_invalid_uid_regex_raises():
@@ -1272,25 +1272,25 @@ def test_filter_events_cleanup_filters_combined_shortlist_phone_created_events()
     """The cleanup sweep these filters exist for: hand-created phone events carry
     uppercase UUIDs and no reminders/visibility/tags."""
     phone = dict(
-        _event_dict(titel="Zahnarzt", start="2026-07-20"),
+        _event_dict(title="Dentist", start="2026-07-20"),
         uid="5D3A2F00-90AB-4CDE-9AAF-01",
-        erinnerungen=[],
-        sichtbarkeit=None,
+        reminders=[],
+        visibility=None,
     )
     curated = dict(
-        _event_dict(titel="Team-Meeting", start="2026-07-21", tags=["Arbeit"]),
+        _event_dict(title="Team meeting", start="2026-07-21", tags=["Work"]),
         uid="gepflegt-1",
-        erinnerungen=["-PT15M"],
-        sichtbarkeit="öffentlich",
+        reminders=["-PT15M"],
+        visibility="public",
     )
     res = event_mapping.filter_events(
         [phone, curated],
-        ohne_erinnerung=True,
-        ohne_sichtbarkeit=True,
-        ohne_tags=True,
+        without_reminder=True,
+        without_visibility=True,
+        without_tags=True,
         uid_regex=r"^[A-F0-9-]+$",
     )
-    assert [e["titel"] for e in res] == ["Zahnarzt"]
+    assert [e["title"] for e in res] == ["Dentist"]
 
 
 # --- local day window (get_agenda) ---
@@ -1304,10 +1304,10 @@ def _in_day(events: list[dict[str, Any]], day: date = date(2026, 7, 20)) -> list
 def test_events_in_window_uses_local_day_edges():
     """Both edges are half-open: midnight belongs to the day that starts there."""
     events: list[dict[str, Any]] = [
-        {"uid": "ends-at-midnight", "start": "2026-07-19T23:00:00+02:00", "ende": "2026-07-20"},
-        {"uid": "starts-at-midnight", "start": "2026-07-20T00:00:00+02:00", "ende": None},
-        {"uid": "last-minute", "start": "2026-07-20T23:59:00+02:00", "ende": None},
-        {"uid": "next-midnight", "start": "2026-07-21T00:00:00+02:00", "ende": None},
+        {"uid": "ends-at-midnight", "start": "2026-07-19T23:00:00+02:00", "end": "2026-07-20"},
+        {"uid": "starts-at-midnight", "start": "2026-07-20T00:00:00+02:00", "end": None},
+        {"uid": "last-minute", "start": "2026-07-20T23:59:00+02:00", "end": None},
+        {"uid": "next-midnight", "start": "2026-07-21T00:00:00+02:00", "end": None},
     ]
     # "ends-at-midnight" has a datetime start and an all-day end - a pairing
     # this server never writes, so its end is ignored and it counts as a
@@ -1317,8 +1317,8 @@ def test_events_in_window_uses_local_day_edges():
 
 def test_events_in_window_covers_a_multi_day_all_day_event():
     events = [
-        {"uid": "holiday", "start": "2026-07-18", "ende": "2026-07-21"},
-        {"uid": "other-week", "start": "2026-07-27", "ende": "2026-07-28"},
+        {"uid": "holiday", "start": "2026-07-18", "end": "2026-07-21"},
+        {"uid": "other-week", "start": "2026-07-27", "end": "2026-07-28"},
     ]
     assert _in_day(events) == ["holiday"]
 
@@ -1330,7 +1330,7 @@ def test_events_in_window_ignores_a_mismatched_all_day_pair():
     the one day its start names rather than as something reaching into the
     next.
     """
-    events = [{"uid": "odd", "start": "2026-07-20", "ende": "2026-07-20T15:00:00+02:00"}]
+    events = [{"uid": "odd", "start": "2026-07-20", "end": "2026-07-20T15:00:00+02:00"}]
     assert _in_day(events) == ["odd"]
     assert _in_day(events, date(2026, 7, 21)) == []
 
@@ -1338,9 +1338,9 @@ def test_events_in_window_ignores_a_mismatched_all_day_pair():
 def test_events_in_window_keeps_what_it_cannot_judge():
     """Neither a series master nor an event without a start may be dropped."""
     events: list[dict[str, Any]] = [
-        {"uid": "series", "start": "2020-01-06T09:00:00+01:00", "wiederholung": "FREQ=WEEKLY"},
+        {"uid": "series", "start": "2020-01-06T09:00:00+01:00", "recurrence": "FREQ=WEEKLY"},
         {"uid": "no-start", "start": None},
-        {"uid": "unparseable", "start": "irgendwann"},
+        {"uid": "unparseable", "start": "sometime"},
         {"uid": "elsewhere", "start": "2026-09-01T09:00:00+02:00"},
     ]
     assert _in_day(events) == ["series", "no-start", "unparseable"]
@@ -1351,7 +1351,7 @@ def test_events_in_window_keeps_what_it_cannot_judge():
 
 def test_event_busy_interval_timed_event():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", ende="2026-07-20T15:00:00")
+    _apply(event, title="T", start="2026-07-20T14:00:00", end="2026-07-20T15:00:00")
     interval = event_mapping.event_busy_interval(event)
     assert interval == (
         datetime(2026, 7, 20, 14, 0, tzinfo=ZoneInfo("Europe/Berlin")),
@@ -1367,7 +1367,7 @@ def test_event_busy_interval_all_day_event_spans_full_local_days():
     windows `list_events`/`get_agenda` use for the very same date.
     """
     event = _new_event()
-    _apply(event, titel="T", start="2026-08-01", ende="2026-08-02")
+    _apply(event, title="T", start="2026-08-01", end="2026-08-02")
     interval = event_mapping.event_busy_interval(event)
     berlin = ZoneInfo("Europe/Berlin")
     assert interval == (
@@ -1378,7 +1378,7 @@ def test_event_busy_interval_all_day_event_spans_full_local_days():
 
 def test_event_busy_interval_all_day_event_follows_configured_timezone():
     event = _new_event()
-    _apply(event, titel="T", start="2026-08-01", ende="2026-08-01")
+    _apply(event, title="T", start="2026-08-01", end="2026-08-01")
     mapping.set_default_timezone("UTC")
     interval = event_mapping.event_busy_interval(event)
     assert interval == (
@@ -1389,20 +1389,20 @@ def test_event_busy_interval_all_day_event_follows_configured_timezone():
 
 def test_event_busy_interval_cancelled_is_not_busy():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00", status="abgesagt")
+    _apply(event, title="T", start="2026-07-20T14:00:00", status="cancelled")
     assert event_mapping.event_busy_interval(event) is None
 
 
 def test_event_busy_interval_transparent_is_not_busy():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    _apply(event, title="T", start="2026-07-20T14:00:00")
     event.add("transp", "TRANSPARENT")
     assert event_mapping.event_busy_interval(event) is None
 
 
 def test_event_busy_interval_opaque_is_busy():
     event = _new_event()
-    _apply(event, titel="T", start="2026-07-20T14:00:00")
+    _apply(event, title="T", start="2026-07-20T14:00:00")
     event.add("transp", "OPAQUE")
     assert event_mapping.event_busy_interval(event) is not None
 
@@ -1576,7 +1576,7 @@ def test_extract_freebusy_periods_no_freebusy_property_is_empty():
 
 # --- apply_exdate_changes: additive/subtractive EXDATE edits ------------------
 #
-# The counterpart of the `ausnahme_daten` tests above, which cover the
+# The counterpart of the `exception_dates` tests above, which cover the
 # replacing path. What matters here is that an existing set survives, that a
 # whole day resolves against the series' own start time, and that a spec
 # naming nothing is reported instead of raised.
@@ -1584,13 +1584,13 @@ def test_extract_freebusy_periods_no_freebusy_property_is_empty():
 
 def _recurring(start: str = "2026-07-20T09:00:00", rule: str = "FREQ=WEEKLY;BYDAY=MO") -> Event:
     event = _new_event()
-    _apply(event, titel="Standup", start=start, wiederholung=rule)
+    _apply(event, title="Standup", start=start, recurrence=rule)
     return event
 
 
 def test_exdate_add_keeps_the_existing_entries():
     event = _recurring()
-    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+    _apply(event, exception_dates=["2026-07-27T09:00:00"])
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-08-03T09:00:00"])
 
@@ -1598,7 +1598,7 @@ def test_exdate_add_keeps_the_existing_entries():
     assert report["removed"] == 0
     assert report["total"] == 2
     assert report["skipped"] == []
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == [
+    assert event_mapping.parse_vevent(event)["exception_dates"] == [
         "2026-07-27T09:00:00+02:00",
         "2026-08-03T09:00:00+02:00",
     ]
@@ -1612,22 +1612,22 @@ def test_exdate_add_accepts_a_whole_day_for_a_timed_series():
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
 
     assert report["added"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T09:00:00+02:00"]
 
 
 def test_exdate_add_of_a_whole_day_cancels_every_occurrence_on_it():
     event = _new_event()
     _apply(
         event,
-        titel="Zwei am Tag",
+        title="Twice a day",
         start="2026-07-20T09:00:00",
-        wiederholung="FREQ=HOURLY;INTERVAL=4;BYHOUR=9,13",
+        recurrence="FREQ=HOURLY;INTERVAL=4;BYHOUR=9,13",
     )
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-21"])
 
     assert report["added"] == 2
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == [
+    assert event_mapping.parse_vevent(event)["exception_dates"] == [
         "2026-07-21T09:00:00+02:00",
         "2026-07-21T13:00:00+02:00",
     ]
@@ -1641,7 +1641,7 @@ def test_exdate_add_reports_a_day_the_series_does_not_run_on():
     assert report["added"] == 1
     assert [entry["value"] for entry in report["skipped"]] == ["2026-07-22"]
     assert "no occurrence on that day" in report["skipped"][0]["reason"]
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T09:00:00+02:00"]
 
 
 def test_exdate_add_can_refuse_to_skip_instead():
@@ -1650,7 +1650,7 @@ def test_exdate_add_can_refuse_to_skip_instead():
     with pytest.raises(InvalidEventDataError, match="2026-07-22"):
         event_mapping.apply_exdate_changes(event, add=["2026-07-22"], ignore_non_occurrences=False)
     # Nothing was written, not even the entries that did resolve.
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+    assert event_mapping.parse_vevent(event)["exception_dates"] == []
 
 
 def test_exdate_add_is_idempotent():
@@ -1661,23 +1661,23 @@ def test_exdate_add_is_idempotent():
 
     assert report["added"] == 0
     assert report["total"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T09:00:00+02:00"]
 
 
 def test_exdate_remove_drops_only_what_it_names():
     event = _recurring()
-    _apply(event, ausnahme_daten=["2026-07-27T09:00:00", "2026-08-03T09:00:00"])
+    _apply(event, exception_dates=["2026-07-27T09:00:00", "2026-08-03T09:00:00"])
 
     report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27"])
 
     assert report["removed"] == 1
     assert report["total"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-08-03T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-08-03T09:00:00+02:00"]
 
 
 def test_exdate_remove_reports_one_the_event_never_had():
     event = _recurring()
-    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+    _apply(event, exception_dates=["2026-07-27T09:00:00"])
 
     report = event_mapping.apply_exdate_changes(event, remove=["2026-08-03"])
 
@@ -1691,38 +1691,38 @@ def test_exdate_remove_works_on_a_leftover_of_a_moved_series():
     # The series moved to Tuesdays; the old Monday exception is no longer an
     # occurrence of anything, and still has to be removable.
     event = _recurring()
-    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
-    _apply(event, wiederholung="FREQ=WEEKLY;BYDAY=TU")
+    _apply(event, exception_dates=["2026-07-27T09:00:00"])
+    _apply(event, recurrence="FREQ=WEEKLY;BYDAY=TU")
 
     report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27T09:00:00"])
 
     assert report["removed"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+    assert event_mapping.parse_vevent(event)["exception_dates"] == []
 
 
 def test_exdate_remove_is_applied_before_add():
     event = _recurring()
-    _apply(event, ausnahme_daten=["2026-07-27T09:00:00"])
+    _apply(event, exception_dates=["2026-07-27T09:00:00"])
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"], remove=["2026-07-27"])
 
     assert (report["added"], report["removed"], report["total"]) == (1, 1, 1)
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T09:00:00+02:00"]
 
 
 def test_exdate_add_on_an_all_day_series_takes_days():
     event = _new_event()
-    _apply(event, titel="Urlaubstag", start="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+    _apply(event, title="Vacation day", start="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
 
     assert report["added"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27"]
 
 
 def test_exdate_add_of_a_datetime_to_an_all_day_series_is_reported():
     event = _new_event()
-    _apply(event, titel="Urlaubstag", start="2026-07-20", wiederholung="FREQ=WEEKLY;BYDAY=MO")
+    _apply(event, title="Vacation day", start="2026-07-20", recurrence="FREQ=WEEKLY;BYDAY=MO")
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T09:00:00"])
 
@@ -1736,10 +1736,10 @@ def test_exdate_add_keeps_one_property_and_one_zone():
     event = _new_event()
     _apply(
         event,
-        titel="Standup",
+        title="Standup",
         start="2026-07-20T09:00:00 Europe/Berlin",
-        wiederholung="FREQ=WEEKLY;BYDAY=MO",
-        ausnahme_daten=["2026-07-27T09:00:00"],
+        recurrence="FREQ=WEEKLY;BYDAY=MO",
+        exception_dates=["2026-07-27T09:00:00"],
     )
 
     event_mapping.apply_exdate_changes(event, add=["2026-08-03T07:00:00+00:00"])
@@ -1754,17 +1754,17 @@ def test_exdate_add_on_a_series_with_no_recurrence_keeps_an_exact_datetime():
     # No rule to expand, so nothing can be proven either way - an exact
     # datetime is taken at face value, as the replacing path also does.
     event = _new_event()
-    _apply(event, titel="Einzeltermin", start="2026-07-20T09:00:00")
+    _apply(event, title="Single_event", start="2026-07-20T09:00:00")
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27T09:00:00"])
 
     assert report["added"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T09:00:00+02:00"]
 
 
 def test_exdate_add_of_a_whole_day_needs_a_recurrence_to_expand():
     event = _new_event()
-    _apply(event, titel="Einzeltermin", start="2026-07-20T09:00:00")
+    _apply(event, title="Single_event", start="2026-07-20T09:00:00")
 
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
 
@@ -1779,7 +1779,7 @@ def test_exdate_add_counts_an_rdate_as_an_occurrence():
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-22"])
 
     assert report["added"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-22T09:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-22T09:00:00+02:00"]
 
 
 def test_exdate_add_across_a_dst_boundary_matches_the_local_time():
@@ -1790,14 +1790,14 @@ def test_exdate_add_across_a_dst_boundary_matches_the_local_time():
     report = event_mapping.apply_exdate_changes(event, add=["2026-11-02"])
 
     assert report["added"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-11-02T09:00:00+01:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-11-02T09:00:00+01:00"]
 
 
 def test_exdate_garbage_still_raises():
     event = _recurring()
 
     with pytest.raises(InvalidEventDataError):
-        event_mapping.apply_exdate_changes(event, add=["kein datum"])
+        event_mapping.apply_exdate_changes(event, add=["not a date"])
 
 
 def test_exdate_add_reads_a_foreign_floating_exdate_in_the_default_zone():
@@ -1838,7 +1838,7 @@ def test_exdate_remove_works_on_an_event_without_a_start():
     report = event_mapping.apply_exdate_changes(event, remove=["2026-07-27T09:00:00Z"])
 
     assert report["removed"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == []
+    assert event_mapping.parse_vevent(event)["exception_dates"] == []
 
 
 def _floating_series() -> Event:
@@ -1858,14 +1858,14 @@ def _floating_series() -> Event:
     )
 
 
-def test_ausnahme_daten_still_accepts_an_occurrence_of_a_floating_series():
+def test_exception_dates_still_accepts_an_occurrence_of_a_floating_series():
     # The replacing path, which the shared occurrence index is also used by:
     # this occurrence is real and must not be rejected as naming nothing.
     event = _floating_series()
 
-    _apply(event, ausnahme_daten=["2026-07-27T01:00:00"])
+    _apply(event, exception_dates=["2026-07-27T01:00:00"])
 
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T01:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T01:00:00+02:00"]
 
 
 def test_exdate_add_of_a_whole_day_finds_a_floating_small_hours_occurrence():
@@ -1874,7 +1874,7 @@ def test_exdate_add_of_a_whole_day_finds_a_floating_small_hours_occurrence():
     report = event_mapping.apply_exdate_changes(event, add=["2026-07-27"])
 
     assert report["added"] == 1
-    assert event_mapping.parse_vevent(event)["ausnahme_daten"] == ["2026-07-27T01:00:00+02:00"]
+    assert event_mapping.parse_vevent(event)["exception_dates"] == ["2026-07-27T01:00:00+02:00"]
 
 
 def test_exdate_add_of_an_exact_occurrence_of_a_floating_series():
@@ -1908,22 +1908,59 @@ def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
 # --- Birthday convention (birthday_fields) ---
 
 
-_HEUTE = date(2026, 8, 24)
+def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account():
+    assert event_mapping.resolve_birthday_calendar([]) == "Birthdays"
+    assert event_mapping.resolve_birthday_calendar(["Work", "Personal"]) == "Birthdays"
 
 
-def _birthday(name: str = "Papa", datum: str = "07-04", jahr: int | None = None) -> EventFields:
-    return event_mapping.birthday_fields(name, datum, jahr, heute=_HEUTE)
+def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar():
+    """A server set up before the rename already files birthdays in "Birthdays"."""
+    assert event_mapping.resolve_birthday_calendar(["Work", "Birthdays"]) == "Birthdays"
+
+
+def test_resolve_birthday_calendar_prefers_english_when_both_exist():
+    assert event_mapping.resolve_birthday_calendar(["Birthdays", "Birthdays"]) == "Birthdays"
+
+
+def test_resolve_birthday_calendar_matches_the_name_exactly():
+    """Resolution elsewhere compares display names exactly, so a differently
+    cased calendar is not this calendar - claiming it would only turn a clean
+    "not found" into a confusing one."""
+    assert event_mapping.resolve_birthday_calendar(["birthdays"]) == "Birthdays"
+
+
+def test_birthday_tag_follows_the_calendar():
+    assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
+    assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
+    assert event_mapping.birthday_tag_for("Family") == "Birthday"
+
+
+def test_birthday_fields_tags_with_the_given_tag():
+    fields = event_mapping.birthday_fields("Dad", "07-04", 1975, today=_TODAY, tag="Birthday")
+
+    assert fields.tags == ["Birthday"]
+    # Everything else about the convention is unchanged by the tag.
+    assert fields.title == "🎂 Dad (1975)"
+    assert fields.recurrence == "FREQ=YEARLY"
+    assert fields.visibility == "private"
+
+
+_TODAY = date(2026, 8, 24)
+
+
+def _birthday(name: str = "Dad", date_text: str = "07-04", year: int | None = None) -> EventFields:
+    return event_mapping.birthday_fields(name, date_text, year, today=_TODAY)
 
 
 def test_birthday_fields_writes_the_full_convention():
-    fields = _birthday("Papa", "07-04", 1975)
+    fields = _birthday("Dad", "07-04", 1975)
 
-    assert fields.titel == "🎂 Papa (1975)"
-    assert (fields.start, fields.ende) == ("1975-07-04", "1975-07-04")
-    assert fields.tags == ["Geburtstag"]
-    assert fields.sichtbarkeit == "privat"
-    assert fields.wiederholung == "FREQ=YEARLY"
-    assert fields.erinnerungen == ["-PT0M", "-P1D"]
+    assert fields.title == "🎂 Dad (1975)"
+    assert (fields.start, fields.end) == ("1975-07-04", "1975-07-04")
+    assert fields.tags == ["Birthday"]
+    assert fields.visibility == "private"
+    assert fields.recurrence == "FREQ=YEARLY"
+    assert fields.reminders == ["-PT0M", "-P1D"]
     assert fields.clear == ()
 
 
@@ -1933,40 +1970,40 @@ def test_birthday_fields_starts_in_the_birth_year_so_the_age_is_readable():
     assert _birthday("Julia Beck", "02-02", 1996).start == "1996-02-02"
 
 
-def test_birthday_fields_takes_the_year_from_a_full_datum():
-    fields = _birthday("Mama", "1981-02-05")
+def test_birthday_fields_takes_the_year_from_a_full_date():
+    fields = _birthday("Mom", "1981-02-05")
 
-    assert (fields.titel, fields.start) == ("🎂 Mama (1981)", "1981-02-05")
+    assert (fields.title, fields.start) == ("🎂 Mom (1981)", "1981-02-05")
 
 
 def test_birthday_fields_takes_the_year_from_a_title_read_back():
-    fields = _birthday("🎂 Papa (1975)", "07-04")
+    fields = _birthday("🎂 Dad (1975)", "07-04")
 
-    assert (fields.titel, fields.start) == ("🎂 Papa (1975)", "1975-07-04")
+    assert (fields.title, fields.start) == ("🎂 Dad (1975)", "1975-07-04")
 
 
 def test_birthday_fields_does_not_double_the_cake():
-    assert _birthday("🎂 Marlene", "09-03", 2008).titel == "🎂 Marlene (2008)"
+    assert _birthday("🎂 Marlene", "09-03", 2008).title == "🎂 Marlene (2008)"
 
 
 def test_birthday_fields_accepts_the_same_year_from_several_sources():
-    fields = _birthday("Papa (1975)", "1975-07-04", 1975)
+    fields = _birthday("Dad (1975)", "1975-07-04", 1975)
 
-    assert fields.titel == "🎂 Papa (1975)"
+    assert fields.title == "🎂 Dad (1975)"
 
 
 def test_birthday_fields_rejects_conflicting_years():
     with pytest.raises(InvalidEventDataError, match="Conflicting birth years"):
-        _birthday("Papa (1975)", "1976-07-04")
+        _birthday("Dad (1975)", "1976-07-04")
 
 
 def test_birthday_fields_without_a_year_omits_it_and_starts_at_the_next_occurrence():
     # 07-02 already passed in 2026 (today is 2026-08-24), so the series starts
     # next year rather than in the past.
-    fields = _birthday("Oma Walli", "07-02")
+    fields = _birthday("Grandma Walli", "07-02")
 
-    assert (fields.titel, fields.start, fields.ende) == (
-        "🎂 Oma Walli",
+    assert (fields.title, fields.start, fields.end) == (
+        "🎂 Grandma Walli",
         "2027-07-02",
         "2027-07-02",
     )
@@ -1977,31 +2014,31 @@ def test_birthday_fields_without_a_year_uses_this_year_when_still_ahead():
 
 
 def test_birthday_fields_without_a_year_counts_today_as_upcoming():
-    assert _birthday("Heute", "08-24").start == "2026-08-24"
+    assert _birthday("Today", "08-24").start == "2026-08-24"
 
 
 def test_birthday_fields_without_a_year_finds_the_next_real_leap_day():
-    assert _birthday("Schaltjahr", "02-29").start == "2028-02-29"
+    assert _birthday("Leap Year", "02-29").start == "2028-02-29"
 
 
 def test_birthday_fields_rejects_a_leap_day_in_a_non_leap_birth_year():
     with pytest.raises(InvalidEventDataError, match="1997 is not a leap year"):
-        _birthday("Schaltjahr", "02-29", 1997)
+        _birthday("Leap Year", "02-29", 1997)
 
 
 def test_birthday_fields_keeps_a_leap_day_birth_year():
-    assert _birthday("Schaltjahr", "02-29", 1996).start == "1996-02-29"
+    assert _birthday("Leap Year", "02-29", 1996).start == "1996-02-29"
 
 
-@pytest.mark.parametrize("datum", ["4.7.", "07/04", "2026-07", "07-04-1975", "Juli"])
-def test_birthday_fields_rejects_unparseable_datum(datum):
-    with pytest.raises(InvalidEventDataError, match="Could not parse datum"):
-        _birthday("Papa", datum)
+@pytest.mark.parametrize("date", ["4.7.", "07/04", "2026-07", "07-04-1975", "July"])
+def test_birthday_fields_rejects_unparseable_date(date):
+    with pytest.raises(InvalidEventDataError, match="Could not parse date"):
+        _birthday("Dad", date)
 
 
 def test_birthday_fields_rejects_an_impossible_month_day():
     with pytest.raises(InvalidEventDataError, match="not a valid month/day"):
-        _birthday("Papa", "13-04")
+        _birthday("Dad", "13-04")
 
 
 def test_birthday_fields_rejects_a_future_birth_year():
@@ -2024,7 +2061,7 @@ def test_birthday_fields_accepts_a_birth_date_earlier_this_year():
 
 def test_birthday_fields_rejects_a_two_digit_birth_year():
     with pytest.raises(InvalidEventDataError, match="not a four-digit year"):
-        _birthday("Papa", "07-04", 75)
+        _birthday("Dad", "07-04", 75)
 
 
 @pytest.mark.parametrize("name", ["", "   ", "🎂", "🎂 (1975)"])
@@ -2034,29 +2071,29 @@ def test_birthday_fields_rejects_an_empty_name(name):
 
 
 def test_birthday_fields_defaults_today_to_the_server_timezone():
-    # No `heute` given: the fallback start must be a real upcoming date, not
+    # No `today` given: the fallback start must be a real upcoming date, not
     # whatever a naive utcnow would make of it.
-    fields = event_mapping.birthday_fields("Ohne Jahr", "07-02")
+    fields = event_mapping.birthday_fields("Without year", "07-02")
 
-    heute = datetime.now(mapping.get_default_timezone()).date()
-    assert date.fromisoformat(str(fields.start)) >= heute
+    today = datetime.now(mapping.get_default_timezone()).date()
+    assert date.fromisoformat(str(fields.start)) >= today
 
 
 def test_birthday_fields_round_trip_through_a_vevent():
     # The convention has to survive being written and read back the way the
     # existing entries in the birthday calendar look.
     event = _new_event("birthday-1")
-    event_mapping.apply_event_fields(event, _birthday("Papa", "07-04", 1975))
+    event_mapping.apply_event_fields(event, _birthday("Dad", "07-04", 1975))
 
     parsed = event_mapping.parse_vevent(event)
 
-    assert parsed["titel"] == "🎂 Papa (1975)"
-    assert (parsed["start"], parsed["ende"]) == ("1975-07-04", "1975-07-04")
-    assert parsed["ganztaegig"] is True
-    assert parsed["wiederholung"] == "FREQ=YEARLY"
-    assert parsed["tags"] == ["Geburtstag"]
-    assert parsed["sichtbarkeit"] == "privat"
+    assert parsed["title"] == "🎂 Dad (1975)"
+    assert (parsed["start"], parsed["end"]) == ("1975-07-04", "1975-07-04")
+    assert parsed["all_day"] is True
+    assert parsed["recurrence"] == "FREQ=YEARLY"
+    assert parsed["tags"] == ["Birthday"]
+    assert parsed["visibility"] == "private"
     # Both reminders read back exactly as BIRTHDAY_REMINDERS spells them. The
     # zero-length one used to come back as icalendar's "P0D" - same moment,
     # different string - until reminder output was normalized on "-PT0M".
-    assert sorted(parsed["erinnerungen"]) == ["-P1D", "-PT0M"]
+    assert sorted(parsed["reminders"]) == ["-P1D", "-PT0M"]
