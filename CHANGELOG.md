@@ -107,6 +107,7 @@ This project does not yet follow Semantic Versioning releases.
     status value), `import_ics`' `importiert`/`uebersprungen`->
     `imported`/`skipped`, and `get_free_busy`'s `belegt`->`busy`.
   - Note dicts: `geaendert`->`modified`, `schreibgeschuetzt`->`read_only`.
+  - `list_calendars` entries: `komponenten`->`components`.
   - `list_calendar_shares` invite statuses: `akzeptiert`->`accepted`,
     `abgelehnt`->`declined`, `ungueltig`->`invalid`, `geloescht`->`deleted`
     (`pending` was already English).
