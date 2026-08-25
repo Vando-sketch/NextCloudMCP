@@ -545,7 +545,10 @@ Behaviour:
 - Target is resolved BEFORE touching the source task object.
 - If source == target (same collection URL), returns no-op success immediately with `"methode": "MOVE"`.
 - Preferred path: issues a CalDAV `MOVE` request on the object's URL with `Destination` and `Overwrite: F`, preserving server-side URL identity, UID, ETags, and all properties.
-- Fallback path: if the server rejects `MOVE` with HTTP 403, 405, 409, 501, or 502, the entire calendar object (carrying UID, VTIMEZONEs, VALARMs, RRULE, EXDATE, RELATED-TO, etc.) is copied into the target list with `save_todo` (guarded with `no_overwrite`), verified by re-fetching, and only then is the source task deleted. The fallback NEVER deletes the source before a verified write.
+- Fallback path: if the server rejects `MOVE` with HTTP 403, 405, 409, or 501, the entire calendar object (carrying UID, VTIMEZONEs, VALARMs, RRULE, EXDATE, RELATED-TO, etc.) is copied into the target list with `save_todo` (guarded with `no_overwrite`), verified by re-fetching, and only then is the source task deleted. The fallback NEVER deletes the source before a verified write.
+- Retry path: HTTP 502, 503 and 504 are *not* the fallback's business. A gateway status is no answer at all — the move may well have been carried out and only its acknowledgement lost, in which case copying would read a source that is already gone, or clash with the object now sitting in the target. The whole move is retried instead (3 attempts, 0.5s then 1.0s apart), as are dropped connections and timeouts.
+- The one write that is *not* retried is the fallback's own copy: once a `PUT` has gone unanswered, nobody can tell whether it landed, and a retry would either meet its own copy and call it a clash or risk deleting the source against an unverified one. The source is kept and the error says the target's state is unknown, rather than claiming nothing was written.
+- Already-moved recovery: if the task is missing from the source, the target is checked before the UID is called missing. Finding it there returns `"methode": "bereits_dort"` — this is what makes a retry after a lost acknowledgement, and a re-run of a half-finished [`move_tasks`](#move_taskslist_name-task_uids-ziel_liste) batch, converge instead of reporting already-moved tasks as gone.
 - If an object with that UID already exists in the target collection, the operation is refused (HTTP 412 or pre-check on fallback) with a speaking error.- The read-back check compares instances, not just the UID: for a recurring object the master and every `RECURRENCE-ID` override must be present in the target, otherwise the copy is reported as incomplete and the original is kept.
 
 Result shape:
@@ -559,7 +562,109 @@ Result shape:
 }
 ```
 
-(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, `"kopiert"` if the copy+delete
+fallback was executed, or `"bereits_dort"` if the task was already in the target.)
+
+---
+
+## Task batches: `update_tasks`, `delete_tasks`, `move_tasks`
+
+Three tools that take a list of UIDs instead of one, so a change that applies
+to many tasks is a single call with a single report. They are the task-side
+twins of [`update_events`](#update_eventskalender_name-event_uids-) and
+[`delete_events`](#delete_eventskalender_name-event_uids), and share one
+contract:
+
+- **Limit**: at most 200 UIDs per call. An empty list, or more than 200, is an error.
+- **Deduplication**: duplicate UIDs are deduplicated, preserving the order of first occurrence.
+- **List resolution**: the task list is resolved once for the whole call, not per UID. If the cached collection turns out to be stale, resolution is refreshed once for the batch rather than reporting every UID as missing.
+- **Partial-failure contract**: a failure that belongs to one task — unknown UID, a conflicting edit, a patch that doesn't fit that task, an occurrence UID (`"<serie_uid>#<date>"`) — becomes an entry in `ergebnisse` and the batch carries on.
+- **Retries**: HTTP 502/503/504 and dropped connections are retried per item (3 attempts, 0.5s then 1.0s apart) before anything is reported at all.
+- **When a batch does stop**: a failure that says the whole call is broken — bad credentials, an unreachable server, a write that keeps failing however often it is retried — aborts rather than repeating itself 200 times. Because an exception carries no `ergebnisse`, the message then names how far it got: how many tasks were done, which ones, and which UIDs are still to do. Re-run with those.
+
+### `update_tasks(list_name, task_uids, ...)`
+
+Applies one field patch to up to 200 tasks in a list.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_name` | string | yes | Display name of the task list containing the tasks |
+| `task_uids` | array of strings | yes | UIDs of tasks to update (max 200) |
+| (all other parameters) | | no | Same optional fields and `felder_leeren` options as `update_task` |
+
+The patch is validated ONCE up front — invalid RRULE, unknown `felder_leeren`
+entry, invalid status, empty patch — and fails hard before a single task is
+written. Whether the patch *fits* a given task stays per-task and is reported
+per UID.
+
+As on the event side, a patch consisting only of `ausnahme_daten` is rejected
+up front: exception dates are validated against the task's own recurrence rule,
+which the up-front check has no task to read. Pass `wiederholung` in the same
+call, or change the tasks one at a time.
+
+Returns:
+```json
+{
+  "list_name": "Personal",
+  "erfolgreich": 12,
+  "fehlgeschlagen": 1,
+  "ergebnisse": [
+    {"uid": "t1", "status": "ok"},
+    {"uid": "t2", "status": "fehler", "fehler": "Task 't2' was not found."}
+  ]
+}
+```
+
+### `delete_tasks(list_name, task_uids)`
+
+Batch deletes up to 200 tasks from a single task list.
+
+> **Irreversible**, and a batch multiplies the damage a wrong UID list does. Confirm the list with the user before calling this.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_name` | string | yes | Display name of the task list containing the tasks |
+| `task_uids` | array of strings | yes | UIDs of tasks to delete (max 200) |
+
+Same envelope as `update_tasks`. A UID that does not exist is a failed entry;
+the other tasks are still deleted. A DELETE the *server* refuses says nothing
+about that one task, so it stops the batch (with the report described above)
+rather than working through the rest of the list.
+
+### `move_tasks(list_name, task_uids, ziel_liste)`
+
+Moves up to 200 tasks from one list to another — the tool for migrating a list.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `list_name` | string | yes | Display name of the source task list |
+| `task_uids` | array of strings | yes | UIDs of tasks to move (max 200) |
+| `ziel_liste` | string | yes | Display name of the target task list |
+
+Both lists are resolved once, then each task is moved exactly as
+[`move_task`](#move_tasklist_name-task_uid-ziel_liste) does it, including the
+copy-then-delete fallback and the retries. Each `"ok"` entry carries the same
+`von` / `nach` / `methode` fields that `move_task` returns.
+
+**Re-running is safe.** A task already sitting in the target is reported as
+`"methode": "bereits_dort"` rather than moved twice or reported as missing, so
+after a batch that stopped part-way you can call it again with the full UID list
+and it converges.
+
+Returns:
+```json
+{
+  "list_name": "MCP-World",
+  "erfolgreich": 12,
+  "fehlgeschlagen": 1,
+  "ergebnisse": [
+    {"uid": "t1", "status": "ok", "von": "MCP-World", "nach": "Archiv", "methode": "MOVE"},
+    {"uid": "t2", "status": "ok", "von": "MCP-World", "nach": "Archiv", "methode": "bereits_dort"},
+    {"uid": "t3", "status": "fehler",
+     "fehler": "A task with UID 't3' already exists in target task list 'Archiv'."}
+  ]
+}
+```
 
 ---
 
@@ -1012,7 +1117,9 @@ Behaviour:
 - Target is resolved BEFORE touching the source event object.
 - If source == target (same collection URL), returns no-op success immediately with `"methode": "MOVE"`.
 - Preferred path: issues a CalDAV `MOVE` request on the object's URL with `Destination` and `Overwrite: F`, preserving server-side URL identity, UID, ETags, and all properties.
-- Fallback path: if the server rejects `MOVE` with HTTP 403, 405, 409, 501, or 502, the entire calendar object (carrying UID, VTIMEZONEs, VALARMs, RRULE, EXDATE, RELATED-TO, etc.) is copied into the target calendar with `save_event` (guarded with `no_overwrite`), verified by re-fetching, and only then is the source event deleted. The fallback NEVER deletes the source before a verified write.
+- Fallback path: if the server rejects `MOVE` with HTTP 403, 405, 409, or 501, the entire calendar object (carrying UID, VTIMEZONEs, VALARMs, RRULE, EXDATE, RELATED-TO, etc.) is copied into the target calendar with `save_event` (guarded with `no_overwrite`), verified by re-fetching, and only then is the source event deleted. The fallback NEVER deletes the source before a verified write.
+- Retry path: HTTP 502, 503 and 504 are *not* the fallback's business — a gateway status is no answer at all, and the move may well have been carried out. The whole move is retried instead (3 attempts, 0.5s then 1.0s apart), as are dropped connections and timeouts.
+- Already-moved recovery: if the event is missing from the source, the target is checked before the UID is called missing; finding it there returns `"methode": "bereits_dort"`.
 - If an object with that UID already exists in the target collection, the operation is refused (HTTP 412 or pre-check on fallback) with a speaking error.- The read-back check compares instances, not just the UID: for a recurring object the master and every `RECURRENCE-ID` override must be present in the target, otherwise the copy is reported as incomplete and the original is kept.
 
 Result shape:
@@ -1026,7 +1133,8 @@ Result shape:
 }
 ```
 
-(`"methode"` is `"MOVE"` if CalDAV MOVE was used, or `"kopiert"` if copy+delete fallback was executed.)
+(`"methode"` is `"MOVE"` if CalDAV MOVE was used, `"kopiert"` if the copy+delete
+fallback was executed, or `"bereits_dort"` if the event was already in the target.)
 
 ---
 

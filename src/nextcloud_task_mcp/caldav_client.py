@@ -119,8 +119,11 @@ _BATCH_RETRY_ATTEMPTS = 3
 _BATCH_RETRY_BASE_DELAY = 0.5
 
 # caldav renders a failed response as "<status> <reason>\n\n<body>" (see
-# `caldav.lib.error.errmsg`), so a status is only ever the leading token.
-_LEADING_HTTP_STATUS_RE = re.compile(r"^\s*(\d{3})\b")
+# `caldav.lib.error.errmsg`), so a status is only ever the leading token. The
+# reason phrase has to be there too: the same field otherwise holds a real URL
+# on some caldav error paths, and a host whose name begins with three digits
+# must not read as a status code.
+_LEADING_HTTP_STATUS_RE = re.compile(r"^\s*([1-5]\d{2})[ \t]+\S")
 
 # A date-only string is what makes an event all-day (see `parse_datetime_input`).
 _ALL_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -208,6 +211,19 @@ def _translate(exc: Exception) -> TaskMcpError:
             "and retry."
         )
     if isinstance(exc, caldav_error.DAVError):
+        # Checked before the flat "the request failed" below because the
+        # difference is actionable: a gateway status means the request reached
+        # no decision, which `_retry_transient` can act on - but only if this
+        # translation preserves it. Flattening it here would silently turn
+        # every retryable failure into a permanent one at the first call site
+        # that translates before retrying.
+        status = _dav_error_status(exc)
+        if status in _TRANSIENT_HTTP_STATUSES:
+            return TransientServerError(
+                f"Nextcloud gave no answer to this request (HTTP {status}); it may or may "
+                "not have been carried out. This is usually a proxy in front of Nextcloud "
+                "rather than Nextcloud itself."
+            )
         logger.warning("CalDAV request failed", exc_info=exc)
         return TaskMcpError("The CalDAV request failed on the Nextcloud server.")
     if isinstance(exc, (_http_errors.ConnectionError, _http_errors.Timeout)):
@@ -243,10 +259,11 @@ def _dav_error_status(exc: Exception) -> int | None:
 
 def _is_transient(exc: Exception) -> bool:
     """True for a failure that says nothing about the request, only about the moment."""
-    if isinstance(exc, TransientServerError):
-        # Raised by this module where a *response* carries a gateway status,
-        # which caldav hands back as an ordinary response rather than an error
-        # (the MOVE in `_move_one` is the one place that matters).
+    if isinstance(exc, (TransientServerError, ConnectionFailedError)):
+        # The already-translated forms. Most write paths run their exceptions
+        # through `_translate` before anything else sees them, so recognizing
+        # only the raw library exceptions below would leave the retries dead on
+        # exactly the paths that need them most.
         return True
     if isinstance(exc, (_http_errors.ConnectionError, _http_errors.Timeout)):
         return True
@@ -2004,30 +2021,23 @@ class CalDavService:
 
             def operation(calendar: DAVCalendar, uid: str) -> dict[str, Any]:
                 _reject_occurrence_uid(uid)
-                source_display = calendar.get_display_name() or list_name
-                try:
-                    return self._move_one(
-                        calendar, target_col, uid, "VTODO", source_display, target_display
-                    )
-                except (
-                    ObjectMoveError,
-                    TaskConflictError,
-                    AuthenticationFailedError,
-                    ConnectionFailedError,
-                    # Survived its retries, so the server is not answering at
-                    # all - a reason to stop, not to try it 199 more times.
-                    TransientServerError,
-                    caldav_error.NotFoundError,
-                ):
-                    raise
-                except TaskMcpError as exc:
-                    # A move has more halfway points than an update, and the
-                    # rest of them concern this task alone (a UID already in
-                    # the target, a copy the server would not accept).
-                    # `_batch_over_uids` only keeps going for errors it
-                    # recognizes as per-object, so those are re-badged rather
-                    # than allowed to abort the remaining UIDs.
-                    raise ObjectMoveError(str(exc)) from exc
+                # `_move_one` already raises `ObjectMoveError` for every
+                # halfway point that concerns one task (a UID the target
+                # already holds, a copy the server would not accept, a source
+                # it would not delete), which `_batch_over_uids` records per
+                # UID. Whatever else reaches here is call-scoped - rate
+                # limiting, a forbidden request, a gateway that kept not
+                # answering - and must be left to abort the batch. Re-badging
+                # it as an `ObjectMoveError` would instead have the batch put
+                # the same broken request to the server another 199 times.
+                return self._move_one(
+                    calendar,
+                    target_col,
+                    uid,
+                    "VTODO",
+                    calendar.get_display_name() or list_name,
+                    target_display,
+                )
 
             return self._batch_over_uids(_TASK_BATCH, list_name, task_uids, operation)
 
@@ -3033,6 +3043,19 @@ class CalDavService:
                 except TaskMcpError:
                     raise
                 except Exception as write_exc:
+                    if _is_transient(write_exc):
+                        # Deliberately not retried, and deliberately not
+                        # claiming the target is clean. A write that got no
+                        # answer may still have landed, and a retry would
+                        # either find its own copy and call it a clash, or -
+                        # worse, if it ever learned to ignore that - risk
+                        # deleting the source against a copy nobody verified.
+                        raise ObjectMoveError(
+                            f"Copying {kind_str} '{uid}' to '{target_display}' got no answer "
+                            f"from the server, so it may or may not have arrived there. The "
+                            f"original in '{source_display}' was kept either way - check "
+                            f"'{target_display}' before retrying."
+                        ) from write_exc
                     raise ObjectMoveError(
                         f"Could not copy {kind_str} '{uid}' to '{target_display}'. "
                         f"The original in '{source_display}' was left untouched."

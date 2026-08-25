@@ -6744,3 +6744,120 @@ def test_move_tasks_occurrence_uid_fails_only_its_own_entry(service, principal, 
 
     assert (res["erfolgreich"], res["fehlgeschlagen"]) == (1, 1)
     assert "single occurrences cannot be edited" in res["ergebnisse"][0]["fehler"]
+
+
+# --- the paths that translate before they retry ---
+
+
+def test_a_translated_gateway_failure_is_still_recognized_as_transient():
+    """Most write paths run exceptions through `_translate` before anything retries them.
+
+    If that translation flattened a 502 into the generic "the request failed",
+    every retry on those paths would be dead while still looking alive.
+    """
+    translated = _translate(_put_error(502))
+    assert isinstance(translated, TransientServerError)
+    assert caldav_client_module._is_transient(translated) is True
+
+
+def test_a_translated_timeout_is_still_recognized_as_transient():
+    translated = _translate(caldav_client_module._http_errors.Timeout())
+    assert isinstance(translated, ConnectionFailedError)
+    assert caldav_client_module._is_transient(translated) is True
+
+
+def test_a_translated_decided_failure_is_not_transient():
+    assert caldav_client_module._is_transient(_translate(_put_error(500))) is False
+
+
+def test_a_url_beginning_with_digits_is_not_read_as_a_status():
+    # `DAVError.url` really does hold a URL on some caldav paths; a host named
+    # "502.example.com" must not make a retryable failure out of a decided one.
+    exc = caldav_error.PutError("502.example.com/dav/personal/t1.ics")
+    assert caldav_client_module._dav_error_status(exc) is None
+    assert caldav_client_module._is_transient(exc) is False
+
+
+def test_move_tasks_retries_a_timeout_while_reading_the_source(
+    service, principal, mock_dav_client, retry_sleep
+):
+    source, _ = _move_pair(principal)
+    source.get_todo_by_uid.side_effect = [
+        caldav_client_module._http_errors.Timeout(),
+        _movable("t1"),
+    ]
+    mock_dav_client.return_value.request.side_effect = _move_responder(201)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["ergebnisse"][0]["methode"] == "MOVE"
+    retry_sleep.assert_called_once()
+
+
+def test_a_copy_that_got_no_answer_is_not_retried_and_says_so(
+    service, principal, mock_dav_client, retry_sleep
+):
+    """The one write that must NOT be retried: it may have landed unverified.
+
+    A retry would meet its own copy in the target and call it a clash - and a
+    retry taught to ignore that would be deleting the source against a copy
+    nobody checked. So the source is kept and the message says the target is
+    unknown, rather than claiming nothing was written.
+    """
+    source, target = _move_pair(principal)
+    obj = _movable("t1")
+    source.get_todo_by_uid.return_value = obj
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    target.save_todo.side_effect = _put_error(502)
+    mock_dav_client.return_value.request.side_effect = _move_responder(405)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert res["fehlgeschlagen"] == 1
+    fehler = res["ergebnisse"][0]["fehler"]
+    assert "may or may not have arrived" in fehler
+    assert "was kept" in fehler
+    target.save_todo.assert_called_once()
+    obj.delete.assert_not_called()
+
+
+def test_a_copy_the_server_plainly_refused_still_says_the_original_is_safe(
+    service, principal, mock_dav_client
+):
+    source, target = _move_pair(principal)
+    obj = _movable("t1")
+    source.get_todo_by_uid.return_value = obj
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    target.save_todo.side_effect = _put_error(400)
+    mock_dav_client.return_value.request.side_effect = _move_responder(405)
+
+    res = service.move_tasks("MCP-World", ["t1"], "Archiv")
+
+    assert "left untouched" in res["ergebnisse"][0]["fehler"]
+    obj.delete.assert_not_called()
+
+
+def test_move_tasks_stops_on_a_call_scoped_failure_instead_of_repeating_it(
+    service, principal, mock_dav_client
+):
+    """Rate limiting is the server asking for less, not one task's problem."""
+    source, _ = _move_pair(principal)
+    objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
+    source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
+    calls = []
+
+    def respond(url, method="", body="", headers=None, **kwargs):
+        if method != "MOVE":
+            return SimpleNamespace(status=207, tree=None)
+        calls.append(url)
+        if len(calls) == 1:
+            return SimpleNamespace(status=201)
+        raise caldav_error.RateLimitError(url="https://cloud.example.com/dav/", reason="slow down")
+
+    mock_dav_client.return_value.request.side_effect = respond
+
+    with pytest.raises(TaskMcpError, match="rate-limiting"):
+        service.move_tasks("MCP-World", ["t1", "t2", "t3"], "Archiv")
+
+    # Asked once more after the first success, then stopped - not once per UID.
+    assert len(calls) == 2
