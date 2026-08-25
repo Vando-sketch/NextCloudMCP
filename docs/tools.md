@@ -67,7 +67,7 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 
 ---
 
-## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, list_name=None)`
+## `list_tasks(listen_namen=None, nur_offene=True, faellig_vor=None, faellig_nach=None, limit=None, prioritaet=None, tag=None, suchtext=None, felder=None, kompakt=False, list_name=None)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -79,6 +79,8 @@ A mixed calendar supporting both VEVENT and VTODO appears in both listings.
 | `prioritaet` | string enum | no | Filter by priority (`"hoch"`, `"mittel"`, `"niedrig"`) |
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `suchtext` | string | no | Case-insensitive substring match over `titel` and `notizen` |
+| `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per task. Unknown names error; `[]` means *no* whitelist (unlike `listen_namen=[]`, an empty scope) |
+| `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""` plus `liste_url` (unless whitelisted); truncate `notizen` to 200 chars with an `… [gekürzt …]` marker (`get_task` has the full text) |
 | `list_name` | string | no | **Deprecated** alias for `listen_namen`; pass `listen_namen` instead (passing both is an error) |
 
 > **BREAKING CHANGE**: Results are now sorted by `faellig_datum` ascending (tasks without a due date last, then by `titel`), rather than returned in server order.
@@ -640,7 +642,7 @@ Permanently deletes the calendar **and every event inside it**. Returns
 
 ---
 
-## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False)`
+## `list_events(kalender_namen=None, von=None, bis=None, suchtext=None, tag=None, limit=None, wiederholungen_aufloesen=False, felder=None, kompakt=False)`
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -651,6 +653,16 @@ Permanently deletes the calendar **and every event inside it**. Returns
 | `tag` | string | no | Exact (case-insensitive) match against one `tags` entry |
 | `limit` | integer | no | Max results, must be `> 0`; applied last (earliest events win) |
 | `wiederholungen_aufloesen` | boolean | no (default `false`) | Expand recurring events into single occurrences within `[von, bis]` (both bounds required) |
+| `felder` | list of strings | no | Whitelist of result keys; everything else is omitted per event. Unknown names error; `[]` means *no* whitelist |
+| `kompakt` | boolean | no (default `false`) | Omit keys whose value is `null`/`[]`/`""`; truncate `beschreibung` to 200 chars with an `… [gekürzt …]` marker (`get_event` has the full text) |
+
+Called with neither `kalender_namen` nor a time bound, a default window of
+**today ±90 days** (in the server's default timezone) is applied instead of
+scanning every event in the account. Any calendar name or either bound
+disables the default — naming a calendar is a scoping decision, so
+`kalender_namen` plus `wiederholungen_aufloesen=true` and no bounds still
+fails with *"Expanding recurring events requires both von and bis bounds."*,
+exactly as before.
 
 The time-range filter runs server-side (CalDAV `time-range` REPORT), so a
 recurring event with an occurrence in the window matches even if its master
@@ -798,6 +810,65 @@ Example:
   ]
 }
 ```
+
+---
+
+## `create_birthday(name, datum, jahr=None, kalender="Geburtstage")`
+
+Creates one birthday entry with the whole convention filled in, so a birthday
+is a single call instead of a `create_event` plus an `update_event`. Nothing
+about the shape below is a parameter — it is what every entry in the birthday
+calendar looks like:
+
+| Field | Value |
+|---|---|
+| `titel` | `"🎂 <name> (<Geburtsjahr>)"` — without the parentheses if no birth year is known |
+| `start` / `ende` | The **birth** date, all-day, one day (`ende` = `start`) |
+| `wiederholung` | `"FREQ=YEARLY"` |
+| `tags` | `["Geburtstag"]` |
+| `sichtbarkeit` | `"privat"` |
+| `erinnerungen` | `["-PT0M", "-P1D"]` — on the day itself and one day before |
+
+Starting the series in the birth year is what makes the age readable: each
+occurrence's year minus the start year is the age being celebrated. With no
+birth year known, the series starts on the next upcoming occurrence instead
+(same series, no age).
+
+Parameters:
+
+| Parameter | Required | Notes |
+|---|---|---|
+| `name` | yes | The person's name, without the cake and without the year — both are added. A title read back from an existing entry (`"🎂 Papa (1975)"`) works too: the cake is not doubled and the `(1975)` is read as the birth year |
+| `datum` | yes | `"MM-DD"` (e.g. `"07-04"`), or a full `"YYYY-MM-DD"` whose year is the year of **birth** |
+| `jahr` | no | Year of birth. May instead come from `datum` or from a trailing `"(1975)"` in `name` |
+| `kalender` | no | Target calendar display name, `"Geburtstage"` by default |
+
+The birth year may therefore be named by `jahr`, by `datum` and by `name`.
+Naming it more than once is fine as long as the values agree; **conflicting
+values are rejected** rather than silently resolved. A year that isn't a
+four-digit year is rejected as well.
+
+> **The year is always the year of birth, never the year of the next
+> celebration.** Turning "his birthday is on October 10th" into
+> `"2026-10-10"` claims the person was born this year — they would be 0 on
+> the next occurrence. A birth date that hasn't happened yet is therefore
+> rejected outright; when the birth year is unknown, pass `"MM-DD"` and the
+> entry simply carries no year.
+
+A `02-29` birthday stays `02-29` — a yearly rule then only fires in leap
+years, which is what that date means; pass `02-28` or `03-01` instead if the
+entry should show up every year. Without a birth year, a `02-29` entry starts
+on the next real leap day.
+
+Returns the created event, same dict shape as `get_event`.
+
+Example:
+
+```json
+{"name": "Papa", "datum": "07-04", "jahr": 1975}
+```
+
+writes `🎂 Papa (1975)` as an all-day event on 1975-07-04, repeating yearly.
 
 ---
 

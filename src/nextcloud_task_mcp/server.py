@@ -1,9 +1,13 @@
 """FastMCP server exposing Nextcloud Tasks (CalDAV) as MCP tools."""
 
-from __future__ import annotations
+# No `from __future__ import annotations` here: with PEP 563 string annotations,
+# fastmcp (<3) rebuilds each tool function to resolve them and drops
+# `__kwdefaults__` in the process, so every keyword-only parameter loses its
+# default and is marked required in the MCP schema clients see.
 
 import functools
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -22,6 +26,127 @@ from .personal_auth import PersonalAuthProvider
 logger = logging.getLogger(__name__)
 
 _EXDATE_COMPACT_THRESHOLD = 10
+
+#: `kompakt=True` truncates free text (beschreibung/notizen) to this many chars.
+_COMPACT_TEXT_LIMIT = 200
+
+#: Window applied when list_events is called with neither calendars nor bounds.
+_DEFAULT_EVENT_WINDOW_DAYS = 90
+
+#: Every key a list_events entry can carry - the vocabulary `felder` validates
+#: against. Must track `event_mapping.parse_vevent` plus the "kalender" key the
+#: client layer adds.
+_EVENT_RESULT_KEYS = frozenset(
+    {
+        "uid",
+        "titel",
+        "start",
+        "ende",
+        "ganztaegig",
+        "ort",
+        "beschreibung",
+        "tags",
+        "erinnerungen",
+        "status",
+        "sichtbarkeit",
+        "wiederholung",
+        "ausnahme_daten",
+        "url",
+        "verknuepfte_aufgaben",
+        "wiederholung_von",
+        "kalender",
+        "organisator",
+        "teilnehmer",
+    }
+)
+
+#: Every key a list_tasks entry can carry - tracks `mapping.parse_vtodo` plus
+#: the "liste"/"liste_url" keys the client layer adds.
+_TASK_RESULT_KEYS = frozenset(
+    {
+        "uid",
+        "titel",
+        "start_datum",
+        "faellig_datum",
+        "prioritaet",
+        "fortschritt_prozent",
+        "status",
+        "ort",
+        "url",
+        "tags",
+        "erinnerungen",
+        "notizen",
+        "uebergeordnete_uid",
+        "wiederholung",
+        "ausnahme_daten",
+        "wiederholung_von",
+        "serie_uid",
+        "liste",
+        "liste_url",
+    }
+)
+
+
+def _slim_rows(
+    rows: list[dict[str, Any]],
+    *,
+    felder: list[str] | None,
+    kompakt: bool,
+    valid_keys: frozenset[str],
+    text_key: str,
+    detail_tool: str,
+    kompakt_drop: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    """Apply the `felder` whitelist and/or `kompakt` mode to listing results.
+
+    `felder` keeps only the named keys (validated against `valid_keys`, so a
+    typo errors instead of silently returning nothing). `kompakt` then drops
+    keys whose value is None/[]/"" plus everything in `kompakt_drop`, and
+    truncates `text_key` to `_COMPACT_TEXT_LIMIT` characters. A key the caller
+    whitelisted explicitly is exempt from `kompakt_drop` - asking for it wins.
+
+    An empty `felder` list means "no whitelist", not "no keys": the only other
+    reading returns a row of nothing per result, which no caller can want, and
+    MCP clients routinely send `[]` for an array parameter they mean to leave
+    unset. (`listen_namen=[]` reads the other way - an empty *scope* returns
+    no rows, which is a coherent answer - so the two differ deliberately.)
+
+    Falsy-but-real values survive: the emptiness test is `== []`/`== ""`
+    against those two literals only, so `fortschritt_prozent=0` and
+    `ganztaegig=False` are kept, and `ausnahme_daten` already summarized into
+    a dict by `list_events` is kept too.
+    """
+    if isinstance(felder, str):
+        felder = [felder]
+    if felder:
+        unknown = sorted(set(felder) - valid_keys)
+        if unknown:
+            raise ToolError(
+                f"Unbekannte felder-Einträge: {', '.join(unknown)}. "
+                f"Gültige Feldnamen: {', '.join(sorted(valid_keys))}"
+            )
+        wanted = set(felder)
+        rows = [{key: value for key, value in row.items() if key in wanted} for row in rows]
+        kompakt_drop = kompakt_drop - wanted
+    if not kompakt:
+        return rows
+    slimmed: list[dict[str, Any]] = []
+    for row in rows:
+        out: dict[str, Any] = {}
+        for key, value in row.items():
+            if key in kompakt_drop:
+                continue
+            if value is None or value == [] or value == "":
+                continue
+            if key == text_key and isinstance(value, str) and len(value) > _COMPACT_TEXT_LIMIT:
+                value = (
+                    value[:_COMPACT_TEXT_LIMIT]
+                    + f"… [gekürzt von {len(value)} Zeichen - Volltext über {detail_tool}]"
+                )
+            out[key] = value
+        slimmed.append(out)
+    return slimmed
+
 
 # MCP tool annotations (spec: ToolAnnotations). These are behaviour *hints* for
 # clients, not enforcement, but they are the only signal a client has for
@@ -222,6 +347,8 @@ def build_server(
         prioritaet: str | None = None,
         tag: str | None = None,
         suchtext: str | None = None,
+        felder: list[str] | None = None,
+        kompakt: bool = False,
         list_name: str | None = None,
     ) -> list[dict[str, Any]]:
         """List tasks across one, several, or all Nextcloud task lists.
@@ -252,6 +379,17 @@ def build_server(
             suchtext: Optional substring filter over title (titel) and notes
                 (notizen). Both it and `tag` ignore case and Unicode spelling
                 ("STRASSE" matches "Straße").
+            felder: Optional whitelist of result keys (see Returns for the
+                vocabulary); every other key is omitted from each task dict.
+                Unknown names error, an empty list means "no whitelist" (unlike
+                an empty `listen_namen`, which is an empty scope). Use this to
+                keep payloads small when you only need a few fields.
+            kompakt: If True, omit keys whose value is None, [] or "" plus the
+                rarely useful liste_url (unless whitelisted via `felder`), and
+                truncate notizen to 200 characters (marked with "… [gekürzt
+                ...]"; get_task returns the full text). Values are otherwise
+                unchanged - an absent key just means empty/None. Combines with
+                `felder` (whitelist first, then compaction).
             list_name: Deprecated alias for `listen_namen` (takes a single list display name).
                 Pass `listen_namen` instead. Passing both `list_name` and `listen_namen`
                 is an error.
@@ -316,7 +454,7 @@ def build_server(
         else:
             target_list_names = listen_namen
 
-        return await _call(
+        tasks: list[dict[str, Any]] = await _call(
             caldav_service.list_tasks,
             list_names=target_list_names,
             only_open=nur_offene,
@@ -326,6 +464,15 @@ def build_server(
             tag=tag,
             suchtext=suchtext,
             limit=limit,
+        )
+        return _slim_rows(
+            tasks,
+            felder=felder,
+            kompakt=kompakt,
+            valid_keys=_TASK_RESULT_KEYS,
+            text_key="notizen",
+            detail_tool="get_task",
+            kompakt_drop=frozenset({"liste_url"}),
         )
 
     @mcp.tool(annotations=_READ_ONLY)
@@ -670,6 +817,8 @@ def build_server(
         tag: str | None = None,
         limit: int | None = None,
         wiederholungen_aufloesen: bool = False,
+        felder: list[str] | None = None,
+        kompakt: bool = False,
     ) -> list[dict[str, Any]]:
         """List calendar events, across one, several, or all event calendars.
 
@@ -688,6 +837,25 @@ def build_server(
             wiederholungen_aufloesen: If True, expand recurring events into
                 their individual occurrences within [von, bis] (both bounds
                 required); each occurrence carries wiederholung_von.
+            felder: Optional whitelist of result keys (see Returns for the
+                vocabulary); every other key is omitted from each event dict.
+                Unknown names error, an empty list means "no whitelist". Use
+                this to keep payloads small when you only need a few fields.
+            kompakt: If True, omit keys whose value is None, [] or "" (e.g.
+                teilnehmer, organisator, wiederholung on most events) and
+                truncate beschreibung to 200 characters (marked with
+                "… [gekürzt ...]"; get_event returns the full text). Values
+                are otherwise unchanged - an absent key just means empty/None.
+                Combines with `felder` (whitelist first, then compaction).
+
+        Called with neither `kalender_namen` nor a time bound, this would scan
+        every event in the account; instead a default window of today ±90 days
+        (in the server's default timezone) is applied. Pass `von` and/or `bis`
+        explicitly - or name a calendar - to query outside that window. Naming
+        a calendar is a scoping decision, so it turns the default window off
+        rather than narrowing it: `kalender_namen` plus
+        `wiederholungen_aufloesen=True` and no bounds still fails with
+        "requires both von and bis", the same as before this default existed.
 
         Naive datetimes (no UTC offset) are interpreted in the server's default
         timezone (`MCP_DEFAULT_TIMEZONE`, default Europe/Berlin), like everywhere else
@@ -714,6 +882,10 @@ def build_server(
             (list of {"email", "name", "status", "rolle", "rsvp"}; "status" is
             "ausstehend"/"zugesagt"/"abgesagt"/"vorläufig"/"delegiert").
         """
+        if kalender_namen is None and not von and not bis:
+            today = datetime.now(mapping.get_default_timezone()).date()
+            von = (today - timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
+            bis = (today + timedelta(days=_DEFAULT_EVENT_WINDOW_DAYS)).isoformat()
         events: list[dict[str, Any]] = await _call(
             caldav_service.list_events,
             calendar_names=kalender_namen,
@@ -735,7 +907,14 @@ def build_server(
                     "hinweis": "gekürzt - vollständige Liste über get_event abrufen",
                 }
             processed_events.append(event)
-        return processed_events
+        return _slim_rows(
+            processed_events,
+            felder=felder,
+            kompakt=kompakt,
+            valid_keys=_EVENT_RESULT_KEYS,
+            text_key="beschreibung",
+            detail_tool="get_event",
+        )
 
     @mcp.tool(annotations=_READ_ONLY)
     async def get_event(kalender_name: str, event_uid: str) -> dict[str, Any]:
@@ -838,6 +1017,64 @@ def build_server(
         )
         new_uid = await _call(caldav_service.create_event, kalender_name, fields)
         event: dict[str, Any] = await _call(caldav_service.get_event, kalender_name, new_uid)
+        return event
+
+    @mcp.tool(annotations=_CREATE)
+    async def create_birthday(
+        name: str,
+        datum: str,
+        jahr: int | None = None,
+        kalender: str = event_mapping.BIRTHDAY_CALENDAR,
+    ) -> dict[str, Any]:
+        """Create a birthday entry, with the whole birthday convention filled in.
+
+        One call instead of create_event plus an update_event per person: the
+        title, recurrence, tag, visibility and reminders are not parameters
+        here, they are the convention every entry in the birthday calendar
+        follows. What gets written:
+
+        - Title "🎂 <name> (<Geburtsjahr>)" - without the parentheses when no
+          birth year is known.
+        - An all-day, one-day event starting on the *birth* date, so each
+          occurrence's year minus the start year is the age being celebrated.
+          Without a birth year it starts on the next upcoming occurrence.
+        - wiederholung "FREQ=YEARLY", tags ["Geburtstag"], sichtbarkeit
+          "privat", erinnerungen ["-PT0M", "-P1D"] (on the day itself and the
+          day before).
+
+        Args:
+            name: The person's name, without the cake and without the year
+                (both are added). Passing a title read back from an existing
+                entry ("🎂 Papa (1975)") works too - the cake is not doubled
+                and the year in parentheses is read as the birth year.
+            datum: The birthday as "MM-DD" (e.g. "07-04"), or as a full
+                "YYYY-MM-DD" whose year is the year of BIRTH. Never fill in
+                the current (or next) year to turn "on the 4th of July" into
+                a full date - that is the year of the next celebration, not a
+                birth year, and it would make the person 0 years old. Pass
+                "MM-DD" whenever the birth year is unknown. A 02-29 birthday
+                stays 02-29, and a yearly rule then only fires in leap years -
+                pass 02-28 or 03-01 instead if the entry should show up every
+                year.
+            jahr: Optional year of birth (e.g. 1975), only ever a year the
+                person was actually born in. May instead come from `datum` or
+                from a trailing "(1975)" in `name`; naming it twice is fine as
+                long as the values agree, and conflicting values are an error.
+                An unknown birth year is fine - leave it out and the title
+                carries no year. A birth date that is still ahead is rejected.
+            kalender: Display name of the target calendar, "Geburtstage" by
+                default.
+
+        Returns:
+            The created event dict, same shape as get_event's return value
+            (see get_event's docstring for the full key list).
+        """
+        try:
+            fields = event_mapping.birthday_fields(name, datum, jahr)
+        except TaskMcpError as exc:
+            raise ToolError(str(exc)) from exc
+        new_uid = await _call(caldav_service.create_event, kalender, fields)
+        event: dict[str, Any] = await _call(caldav_service.get_event, kalender, new_uid)
         return event
 
     @mcp.tool(annotations=_MODIFY)
@@ -1602,8 +1839,10 @@ def build_server(
             notiz_id: The note's id.
             titel: New title, or None to leave unchanged.
             kategorie: New category, or None to leave unchanged.
-            inhalt: New full content - this REPLACES the existing content (use
-                append_notiz to add to it instead), or None to leave unchanged.
+            inhalt: New full content - this REPLACES the existing content
+                (use append_notiz to add to it, replace_in_notiz to change
+                one passage, or update_notiz_abschnitt to change one Markdown
+                section instead), or None to leave unchanged.
             favorit: New favorite flag, or None to leave unchanged.
 
         At least one field must be given.
@@ -1615,6 +1854,64 @@ def build_server(
             titel=titel, kategorie=kategorie, inhalt=inhalt, favorit=favorit
         )
         return await _call_notes(notes_svc.update_note(notiz_id, fields))
+
+    @mcp.tool(annotations=_MODIFY)
+    async def replace_in_notiz(notiz_id: int, alt: str, neu: str) -> dict[str, Any]:
+        """Replace exactly one occurrence of a text passage in a note's content.
+
+        The targeted alternative to update_notiz's whole-content `inhalt`:
+        instead of re-sending the full content to change one passage, send
+        only the passage. `alt` must match the current content exactly
+        (character for character, including whitespace and newlines; may
+        span multiple lines) and exactly once - zero matches or more than
+        one match is an error and nothing is changed. On an "occurs N
+        times" error, retry with more surrounding context in `alt` (and the
+        same context repeated in `neu`) so it matches exactly once.
+
+        Read-then-write like append_notiz, so not atomic - a concurrent
+        edit between the read and the write may be lost.
+
+        Args:
+            notiz_id: The note's id.
+            alt: Existing text to replace, exactly as it appears in the content.
+            neu: Replacement text (may be empty to delete the passage).
+
+        Returns:
+            The updated note, same shape as get_notiz's return value.
+        """
+        return await _call_notes(notes_svc.replace_in_note(notiz_id, alt, neu))
+
+    @mcp.tool(annotations=_MODIFY)
+    async def update_notiz_abschnitt(notiz_id: int, abschnitt: str, inhalt: str) -> dict[str, Any]:
+        """Replace one Markdown section of a note - heading line plus body.
+
+        `abschnitt` is an ATX heading prefix like "## 7." that must select
+        exactly one heading line of the same level (same number of '#')
+        starting with it; the match stops at a word boundary, so "## 7"
+        does not select "## 75. History" and "## 7.1" does not select
+        "## 7.1.1 Details". The section runs from that
+        heading up to the next heading of the same or a higher level (or
+        the end of the note). Heading-shaped lines inside fenced code
+        blocks or a leading YAML front matter block are ignored; setext
+        (underlined) headings are not recognized.
+
+        `inhalt` replaces the whole section INCLUDING its heading line, so
+        start it with the (possibly renamed) heading. An empty `inhalt`
+        removes the section entirely.
+
+        Read-then-write like append_notiz, so not atomic - a concurrent
+        edit between the read and the write may be lost.
+
+        Args:
+            notiz_id: The note's id.
+            abschnitt: Heading prefix selecting the section, e.g. "## 7."
+                or "### Offene Punkte".
+            inhalt: The section's new text, starting with its heading line.
+
+        Returns:
+            The updated note, same shape as get_notiz's return value.
+        """
+        return await _call_notes(notes_svc.replace_note_section(notiz_id, abschnitt, inhalt))
 
     @mcp.tool(annotations=_CREATE)
     async def append_notiz(notiz_id: int, text: str) -> dict[str, Any]:

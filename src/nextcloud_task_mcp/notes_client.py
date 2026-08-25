@@ -23,6 +23,7 @@ from .errors import (
     TaskMcpError,
 )
 from .notes_mapping import NoteFields, parse_note, parse_note_summary, to_request_body
+from .notes_sections import replace_section
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,46 @@ class NotesService:
         current = await self.get_note(notiz_id)
         separator = "\n\n" if current["inhalt"] else ""
         new_content = f"{current['inhalt']}{separator}{text}"
+        return await self.update_note(notiz_id, NoteFields(inhalt=new_content))
+
+    async def replace_in_note(self, notiz_id: int, alt: str, neu: str) -> dict[str, Any]:
+        """Replace exactly one occurrence of `alt` in a note's content with `neu`.
+
+        `alt` must match the current content exactly once: zero matches and
+        multiple matches are both rejected, so a caller can never silently
+        patch the wrong spot. Like `append_note`, this is a read-then-write,
+        not an atomic server-side operation - a concurrent edit between the
+        read and the write may be lost.
+        """
+        if not alt:
+            raise InvalidNotizDataError("alt must not be empty.")
+        current = await self.get_note(notiz_id)
+        count = current["inhalt"].count(alt)
+        if count == 0:
+            raise InvalidNotizDataError(
+                "The text to replace (alt) was not found in the note's content."
+            )
+        if count > 1:
+            raise InvalidNotizDataError(
+                f"The text to replace (alt) occurs {count} times in the note's content - "
+                "include more surrounding context so it matches exactly once."
+            )
+        new_content = current["inhalt"].replace(alt, neu, 1)
+        return await self.update_note(notiz_id, NoteFields(inhalt=new_content))
+
+    async def replace_note_section(
+        self, notiz_id: int, abschnitt: str, inhalt: str
+    ) -> dict[str, Any]:
+        """Replace one Markdown section (heading line + body) of a note's content.
+
+        `abschnitt` selects exactly one ATX heading and `inhalt` becomes the
+        new section text, heading line included - see
+        `notes_sections.replace_section` for the matching rules. Like
+        `append_note`, this is a read-then-write, not atomic against
+        concurrent edits.
+        """
+        current = await self.get_note(notiz_id)
+        new_content = replace_section(current["inhalt"], abschnitt, inhalt)
         return await self.update_note(notiz_id, NoteFields(inhalt=new_content))
 
     async def search_notes(
