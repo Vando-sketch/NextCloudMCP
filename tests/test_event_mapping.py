@@ -2056,6 +2056,7 @@ def test_birthday_fields_round_trip_through_a_vevent():
     assert parsed["wiederholung"] == "FREQ=YEARLY"
     assert parsed["tags"] == ["Geburtstag"]
     assert parsed["sichtbarkeit"] == "privat"
-    # "-PT0M" is a zero-length trigger; icalendar spells that "P0D" on the way
-    # back out, which is the same moment and what the calendar already holds.
-    assert sorted(parsed["erinnerungen"]) == ["-P1D", "P0D"]
+    # Both reminders read back exactly as BIRTHDAY_REMINDERS spells them. The
+    # zero-length one used to come back as icalendar's "P0D" - same moment,
+    # different string - until reminder output was normalized on "-PT0M".
+    assert sorted(parsed["erinnerungen"]) == ["-P1D", "-PT0M"]
