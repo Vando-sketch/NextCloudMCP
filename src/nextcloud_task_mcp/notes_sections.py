@@ -1,4 +1,4 @@
-"""Markdown section addressing for the update_notiz_abschnitt tool.
+"""Markdown section addressing for the update_note_section tool.
 
 Pure text transformation, deliberately separate from notes_client.py (HTTP)
 and notes_mapping.py (German <-> JSON field translation) so it can be tested
@@ -16,15 +16,15 @@ from __future__ import annotations
 
 import re
 
-from .errors import InvalidNotizDataError
+from .errors import InvalidNoteDataError
 
 _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:\s|$)")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
-# `abschnitt` itself: 1-6 '#', then nothing or whitespace + the heading's
-# start. No DOTALL - a multi-line abschnitt (e.g. swapped arguments) must
+# `section` itself: 1-6 '#', then nothing or whitespace + the heading's
+# start. No DOTALL - a multi-line section (e.g. swapped arguments) must
 # fail here with the clear "heading prefix" error, not a puzzling
 # "no heading found" later.
-_ABSCHNITT_RE = re.compile(r"(#{1,6})(?:\s.*)?")
+_SECTION_RE = re.compile(r"(#{1,6})(?:\s.*)?")
 
 
 def _heading_levels(lines: list[str]) -> list[int | None]:
@@ -83,20 +83,21 @@ def _matches_prefix(line: str, prefix: str) -> bool:
     return not rest[0].isalnum() and (len(rest) == 1 or rest[1].isspace())
 
 
-def replace_section(content: str, abschnitt: str, inhalt: str) -> str:
-    """Replace one Markdown section - heading line and body - with `inhalt`.
+def replace_section(content: str, section: str, new_content: str) -> str:
+    """Replace one Markdown section - heading line and body - with `new_content`.
 
-    `abschnitt` must select exactly one heading: a heading line of the same
+    `section` must select exactly one heading: a heading line of the same
     level (same number of '#') that starts with it. The section runs from
     that heading up to (not including) the next heading of the same or a
-    higher level, or the end of the note. `inhalt` replaces the whole span
-    including the heading line; an empty `inhalt` removes the section.
+    higher level, or the end of the note. `new_content` replaces the whole
+    span including the heading line; an empty `new_content` removes the
+    section.
     """
-    prefix = abschnitt.strip()
-    prefix_match = _ABSCHNITT_RE.fullmatch(prefix)
+    prefix = section.strip()
+    prefix_match = _SECTION_RE.fullmatch(prefix)
     if not prefix_match:
-        raise InvalidNotizDataError(
-            "abschnitt must be a Markdown heading prefix like '## 7.' - "
+        raise InvalidNoteDataError(
+            "section must be a Markdown heading prefix like '## 7.' - "
             "one to six '#' followed by a space and the heading's beginning."
         )
     level = len(prefix_match.group(1))
@@ -109,14 +110,14 @@ def replace_section(content: str, abschnitt: str, inhalt: str) -> str:
         if line_level == level and _matches_prefix(lines[i], prefix)
     ]
     if not matches:
-        raise InvalidNotizDataError(
-            "No heading matching abschnitt was found in the note's content "
+        raise InvalidNoteDataError(
+            "No heading matching section was found in the note's content "
             "(only ATX headings like '## Title' are recognized, and the "
             "number of '#' must match)."
         )
     if len(matches) > 1:
-        raise InvalidNotizDataError(
-            f"abschnitt matches {len(matches)} headings in the note's content - "
+        raise InvalidNoteDataError(
+            f"section matches {len(matches)} headings in the note's content - "
             "give a longer prefix that matches exactly one."
         )
 
@@ -128,7 +129,7 @@ def replace_section(content: str, abschnitt: str, inhalt: str) -> str:
             end = i
             break
 
-    new_lines = inhalt.strip("\n").split("\n") if inhalt.strip("\n") else []
+    new_lines = new_content.strip("\n").split("\n") if new_content.strip("\n") else []
     head, tail = lines[:start], lines[end:]
     if new_lines and tail and new_lines[-1].strip():
         # Keep one blank line between the new section and the next heading.

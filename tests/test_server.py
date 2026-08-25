@@ -17,7 +17,7 @@ from nextcloud_task_mcp.caldav_client import CalDavService
 from nextcloud_task_mcp.config import Settings
 from nextcloud_task_mcp.errors import (
     CalendarNotFoundError,
-    NotizNotFoundError,
+    NoteNotFoundError,
     TaskListAlreadyExistsError,
     TaskListNotFoundError,
 )
@@ -88,15 +88,15 @@ def test_all_tools_registered(tools):
         "restore_from_trash",
         "export_calendar",
         "import_ics",
-        "list_notizen",
-        "get_notiz",
-        "create_notiz",
-        "update_notiz",
-        "replace_in_notiz",
-        "update_notiz_abschnitt",
-        "append_notiz",
-        "search_notizen",
-        "delete_notiz",
+        "list_notes",
+        "get_note",
+        "create_note",
+        "update_note",
+        "replace_in_note",
+        "update_note_section",
+        "append_to_note",
+        "search_notes",
+        "delete_note",
     }
 
 
@@ -127,156 +127,154 @@ def test_rename_task_list_uses_ascii_parameter_names(tools):
 
 def test_create_task_uses_umlaut_parameter_names(tools):
     schema = tools["create_task"].parameters
-    assert "faellig_datum" in schema["properties"]
-    assert "prioritaet" in schema["properties"]
-    assert "uebergeordnete_aufgabe" in schema["properties"]
-    assert schema["required"] == ["list_name", "titel"]
+    assert "due_date" in schema["properties"]
+    assert "priority" in schema["properties"]
+    assert "parent_task" in schema["properties"]
+    assert schema["required"] == ["list_name", "title"]
 
 
-def test_update_task_has_felder_leeren_parameter(tools):
+def test_update_task_has_clear_fields_parameter(tools):
     schema = tools["update_task"].parameters
-    assert "felder_leeren" in schema["properties"]
+    assert "clear_fields" in schema["properties"]
 
 
 def test_get_task_delegates_to_service(tools, fake_service):
-    fake_service.get_task.return_value = {"uid": "abc", "titel": "Milch kaufen"}
+    fake_service.get_task.return_value = {"uid": "abc", "title": "Buy milk"}
     result = _run(tools["get_task"].fn("Personal", "abc"))
-    assert result == {"uid": "abc", "titel": "Milch kaufen"}
+    assert result == {"uid": "abc", "title": "Buy milk"}
     fake_service.get_task.assert_called_once_with("Personal", "abc")
 
 
 # --- Notes tools ---
 
 
-def test_list_notizen_delegates_to_notes_service(tools, fake_notes_service):
-    fake_notes_service.list_notes.return_value = [{"id": 1, "titel": "Projekt X"}]
-    result = _run(tools["list_notizen"].fn("Arbeit"))
-    assert result == [{"id": 1, "titel": "Projekt X"}]
-    fake_notes_service.list_notes.assert_called_once_with("Arbeit")
+def test_list_notes_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.list_notes.return_value = [{"id": 1, "title": "Project X"}]
+    result = _run(tools["list_notes"].fn("Work"))
+    assert result == [{"id": 1, "title": "Project X"}]
+    fake_notes_service.list_notes.assert_called_once_with("Work")
 
 
-def test_get_notiz_delegates_to_notes_service(tools, fake_notes_service):
-    fake_notes_service.get_note.return_value = {"id": 1, "titel": "Projekt X", "inhalt": "..."}
-    result = _run(tools["get_notiz"].fn(1))
-    assert result == {"id": 1, "titel": "Projekt X", "inhalt": "..."}
+def test_get_note_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.get_note.return_value = {"id": 1, "title": "Project X", "content": "..."}
+    result = _run(tools["get_note"].fn(1))
+    assert result == {"id": 1, "title": "Project X", "content": "..."}
     fake_notes_service.get_note.assert_called_once_with(1)
 
 
-def test_create_notiz_builds_note_fields(tools, fake_notes_service):
+def test_create_note_builds_note_fields(tools, fake_notes_service):
     fake_notes_service.create_note.return_value = {"id": 2}
-    result = _run(tools["create_notiz"].fn("Projekt X", "Arbeit", "Erste Notiz", True))
+    result = _run(tools["create_note"].fn("Project X", "Work", "First Note", True))
     assert result == {"id": 2}
     fields = fake_notes_service.create_note.call_args[0][0]
-    assert fields.titel == "Projekt X"
-    assert fields.kategorie == "Arbeit"
-    assert fields.inhalt == "Erste Notiz"
-    assert fields.favorit is True
+    assert fields.title == "Project X"
+    assert fields.category == "Work"
+    assert fields.content == "First Note"
+    assert fields.favorite is True
 
 
-def test_update_notiz_only_sets_given_fields(tools, fake_notes_service):
+def test_update_note_only_sets_given_fields(tools, fake_notes_service):
     fake_notes_service.update_note.return_value = {"id": 2}
-    result = _run(tools["update_notiz"].fn(2, titel="Neuer Titel"))
+    result = _run(tools["update_note"].fn(2, title="Neuer Title"))
     assert result == {"id": 2}
-    notiz_id, fields = fake_notes_service.update_note.call_args[0]
-    assert notiz_id == 2
-    assert fields.titel == "Neuer Titel"
-    assert fields.kategorie is None
-    assert fields.inhalt is None
-    assert fields.favorit is None
+    note_id, fields = fake_notes_service.update_note.call_args[0]
+    assert note_id == 2
+    assert fields.title == "Neuer Title"
+    assert fields.category is None
+    assert fields.content is None
+    assert fields.favorite is None
 
 
-def test_replace_in_notiz_delegates_to_notes_service(tools, fake_notes_service):
-    fake_notes_service.replace_in_note.return_value = {"id": 2, "inhalt": "Neu"}
-    result = _run(tools["replace_in_notiz"].fn(2, "Alt", "Neu"))
-    assert result == {"id": 2, "inhalt": "Neu"}
-    fake_notes_service.replace_in_note.assert_called_once_with(2, "Alt", "Neu")
+def test_replace_in_note_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.replace_in_note.return_value = {"id": 2, "content": "New_text"}
+    result = _run(tools["replace_in_note"].fn(2, "Old_text", "New_text"))
+    assert result == {"id": 2, "content": "New_text"}
+    fake_notes_service.replace_in_note.assert_called_once_with(2, "Old_text", "New_text")
 
 
-def test_update_notiz_abschnitt_delegates_to_notes_service(tools, fake_notes_service):
-    fake_notes_service.replace_note_section.return_value = {"id": 2, "inhalt": "## A\n\nNeu"}
-    result = _run(tools["update_notiz_abschnitt"].fn(2, "## A", "## A\n\nNeu"))
-    assert result == {"id": 2, "inhalt": "## A\n\nNeu"}
+def test_update_note_section_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.replace_note_section.return_value = {"id": 2, "content": "## A\n\nNeu"}
+    result = _run(tools["update_note_section"].fn(2, "## A", "## A\n\nNeu"))
+    assert result == {"id": 2, "content": "## A\n\nNeu"}
     fake_notes_service.replace_note_section.assert_called_once_with(2, "## A", "## A\n\nNeu")
 
 
-def test_append_notiz_delegates_to_notes_service(tools, fake_notes_service):
-    fake_notes_service.append_note.return_value = {"id": 2, "inhalt": "Alt\n\nNeu"}
-    result = _run(tools["append_notiz"].fn(2, "Neu"))
-    assert result == {"id": 2, "inhalt": "Alt\n\nNeu"}
-    fake_notes_service.append_note.assert_called_once_with(2, "Neu")
+def test_append_to_note_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.append_note.return_value = {"id": 2, "content": "Old_text\n\nNeu"}
+    result = _run(tools["append_to_note"].fn(2, "New_text"))
+    assert result == {"id": 2, "content": "Old_text\n\nNeu"}
+    fake_notes_service.append_note.assert_called_once_with(2, "New_text")
 
 
-def test_search_notizen_delegates_to_notes_service(tools, fake_notes_service):
-    fake_notes_service.search_notes.return_value = [{"id": 1, "titel": "Projekt X"}]
-    result = _run(tools["search_notizen"].fn("Projekt", "Arbeit"))
-    assert result == [{"id": 1, "titel": "Projekt X"}]
-    fake_notes_service.search_notes.assert_called_once_with("Projekt", "Arbeit")
+def test_search_notes_delegates_to_notes_service(tools, fake_notes_service):
+    fake_notes_service.search_notes.return_value = [{"id": 1, "title": "Project X"}]
+    result = _run(tools["search_notes"].fn("Projekt", "Work"))
+    assert result == [{"id": 1, "title": "Project X"}]
+    fake_notes_service.search_notes.assert_called_once_with("Projekt", "Work")
 
 
-def test_delete_notiz_delegates_to_notes_service(tools, fake_notes_service):
-    result = _run(tools["delete_notiz"].fn(2))
+def test_delete_note_delegates_to_notes_service(tools, fake_notes_service):
+    result = _run(tools["delete_note"].fn(2))
     assert result == {"id": 2}
     fake_notes_service.delete_note.assert_called_once_with(2)
 
 
-def test_notiz_tools_use_ascii_parameter_names(tools):
+def test_note_tools_use_ascii_parameter_names(tools):
     for tool_name in (
-        "list_notizen",
-        "get_notiz",
-        "create_notiz",
-        "update_notiz",
-        "replace_in_notiz",
-        "update_notiz_abschnitt",
-        "append_notiz",
-        "search_notizen",
-        "delete_notiz",
+        "list_notes",
+        "get_note",
+        "create_note",
+        "update_note",
+        "replace_in_note",
+        "update_note_section",
+        "append_to_note",
+        "search_notes",
+        "delete_note",
     ):
         schema = tools[tool_name].parameters
         for prop_name in schema.get("properties", {}):
             assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
 
 
-def test_create_notiz_requires_only_titel(tools):
-    schema = tools["create_notiz"].parameters
-    assert schema["required"] == ["titel"]
+def test_create_note_requires_only_title(tools):
+    schema = tools["create_note"].parameters
+    assert schema["required"] == ["title"]
 
 
-def test_get_notiz_requires_notiz_id(tools):
-    schema = tools["get_notiz"].parameters
-    assert schema["required"] == ["notiz_id"]
+def test_get_note_requires_note_id(tools):
+    schema = tools["get_note"].parameters
+    assert schema["required"] == ["note_id"]
 
 
-def test_delete_notiz_requires_notiz_id(tools):
-    schema = tools["delete_notiz"].parameters
-    assert schema["required"] == ["notiz_id"]
+def test_delete_note_requires_note_id(tools):
+    schema = tools["delete_note"].parameters
+    assert schema["required"] == ["note_id"]
 
 
-def test_delete_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):
-    fake_notes_service.delete_note.side_effect = NotizNotFoundError(
+def test_delete_note_not_found_becomes_clean_tool_error(tools, fake_notes_service):
+    fake_notes_service.delete_note.side_effect = NoteNotFoundError(
         "The requested note was not found."
     )
     with pytest.raises(ToolError, match="was not found"):
-        _run(tools["delete_notiz"].fn(999))
+        _run(tools["delete_note"].fn(999))
 
 
-def test_notiz_not_found_becomes_clean_tool_error(tools, fake_notes_service):
-    fake_notes_service.get_note.side_effect = NotizNotFoundError(
-        "The requested note was not found."
-    )
+def test_note_not_found_becomes_clean_tool_error(tools, fake_notes_service):
+    fake_notes_service.get_note.side_effect = NoteNotFoundError("The requested note was not found.")
     with pytest.raises(ToolError, match="was not found"):
-        _run(tools["get_notiz"].fn(999))
+        _run(tools["get_note"].fn(999))
 
 
-def test_notiz_unexpected_exception_becomes_generic_tool_error(tools, fake_notes_service):
+def test_note_unexpected_exception_becomes_generic_tool_error(tools, fake_notes_service):
     fake_notes_service.get_note.side_effect = RuntimeError("boom")
     with pytest.raises(ToolError, match="unexpected internal error"):
-        _run(tools["get_notiz"].fn(1))
+        _run(tools["get_note"].fn(1))
 
 
-def test_get_task_returns_wiederholung_field(tools, fake_service):
-    fake_service.get_task.return_value = {"uid": "abc", "wiederholung": "FREQ=WEEKLY"}
+def test_get_task_returns_recurrence_field(tools, fake_service):
+    fake_service.get_task.return_value = {"uid": "abc", "recurrence": "FREQ=WEEKLY"}
     result = _run(tools["get_task"].fn("Personal", "abc"))
-    assert result["wiederholung"] == "FREQ=WEEKLY"
+    assert result["recurrence"] == "FREQ=WEEKLY"
 
 
 def test_list_task_lists_delegates_to_service(tools, fake_service):
@@ -343,20 +341,20 @@ def test_rename_task_list_not_found_becomes_clean_tool_error(tools, fake_service
         _run(tools["rename_task_list"].fn(list_name="Groceries", new_display_name="Shopping"))
 
 
-def test_list_tasks_passes_nur_offene_through(tools, fake_service):
+def test_list_tasks_passes_only_open_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
-    _run(tools["list_tasks"].fn("Personal", nur_offene=False))
+    _run(tools["list_tasks"].fn("Personal", only_open=False))
     fake_service.list_tasks.assert_called_once_with(
         list_names=["Personal"],
         only_open=False,
         due_before=None,
         due_after=None,
-        prioritaet=None,
+        priority=None,
         tag=None,
-        suchtext=None,
-        ohne_erinnerung=False,
-        ohne_sichtbarkeit=False,
-        ohne_tags=False,
+        search_text=None,
+        without_reminder=False,
+        without_visibility=False,
+        without_tags=False,
         uid_regex=None,
         limit=None,
     )
@@ -366,12 +364,12 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(
         tools["list_tasks"].fn(
-            listen_namen=["Personal"],
-            faellig_vor="2026-08-01",
-            faellig_nach="2026-07-01",
-            prioritaet="hoch",
-            tag="arbeit",
-            suchtext="test",
+            list_names=["Personal"],
+            due_before="2026-08-01",
+            due_after="2026-07-01",
+            priority="high",
+            tag="work",
+            search_text="test",
             limit=5,
         )
     )
@@ -380,12 +378,12 @@ def test_list_tasks_passes_filter_params_through(tools, fake_service):
         only_open=True,
         due_before="2026-08-01",
         due_after="2026-07-01",
-        prioritaet="hoch",
-        tag="arbeit",
-        suchtext="test",
-        ohne_erinnerung=False,
-        ohne_sichtbarkeit=False,
-        ohne_tags=False,
+        priority="high",
+        tag="work",
+        search_text="test",
+        without_reminder=False,
+        without_visibility=False,
+        without_tags=False,
         uid_regex=None,
         limit=5,
     )
@@ -399,12 +397,12 @@ def test_list_tasks_deprecated_list_name_alias_works(tools, fake_service):
         only_open=True,
         due_before=None,
         due_after=None,
-        prioritaet=None,
+        priority=None,
         tag=None,
-        suchtext=None,
-        ohne_erinnerung=False,
-        ohne_sichtbarkeit=False,
-        ohne_tags=False,
+        search_text=None,
+        without_reminder=False,
+        without_visibility=False,
+        without_tags=False,
         uid_regex=None,
         limit=None,
     )
@@ -414,10 +412,10 @@ def test_list_tasks_passes_cleanup_filters_through(tools, fake_service):
     fake_service.list_tasks.return_value = []
     _run(
         tools["list_tasks"].fn(
-            listen_namen=["Personal"],
-            ohne_erinnerung=True,
-            ohne_sichtbarkeit=True,
-            ohne_tags=True,
+            list_names=["Personal"],
+            without_reminder=True,
+            without_visibility=True,
+            without_tags=True,
             uid_regex="^[A-F0-9-]+$",
         )
     )
@@ -426,20 +424,20 @@ def test_list_tasks_passes_cleanup_filters_through(tools, fake_service):
         only_open=True,
         due_before=None,
         due_after=None,
-        prioritaet=None,
+        priority=None,
         tag=None,
-        suchtext=None,
-        ohne_erinnerung=True,
-        ohne_sichtbarkeit=True,
-        ohne_tags=True,
+        search_text=None,
+        without_reminder=True,
+        without_visibility=True,
+        without_tags=True,
         uid_regex="^[A-F0-9-]+$",
         limit=None,
     )
 
 
-def test_list_tasks_both_list_name_and_listen_namen_raises_error(tools, fake_service):
-    with pytest.raises(ToolError, match="list_name is the deprecated alias of listen_namen"):
-        _run(tools["list_tasks"].fn(list_name="Personal", listen_namen=["Arbeit"]))
+def test_list_tasks_both_list_name_and_list_names_raises_error(tools, fake_service):
+    with pytest.raises(ToolError, match="list_name is the deprecated alias of list_names"):
+        _run(tools["list_tasks"].fn(list_name="Personal", list_names=["Work"]))
     # The conflict is refused, not resolved: neither argument silently wins.
     fake_service.list_tasks.assert_not_called()
 
@@ -456,16 +454,16 @@ def test_list_tasks_tool_filters_added_after_limit_are_keyword_only(tools):
         name for name, p in params.items() if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     ]
 
-    assert positional == ["listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"]
+    assert positional == ["list_names", "only_open", "due_before", "due_after", "limit"]
     assert all(
         params[name].kind is inspect.Parameter.KEYWORD_ONLY
         for name in (
-            "prioritaet",
+            "priority",
             "tag",
-            "suchtext",
-            "ohne_erinnerung",
-            "ohne_sichtbarkeit",
-            "ohne_tags",
+            "search_text",
+            "without_reminder",
+            "without_visibility",
+            "without_tags",
             "uid_regex",
             "list_name",
         )
@@ -476,9 +474,11 @@ def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
     """Keyword-only parameters must still reach the MCP schema clients read."""
     properties = tools["list_tasks"].parameters["properties"]
 
-    assert {"listen_namen", "nur_offene", "faellig_vor", "faellig_nach", "limit"} <= set(properties)
-    assert {"prioritaet", "tag", "suchtext", "list_name"} <= set(properties)
-    assert {"ohne_erinnerung", "ohne_sichtbarkeit", "ohne_tags", "uid_regex"} <= set(properties)
+    assert {"list_names", "only_open", "due_before", "due_after", "limit"} <= set(properties)
+    assert {"priority", "tag", "search_text", "list_name"} <= set(properties)
+    assert {"without_reminder", "without_visibility", "without_tags", "uid_regex"} <= set(
+        properties
+    )
 
 
 def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
@@ -506,79 +506,79 @@ def test_create_task_maps_german_params_to_service_call(tools, fake_service):
     result = _run(
         tools["create_task"].fn(
             list_name="Personal",
-            titel="Neue Aufgabe",
-            faellig_datum="2026-07-20",
-            prioritaet="hoch",
-            uebergeordnete_aufgabe="parent-uid",
+            title="New task",
+            due_date="2026-07-20",
+            priority="high",
+            parent_task="parent-uid",
         )
     )
     assert result == {"uid": "new-uid"}
     args, _ = fake_service.create_task.call_args
     list_name, fields = args
     assert list_name == "Personal"
-    assert fields.titel == "Neue Aufgabe"
-    assert fields.faellig_datum == "2026-07-20"
-    assert fields.prioritaet == "hoch"
-    assert fields.uebergeordnete_aufgabe == "parent-uid"
+    assert fields.title == "New task"
+    assert fields.due_date == "2026-07-20"
+    assert fields.priority == "high"
+    assert fields.parent_task == "parent-uid"
 
 
-def test_create_task_passes_wiederholung(tools, fake_service):
+def test_create_task_passes_recurrence(tools, fake_service):
     fake_service.create_task.return_value = "new-uid"
     _run(
         tools["create_task"].fn(
             list_name="Personal",
-            titel="Muell rausbringen",
-            faellig_datum="2026-07-20",
-            wiederholung="FREQ=WEEKLY;BYDAY=MO",
+            title="Muell rausbringen",
+            due_date="2026-07-20",
+            recurrence="FREQ=WEEKLY;BYDAY=MO",
         )
     )
     args, _ = fake_service.create_task.call_args
     _, fields = args
-    assert fields.wiederholung == "FREQ=WEEKLY;BYDAY=MO"
+    assert fields.recurrence == "FREQ=WEEKLY;BYDAY=MO"
 
 
-def test_update_task_passes_wiederholung(tools, fake_service):
-    _run(tools["update_task"].fn("Personal", "task-uid", wiederholung="FREQ=DAILY"))
+def test_update_task_passes_recurrence(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", recurrence="FREQ=DAILY"))
     args, _ = fake_service.update_task.call_args
     _, _, fields = args
-    assert fields.wiederholung == "FREQ=DAILY"
+    assert fields.recurrence == "FREQ=DAILY"
 
 
 def test_update_task_passes_status(tools, fake_service):
     """The reopen path has to survive the tool layer, not just the mapping."""
-    _run(tools["update_task"].fn("Personal", "task-uid", status="offen"))
+    _run(tools["update_task"].fn("Personal", "task-uid", status="open"))
     args, _ = fake_service.update_task.call_args
     _, _, fields = args
-    assert fields.status == "offen"
+    assert fields.status == "open"
 
 
-def test_update_task_passes_felder_leeren_wiederholung_as_clear(tools, fake_service):
-    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["wiederholung"]))
+def test_update_task_passes_clear_fields_recurrence_as_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", clear_fields=["recurrence"]))
     args, _ = fake_service.update_task.call_args
     _, _, fields = args
-    assert fields.clear == ("wiederholung",)
+    assert fields.clear == ("recurrence",)
 
 
 def test_update_task_returns_uid(tools, fake_service):
-    result = _run(tools["update_task"].fn("Personal", "task-uid", titel="Neu"))
+    result = _run(tools["update_task"].fn("Personal", "task-uid", title="New_text"))
     assert result == {"uid": "task-uid"}
     fake_service.update_task.assert_called_once()
     args, _ = fake_service.update_task.call_args
     list_name, task_uid, fields = args
     assert list_name == "Personal"
     assert task_uid == "task-uid"
-    assert fields.titel == "Neu"
+    assert fields.title == "New_text"
 
 
-def test_update_task_passes_felder_leeren_as_clear(tools, fake_service):
-    _run(tools["update_task"].fn("Personal", "task-uid", felder_leeren=["faellig_datum", "ort"]))
+def test_update_task_passes_clear_fields_as_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", clear_fields=["due_date", "location"]))
     args, _ = fake_service.update_task.call_args
     _, _, fields = args
-    assert fields.clear == ("faellig_datum", "ort")
+    assert fields.clear == ("due_date", "location")
 
 
-def test_update_task_without_felder_leeren_has_empty_clear(tools, fake_service):
-    _run(tools["update_task"].fn("Personal", "task-uid", titel="Neu"))
+def test_update_task_without_clear_fields_has_empty_clear(tools, fake_service):
+    _run(tools["update_task"].fn("Personal", "task-uid", title="New_text"))
     args, _ = fake_service.update_task.call_args
     _, _, fields = args
     assert fields.clear == ()
@@ -599,122 +599,122 @@ def test_delete_task_delegates(tools, fake_service):
 def test_move_task_delegates(tools, fake_service):
     fake_service.move_task.return_value = {
         "uid": "task-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "MOVE",
+        "from": "Private",
+        "to": "Work",
+        "method": "MOVE",
     }
     result = _run(
-        tools["move_task"].fn(list_name="Privat", task_uid="task-uid", ziel_liste="Arbeit")
+        tools["move_task"].fn(list_name="Private", task_uid="task-uid", target_list="Work")
     )
     assert result == {
         "uid": "task-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "MOVE",
+        "from": "Private",
+        "to": "Work",
+        "method": "MOVE",
     }
-    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit", None, ())
+    fake_service.move_task.assert_called_once_with("Private", "task-uid", "Work", None, ())
 
 
 def test_move_task_passes_new_parent_through(tools, fake_service):
     fake_service.move_task.return_value = {
         "uid": "task-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "MOVE",
-        "hierarchie": "gesetzt",
+        "from": "Private",
+        "to": "Work",
+        "method": "MOVE",
+        "hierarchy": "set",
     }
     result = _run(
         tools["move_task"].fn(
-            list_name="Privat",
+            list_name="Private",
             task_uid="task-uid",
-            ziel_liste="Arbeit",
-            uebergeordnete_aufgabe="parent-uid",
+            target_list="Work",
+            parent_task="parent-uid",
         )
     )
-    assert result["hierarchie"] == "gesetzt"
-    fake_service.move_task.assert_called_once_with("Privat", "task-uid", "Arbeit", "parent-uid", ())
+    assert result["hierarchy"] == "set"
+    fake_service.move_task.assert_called_once_with("Private", "task-uid", "Work", "parent-uid", ())
 
 
-def test_move_task_passes_felder_leeren_through_as_tuple(tools, fake_service):
+def test_move_task_passes_clear_fields_through_as_tuple(tools, fake_service):
     fake_service.move_task.return_value = {
         "uid": "task-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "MOVE",
-        "hierarchie": "geleert",
+        "from": "Private",
+        "to": "Work",
+        "method": "MOVE",
+        "hierarchy": "cleared",
     }
     _run(
         tools["move_task"].fn(
-            list_name="Privat",
+            list_name="Private",
             task_uid="task-uid",
-            ziel_liste="Arbeit",
-            felder_leeren=["uebergeordnete_aufgabe"],
+            target_list="Work",
+            clear_fields=["parent_task"],
         )
     )
     fake_service.move_task.assert_called_once_with(
-        "Privat", "task-uid", "Arbeit", None, ("uebergeordnete_aufgabe",)
+        "Private", "task-uid", "Work", None, ("parent_task",)
     )
 
 
 def test_move_event_delegates(tools, fake_service):
     fake_service.move_event.return_value = {
         "uid": "event-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "kopiert",
+        "from": "Private",
+        "to": "Work",
+        "method": "copied",
     }
     result = _run(
         tools["move_event"].fn(
-            kalender_name="Privat", event_uid="event-uid", ziel_kalender="Arbeit"
+            calendar_name="Private", event_uid="event-uid", target_calendar="Work"
         )
     )
     assert result == {
         "uid": "event-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "kopiert",
+        "from": "Private",
+        "to": "Work",
+        "method": "copied",
     }
-    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit", None, ())
+    fake_service.move_event.assert_called_once_with("Private", "event-uid", "Work", None, ())
 
 
 def test_move_event_passes_linked_task_through(tools, fake_service):
     fake_service.move_event.return_value = {
         "uid": "event-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "MOVE",
-        "hierarchie": "gesetzt",
+        "from": "Private",
+        "to": "Work",
+        "method": "MOVE",
+        "hierarchy": "set",
     }
     result = _run(
         tools["move_event"].fn(
-            kalender_name="Privat",
+            calendar_name="Private",
             event_uid="event-uid",
-            ziel_kalender="Arbeit",
-            verknuepfte_aufgabe="task-uid",
+            target_calendar="Work",
+            linked_task="task-uid",
         )
     )
-    assert result["hierarchie"] == "gesetzt"
-    fake_service.move_event.assert_called_once_with("Privat", "event-uid", "Arbeit", "task-uid", ())
+    assert result["hierarchy"] == "set"
+    fake_service.move_event.assert_called_once_with("Private", "event-uid", "Work", "task-uid", ())
 
 
-def test_move_event_passes_felder_leeren_through_as_tuple(tools, fake_service):
+def test_move_event_passes_clear_fields_through_as_tuple(tools, fake_service):
     fake_service.move_event.return_value = {
         "uid": "event-uid",
-        "von": "Privat",
-        "nach": "Arbeit",
-        "methode": "MOVE",
-        "hierarchie": "geleert",
+        "from": "Private",
+        "to": "Work",
+        "method": "MOVE",
+        "hierarchy": "cleared",
     }
     _run(
         tools["move_event"].fn(
-            kalender_name="Privat",
+            calendar_name="Private",
             event_uid="event-uid",
-            ziel_kalender="Arbeit",
-            felder_leeren=["verknuepfte_aufgabe"],
+            target_calendar="Work",
+            clear_fields=["linked_task"],
         )
     )
     fake_service.move_event.assert_called_once_with(
-        "Privat", "event-uid", "Arbeit", None, ("verknuepfte_aufgabe",)
+        "Private", "event-uid", "Work", None, ("linked_task",)
     )
 
 
@@ -723,48 +723,48 @@ def test_move_event_passes_felder_leeren_through_as_tuple(tools, fake_service):
 
 def test_create_event_schema(tools):
     schema = tools["create_event"].parameters
-    assert set(schema["required"]) == {"kalender_name", "titel", "start"}
-    assert "wiederholung" in schema["properties"]
-    assert "ausnahme_daten" in schema["properties"]
-    assert "erinnerungen" in schema["properties"]
-    assert "verknuepfte_aufgabe" in schema["properties"]
-    assert "teilnehmer" in schema["properties"]
+    assert set(schema["required"]) == {"calendar_name", "title", "start"}
+    assert "recurrence" in schema["properties"]
+    assert "exception_dates" in schema["properties"]
+    assert "reminders" in schema["properties"]
+    assert "linked_task" in schema["properties"]
+    assert "attendees" in schema["properties"]
 
 
 def test_respond_to_event_schema(tools):
     schema = tools["respond_to_event"].parameters
-    assert set(schema["required"]) == {"kalender_name", "event_uid", "antwort"}
-    assert "kommentar" in schema["properties"]
+    assert set(schema["required"]) == {"calendar_name", "event_uid", "response"}
+    assert "comment" in schema["properties"]
 
 
 def test_get_free_busy_schema(tools):
     schema = tools["get_free_busy"].parameters
-    assert set(schema["required"]) == {"von", "bis"}
-    assert "benutzer" in schema["properties"]
+    assert set(schema["required"]) == {"start", "end"}
+    assert "user" in schema["properties"]
 
 
-def test_update_event_has_felder_leeren_parameter(tools):
+def test_update_event_has_clear_fields_parameter(tools):
     schema = tools["update_event"].parameters
-    assert "felder_leeren" in schema["properties"]
-    assert set(schema["required"]) == {"kalender_name", "event_uid"}
+    assert "clear_fields" in schema["properties"]
+    assert set(schema["required"]) == {"calendar_name", "event_uid"}
 
 
 def test_list_events_schema(tools):
     schema = tools["list_events"].parameters
     assert set(schema["properties"]) == {
-        "kalender_namen",
-        "von",
-        "bis",
-        "suchtext",
+        "calendar_names",
+        "start",
+        "end",
+        "search_text",
         "tag",
         "limit",
-        "wiederholungen_aufloesen",
-        "ohne_erinnerung",
-        "ohne_sichtbarkeit",
-        "ohne_tags",
+        "expand_recurrences",
+        "without_reminder",
+        "without_visibility",
+        "without_tags",
         "uid_regex",
-        "felder",
-        "kompakt",
+        "fields",
+        "compact",
     }
     assert schema.get("required", []) == []
 
@@ -773,26 +773,26 @@ def test_list_events_delegates_with_filters(tools, fake_service):
     fake_service.list_events.return_value = []
     _run(
         tools["list_events"].fn(
-            kalender_namen=["Termine"],
-            von="2026-07-01",
-            bis="2026-07-31",
-            suchtext="Zahnarzt",
-            tag="Privat",
+            calendar_names=["Events"],
+            start="2026-07-01",
+            end="2026-07-31",
+            search_text="Dentist",
+            tag="Private",
             limit=10,
-            wiederholungen_aufloesen=True,
+            expand_recurrences=True,
         )
     )
     fake_service.list_events.assert_called_once_with(
-        calendar_names=["Termine"],
-        von="2026-07-01",
-        bis="2026-07-31",
-        suchtext="Zahnarzt",
-        tag="Privat",
+        calendar_names=["Events"],
+        start="2026-07-01",
+        end="2026-07-31",
+        search_text="Dentist",
+        tag="Private",
         limit=10,
         expand=True,
-        ohne_erinnerung=False,
-        ohne_sichtbarkeit=False,
-        ohne_tags=False,
+        without_reminder=False,
+        without_visibility=False,
+        without_tags=False,
         uid_regex=None,
     )
 
@@ -801,48 +801,48 @@ def test_list_events_passes_cleanup_filters_through(tools, fake_service):
     fake_service.list_events.return_value = []
     _run(
         tools["list_events"].fn(
-            kalender_namen=["Termine"],
-            ohne_erinnerung=True,
-            ohne_sichtbarkeit=True,
-            ohne_tags=True,
+            calendar_names=["Events"],
+            without_reminder=True,
+            without_visibility=True,
+            without_tags=True,
             uid_regex="^[A-F0-9-]+$",
         )
     )
     fake_service.list_events.assert_called_once_with(
-        calendar_names=["Termine"],
-        von=None,
-        bis=None,
-        suchtext=None,
+        calendar_names=["Events"],
+        start=None,
+        end=None,
+        search_text=None,
         tag=None,
         limit=None,
         expand=False,
-        ohne_erinnerung=True,
-        ohne_sichtbarkeit=True,
-        ohne_tags=True,
+        without_reminder=True,
+        without_visibility=True,
+        without_tags=True,
         uid_regex="^[A-F0-9-]+$",
     )
 
 
 def test_create_event_builds_event_fields(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    expected_event = {"uid": "new-uid", "titel": "Meeting", "start": "2026-07-20T14:00:00"}
+    expected_event = {"uid": "new-uid", "title": "Meeting", "start": "2026-07-20T14:00:00"}
     fake_service.get_event.return_value = expected_event
     result = _run(
         tools["create_event"].fn(
-            kalender_name="Termine",
-            titel="Meeting",
+            calendar_name="Events",
+            title="Meeting",
             start="2026-07-20T14:00:00",
-            ende="2026-07-20T15:00:00",
-            status="bestätigt",
+            end="2026-07-20T15:00:00",
+            status="confirmed",
         )
     )
     assert result == expected_event
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Termine"
-    assert fields.titel == "Meeting"
-    assert fields.status == "bestätigt"
+    assert cal_name == "Events"
+    assert fields.title == "Meeting"
+    assert fields.status == "confirmed"
     assert fields.clear == ()
-    fake_service.get_event.assert_called_once_with("Termine", "new-uid")
+    fake_service.get_event.assert_called_once_with("Events", "new-uid")
 
 
 # --- Birthdays (create_birthday) ---
@@ -850,89 +850,89 @@ def test_create_event_builds_event_fields(tools, fake_service):
 
 def test_create_birthday_schema(tools):
     schema = tools["create_birthday"].parameters
-    assert set(schema["properties"]) == {"name", "datum", "jahr", "kalender"}
-    assert schema["required"] == ["name", "datum"]
-    assert schema["properties"]["kalender"]["default"] == "Geburtstage"
+    assert set(schema["properties"]) == {"name", "date", "year", "calendar"}
+    assert schema["required"] == ["name", "date"]
+    assert schema["properties"]["calendar"]["default"] == "Birthdays"
 
 
 def test_create_birthday_builds_the_convention_and_returns_the_event(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    expected_event = {"uid": "new-uid", "titel": "🎂 Papa (1975)"}
+    expected_event = {"uid": "new-uid", "title": "🎂 Papa (1975)"}
     fake_service.get_event.return_value = expected_event
 
-    result = _run(tools["create_birthday"].fn(name="Papa", datum="07-04", jahr=1975))
+    result = _run(tools["create_birthday"].fn(name="Papa", date="07-04", year=1975))
 
     assert result == expected_event
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Geburtstage"
-    assert fields.titel == "🎂 Papa (1975)"
-    assert (fields.start, fields.ende) == ("1975-07-04", "1975-07-04")
-    assert fields.wiederholung == "FREQ=YEARLY"
-    assert fields.tags == ["Geburtstag"]
-    assert fields.sichtbarkeit == "privat"
-    assert fields.erinnerungen == ["-PT0M", "-P1D"]
-    fake_service.get_event.assert_called_once_with("Geburtstage", "new-uid")
+    assert cal_name == "Birthdays"
+    assert fields.title == "🎂 Papa (1975)"
+    assert (fields.start, fields.end) == ("1975-07-04", "1975-07-04")
+    assert fields.recurrence == "FREQ=YEARLY"
+    assert fields.tags == ["Birthday"]
+    assert fields.visibility == "private"
+    assert fields.reminders == ["-PT0M", "-P1D"]
+    fake_service.get_event.assert_called_once_with("Birthdays", "new-uid")
 
 
 def test_create_birthday_writes_to_the_given_calendar(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
 
-    _run(tools["create_birthday"].fn(name="Papa", datum="07-04", kalender="Familie"))
+    _run(tools["create_birthday"].fn(name="Papa", date="07-04", calendar="Familie"))
 
     (cal_name, _), _ = fake_service.create_event.call_args
     assert cal_name == "Familie"
 
 
-def test_create_birthday_invalid_datum_becomes_clean_tool_error(tools, fake_service):
-    with pytest.raises(ToolError, match="Could not parse datum"):
-        _run(tools["create_birthday"].fn(name="Papa", datum="4.7."))
+def test_create_birthday_invalid_date_becomes_clean_tool_error(tools, fake_service):
+    with pytest.raises(ToolError, match="Could not parse date"):
+        _run(tools["create_birthday"].fn(name="Papa", date="4.7."))
     fake_service.create_event.assert_not_called()
 
 
 def test_update_event_passes_clear_fields(tools, fake_service):
-    expected_event = {"uid": "event-1", "titel": "Meeting", "ort": None}
+    expected_event = {"uid": "event-1", "title": "Meeting", "location": None}
     fake_service.get_event.return_value = expected_event
     result = _run(
         tools["update_event"].fn(
-            kalender_name="Termine",
+            calendar_name="Events",
             event_uid="event-1",
-            felder_leeren=["ende", "ort"],
+            clear_fields=["end", "location"],
         )
     )
     assert result == expected_event
     (_, _, fields), _ = fake_service.update_event.call_args
-    assert fields.clear == ("ende", "ort")
-    fake_service.get_event.assert_called_once_with("Termine", "event-1")
+    assert fields.clear == ("end", "location")
+    fake_service.get_event.assert_called_once_with("Events", "event-1")
 
 
 def test_list_events_compacts_large_exdate_list(tools, fake_service):
     exdates_15 = [f"2026-08-{i:02d}" for i in range(1, 16)]
     fake_service.list_events.return_value = [
-        {"uid": "e1", "ausnahme_daten": exdates_15},
-        {"uid": "e2", "ausnahme_daten": ["2026-08-01", "2026-08-02", "2026-08-03"]},
-        {"uid": "e3", "ausnahme_daten": []},
-        {"uid": "e4", "ausnahme_daten": None},
+        {"uid": "e1", "exception_dates": exdates_15},
+        {"uid": "e2", "exception_dates": ["2026-08-01", "2026-08-02", "2026-08-03"]},
+        {"uid": "e3", "exception_dates": []},
+        {"uid": "e4", "exception_dates": None},
     ]
-    results = _run(tools["list_events"].fn(kalender_namen=["Termine"]))
-    assert results[0]["ausnahme_daten"] == {
-        "anzahl": 15,
-        "erste": exdates_15[:5],
-        "hinweis": "gekürzt - vollständige Liste über get_event abrufen",
+    results = _run(tools["list_events"].fn(calendar_names=["Events"]))
+    assert results[0]["exception_dates"] == {
+        "count": 15,
+        "first": exdates_15[:5],
+        "note": "truncated - full List über get_event abrufen",
     }
-    assert results[1]["ausnahme_daten"] == ["2026-08-01", "2026-08-02", "2026-08-03"]
-    assert results[2]["ausnahme_daten"] == []
-    assert results[3]["ausnahme_daten"] is None
+    assert results[1]["exception_dates"] == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert results[2]["exception_dates"] == []
+    assert results[3]["exception_dates"] is None
 
 
-# --- Payload slimming (felder whitelist / kompakt mode) and default window ---
+# --- Payload slimming (fields whitelist / compact mode) and default window ---
 
 
-def test_felder_whitelists_track_the_keys_the_parsers_actually_produce():
-    """`felder` rejects any name not in the whitelist, so the two must not drift.
+def test_fields_whitelists_track_the_keys_the_parsers_actually_produce():
+    """`fields` rejects any name not in the whitelist, so the two must not drift.
 
     A key added to `parse_vtodo`/`parse_vevent` but forgotten here becomes a
-    field that listings return yet `felder` refuses to select - which is how
-    `sichtbarkeit` arrived on the task side. Deriving both sets from the
+    field that listings return yet `fields` refuses to select - which is how
+    `visibility` arrived on the task side. Deriving both sets from the
     parsers makes the next such addition fail here instead of in a client.
     """
     from icalendar import Event, Todo
@@ -941,108 +941,108 @@ def test_felder_whitelists_track_the_keys_the_parsers_actually_produce():
 
     todo = Todo()
     todo.add("uid", "t1")
-    # "liste"/"liste_url" are stamped on by the client layer, not the parser.
-    assert set(mapping.parse_vtodo(todo)) | {"liste", "liste_url"} == set(_TASK_RESULT_KEYS)
+    # "list"/"list_url" are stamped on by the client layer, not the parser.
+    assert set(mapping.parse_vtodo(todo)) | {"list", "list_url"} == set(_TASK_RESULT_KEYS)
 
     event = Event()
     event.add("uid", "e1")
-    # "kalender" likewise; "quelle_url" is stripped before list_events returns.
-    assert set(event_mapping.parse_vevent(event)) | {"kalender"} == set(_EVENT_RESULT_KEYS)
+    # "calendar" likewise; "source_url" is stripped before list_events returns.
+    assert set(event_mapping.parse_vevent(event)) | {"calendar"} == set(_EVENT_RESULT_KEYS)
 
 
 def _sample_event() -> dict:
     return {
         "uid": "e1",
-        "titel": "Meeting",
+        "title": "Meeting",
         "start": "2026-07-20T14:00:00+02:00",
-        "ende": "2026-07-20T15:00:00+02:00",
-        "ganztaegig": False,
-        "ort": None,
-        "beschreibung": "x" * 250,
+        "end": "2026-07-20T15:00:00+02:00",
+        "all_day": False,
+        "location": None,
+        "description": "x" * 250,
         "tags": [],
-        "erinnerungen": [],
+        "reminders": [],
         "status": None,
-        "sichtbarkeit": None,
-        "wiederholung": None,
-        "ausnahme_daten": [],
+        "visibility": None,
+        "recurrence": None,
+        "exception_dates": [],
         "url": None,
-        "verknuepfte_aufgaben": [],
-        "wiederholung_von": None,
-        "kalender": "Termine",
-        "organisator": None,
-        "teilnehmer": [],
+        "linked_tasks": [],
+        "recurrence_id": None,
+        "calendar": "Events",
+        "organizer": None,
+        "attendees": [],
     }
 
 
-def test_list_events_kompakt_drops_empty_fields_and_truncates_description(tools, fake_service):
+def test_list_events_compact_drops_empty_fields_and_truncates_description(tools, fake_service):
     fake_service.list_events.return_value = [_sample_event()]
-    (event,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], kompakt=True))
-    assert set(event) == {"uid", "titel", "start", "ende", "ganztaegig", "beschreibung", "kalender"}
-    assert event["ganztaegig"] is False  # False is a value, not "empty"
-    assert event["beschreibung"].startswith("x" * 200 + "…")
-    assert "gekürzt von 250 Zeichen" in event["beschreibung"]
-    assert "get_event" in event["beschreibung"]
+    (event,) = _run(tools["list_events"].fn(calendar_names=["Events"], compact=True))
+    assert set(event) == {"uid", "title", "start", "end", "all_day", "description", "calendar"}
+    assert event["all_day"] is False  # False is a value, not "empty"
+    assert event["description"].startswith("x" * 200 + "…")
+    assert "truncated start 250 Characters" in event["description"]
+    assert "get_event" in event["description"]
 
 
-def test_list_events_kompakt_keeps_short_description_untouched(tools, fake_service):
+def test_list_events_compact_keeps_short_description_untouched(tools, fake_service):
     event = _sample_event()
-    event["beschreibung"] = "kurz"
+    event["description"] = "kurz"
     fake_service.list_events.return_value = [event]
-    (result,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], kompakt=True))
-    assert result["beschreibung"] == "kurz"
+    (result,) = _run(tools["list_events"].fn(calendar_names=["Events"], compact=True))
+    assert result["description"] == "kurz"
 
 
-def test_list_events_felder_whitelist_filters_keys(tools, fake_service):
+def test_list_events_fields_whitelist_filters_keys(tools, fake_service):
     fake_service.list_events.return_value = [_sample_event()]
     (event,) = _run(
-        tools["list_events"].fn(kalender_namen=["Termine"], felder=["uid", "titel", "start"])
+        tools["list_events"].fn(calendar_names=["Events"], fields=["uid", "title", "start"])
     )
-    assert event == {"uid": "e1", "titel": "Meeting", "start": "2026-07-20T14:00:00+02:00"}
+    assert event == {"uid": "e1", "title": "Meeting", "start": "2026-07-20T14:00:00+02:00"}
 
 
-def test_list_events_felder_accepts_bare_string(tools, fake_service):
-    # Same lenience as listen_namen: a single name instead of a list works.
+def test_list_events_fields_accepts_bare_string(tools, fake_service):
+    # Same lenience as list_names: a single name instead of a list works.
     fake_service.list_events.return_value = [_sample_event()]
-    (event,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], felder="uid"))
+    (event,) = _run(tools["list_events"].fn(calendar_names=["Events"], fields="uid"))
     assert event == {"uid": "e1"}
 
 
-def test_list_events_unknown_felder_entry_raises(tools, fake_service):
+def test_list_events_unknown_fields_entry_raises(tools, fake_service):
     fake_service.list_events.return_value = [_sample_event()]
-    with pytest.raises(ToolError, match="Unbekannte felder-Einträge: summary"):
-        _run(tools["list_events"].fn(kalender_namen=["Termine"], felder=["uid", "summary"]))
+    with pytest.raises(ToolError, match="Unknown fields-Entries: summary"):
+        _run(tools["list_events"].fn(calendar_names=["Events"], fields=["uid", "summary"]))
 
 
-def test_list_events_empty_felder_means_no_whitelist(tools, fake_service):
+def test_list_events_empty_fields_means_no_whitelist(tools, fake_service):
     """`[]` is what MCP clients send for an unset array - it must not blank the row.
 
-    Deliberately unlike `listen_namen=[]` (an empty scope, which returns no
+    Deliberately unlike `list_names=[]` (an empty scope, which returns no
     rows): an empty *field* whitelist can only otherwise mean "a row of
     nothing", which is never what a caller wants.
     """
     fake_service.list_events.return_value = [_sample_event()]
-    (event,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], felder=[]))
+    (event,) = _run(tools["list_events"].fn(calendar_names=["Events"], fields=[]))
     assert event == _sample_event()
 
 
-def test_list_events_kompakt_keeps_exdate_summary_dict(tools, fake_service):
-    """The >10-EXDATE summary is a dict, so `kompakt` must not prune it as "empty"."""
+def test_list_events_compact_keeps_exdate_summary_dict(tools, fake_service):
+    """The >10-EXDATE summary is a dict, so `compact` must not prune it as "empty"."""
     event = _sample_event()
-    event["ausnahme_daten"] = [f"2026-08-{i:02d}" for i in range(1, 16)]
+    event["exception_dates"] = [f"2026-08-{i:02d}" for i in range(1, 16)]
     fake_service.list_events.return_value = [event]
-    (result,) = _run(tools["list_events"].fn(kalender_namen=["Termine"], kompakt=True))
-    assert result["ausnahme_daten"]["anzahl"] == 15
+    (result,) = _run(tools["list_events"].fn(calendar_names=["Events"], compact=True))
+    assert result["exception_dates"]["count"] == 15
 
 
-def test_list_events_felder_combines_with_kompakt(tools, fake_service):
+def test_list_events_fields_combines_with_compact(tools, fake_service):
     fake_service.list_events.return_value = [_sample_event()]
     (event,) = _run(
         tools["list_events"].fn(
-            kalender_namen=["Termine"], felder=["uid", "titel", "ort"], kompakt=True
+            calendar_names=["Events"], fields=["uid", "title", "location"], compact=True
         )
     )
-    # `ort` is whitelisted but None, so kompakt still drops it.
-    assert event == {"uid": "e1", "titel": "Meeting"}
+    # `location` is whitelisted but None, so compact still drops it.
+    assert event == {"uid": "e1", "title": "Meeting"}
 
 
 def test_list_events_without_calendars_and_window_defaults_to_90_days(tools, fake_service):
@@ -1052,25 +1052,25 @@ def test_list_events_without_calendars_and_window_defaults_to_90_days(tools, fak
     _run(tools["list_events"].fn())
     _, kwargs = fake_service.list_events.call_args
     today = datetime.now(mapping.get_default_timezone()).date()
-    assert date.fromisoformat(kwargs["von"]) == today - timedelta(days=90)
-    assert date.fromisoformat(kwargs["bis"]) == today + timedelta(days=90)
+    assert date.fromisoformat(kwargs["start"]) == today - timedelta(days=90)
+    assert date.fromisoformat(kwargs["end"]) == today + timedelta(days=90)
 
 
 def test_list_events_default_window_not_applied_when_scoped(tools, fake_service):
     fake_service.list_events.return_value = []
-    _run(tools["list_events"].fn(kalender_namen=["Termine"]))
+    _run(tools["list_events"].fn(calendar_names=["Events"]))
     _, kwargs = fake_service.list_events.call_args
-    assert kwargs["von"] is None and kwargs["bis"] is None
+    assert kwargs["start"] is None and kwargs["end"] is None
 
     fake_service.list_events.reset_mock()
-    _run(tools["list_events"].fn(von="2026-07-01"))
+    _run(tools["list_events"].fn(start="2026-07-01"))
     _, kwargs = fake_service.list_events.call_args
-    assert kwargs["von"] == "2026-07-01" and kwargs["bis"] is None
+    assert kwargs["start"] == "2026-07-01" and kwargs["end"] is None
 
     fake_service.list_events.reset_mock()
-    _run(tools["list_events"].fn(bis="2026-07-31"))
+    _run(tools["list_events"].fn(end="2026-07-31"))
     _, kwargs = fake_service.list_events.call_args
-    assert kwargs["von"] is None and kwargs["bis"] == "2026-07-31"
+    assert kwargs["start"] is None and kwargs["end"] == "2026-07-31"
 
 
 def test_list_events_cleanup_filters_do_not_disable_the_default_window(tools, fake_service):
@@ -1078,19 +1078,19 @@ def test_list_events_cleanup_filters_do_not_disable_the_default_window(tools, fa
 
     The `ohne_*`/`uid_regex` filters run client-side on whatever the query
     returned, so a bare sweep only ever sees today ±90 days - phone-created
-    events older than that need `von`/`bis` (or a calendar name) as well.
+    events older than that need `start`/`end` (or a calendar name) as well.
     Pinned because "find every hand-made event" reads like it should scan
     everything, and it does not.
     """
     from datetime import date, datetime, timedelta
 
     fake_service.list_events.return_value = []
-    _run(tools["list_events"].fn(ohne_erinnerung=True, uid_regex="^[A-F0-9-]+$"))
+    _run(tools["list_events"].fn(without_reminder=True, uid_regex="^[A-F0-9-]+$"))
     _, kwargs = fake_service.list_events.call_args
     today = datetime.now(mapping.get_default_timezone()).date()
-    assert date.fromisoformat(kwargs["von"]) == today - timedelta(days=90)
-    assert date.fromisoformat(kwargs["bis"]) == today + timedelta(days=90)
-    assert kwargs["ohne_erinnerung"] is True and kwargs["uid_regex"] == "^[A-F0-9-]+$"
+    assert date.fromisoformat(kwargs["start"]) == today - timedelta(days=90)
+    assert date.fromisoformat(kwargs["end"]) == today + timedelta(days=90)
+    assert kwargs["without_reminder"] is True and kwargs["uid_regex"] == "^[A-F0-9-]+$"
 
 
 def test_list_events_default_window_lets_unscoped_expansion_work(tools, fake_service):
@@ -1098,164 +1098,160 @@ def test_list_events_default_window_lets_unscoped_expansion_work(tools, fake_ser
 
     `expand=True` without both bounds is refused one layer down
     (`_collect_events`), so the default window is what makes a bare
-    `wiederholungen_aufloesen=True` call viable at all. Naming a calendar is a
+    `expand_recurrences=True` call viable at all. Naming a calendar is a
     scoping decision and turns the default off, so that call still arrives
     unbounded and is refused as before - pinned here so the asymmetry is a
     choice rather than a surprise.
     """
     fake_service.list_events.return_value = []
-    _run(tools["list_events"].fn(wiederholungen_aufloesen=True))
+    _run(tools["list_events"].fn(expand_recurrences=True))
     _, kwargs = fake_service.list_events.call_args
     assert kwargs["expand"] is True
-    assert kwargs["von"] is not None and kwargs["bis"] is not None
+    assert kwargs["start"] is not None and kwargs["end"] is not None
 
     fake_service.list_events.reset_mock()
-    _run(tools["list_events"].fn(kalender_namen=["Termine"], wiederholungen_aufloesen=True))
+    _run(tools["list_events"].fn(calendar_names=["Events"], expand_recurrences=True))
     _, kwargs = fake_service.list_events.call_args
-    assert kwargs["von"] is None and kwargs["bis"] is None
+    assert kwargs["start"] is None and kwargs["end"] is None
 
 
 def _sample_task() -> dict:
     return {
         "uid": "t1",
-        "titel": "Aufgabe",
-        "start_datum": None,
-        "faellig_datum": "2026-07-20",
-        "prioritaet": None,
-        "fortschritt_prozent": 0,
-        "status": "offen",
-        "ort": None,
+        "title": "Task",
+        "start_date": None,
+        "due_date": "2026-07-20",
+        "priority": None,
+        "progress_percent": 0,
+        "status": "open",
+        "location": None,
         "url": None,
         "tags": [],
-        "erinnerungen": [],
-        "notizen": "n" * 300,
-        "uebergeordnete_uid": None,
-        "wiederholung": None,
-        "ausnahme_daten": [],
-        "wiederholung_von": None,
-        "serie_uid": None,
-        "liste": "Personal",
-        "liste_url": "https://cloud.example.com/remote.php/dav/calendars/demo/personal/",
+        "reminders": [],
+        "notes": "n" * 300,
+        "parent_uid": None,
+        "recurrence": None,
+        "exception_dates": [],
+        "recurrence_id": None,
+        "series_uid": None,
+        "list": "Personal",
+        "list_url": "https://cloud.example.com/remote.php/dav/calendars/demo/personal/",
     }
 
 
-def test_list_tasks_kompakt_drops_empty_fields_and_liste_url(tools, fake_service):
+def test_list_tasks_compact_drops_empty_fields_and_list_url(tools, fake_service):
     fake_service.list_tasks.return_value = [_sample_task()]
-    (task,) = _run(tools["list_tasks"].fn(listen_namen=["Personal"], kompakt=True))
+    (task,) = _run(tools["list_tasks"].fn(list_names=["Personal"], compact=True))
     assert set(task) == {
         "uid",
-        "titel",
-        "faellig_datum",
-        "fortschritt_prozent",
+        "title",
+        "due_date",
+        "progress_percent",
         "status",
-        "notizen",
-        "liste",
+        "notes",
+        "list",
     }
-    assert task["fortschritt_prozent"] == 0  # 0 is a value, not "empty"
-    assert task["notizen"].startswith("n" * 200 + "…")
-    assert "gekürzt von 300 Zeichen" in task["notizen"]
-    assert "get_task" in task["notizen"]
+    assert task["progress_percent"] == 0  # 0 is a value, not "empty"
+    assert task["notes"].startswith("n" * 200 + "…")
+    assert "truncated start 300 Characters" in task["notes"]
+    assert "get_task" in task["notes"]
 
 
-def test_list_tasks_felder_whitelist_filters_keys_and_validates(tools, fake_service):
+def test_list_tasks_fields_whitelist_filters_keys_and_validates(tools, fake_service):
     fake_service.list_tasks.return_value = [_sample_task()]
     (task,) = _run(
-        tools["list_tasks"].fn(listen_namen=["Personal"], felder=["uid", "titel", "faellig_datum"])
+        tools["list_tasks"].fn(list_names=["Personal"], fields=["uid", "title", "due_date"])
     )
-    assert task == {"uid": "t1", "titel": "Aufgabe", "faellig_datum": "2026-07-20"}
+    assert task == {"uid": "t1", "title": "Task", "due_date": "2026-07-20"}
 
-    with pytest.raises(ToolError, match="Unbekannte felder-Einträge: beschreibung"):
-        _run(tools["list_tasks"].fn(listen_namen=["Personal"], felder=["beschreibung"]))
+    with pytest.raises(ToolError, match="Unknown fields-Entries: description"):
+        _run(tools["list_tasks"].fn(list_names=["Personal"], fields=["description"]))
 
 
-def test_list_tasks_kompakt_keeps_liste_url_when_whitelisted(tools, fake_service):
+def test_list_tasks_compact_keeps_list_url_when_whitelisted(tools, fake_service):
     fake_service.list_tasks.return_value = [_sample_task()]
     (task,) = _run(
-        tools["list_tasks"].fn(listen_namen=["Personal"], felder=["uid", "liste_url"], kompakt=True)
+        tools["list_tasks"].fn(list_names=["Personal"], fields=["uid", "list_url"], compact=True)
     )
-    assert task == {"uid": "t1", "liste_url": _sample_task()["liste_url"]}
+    assert task == {"uid": "t1", "list_url": _sample_task()["list_url"]}
 
 
-# --- Attendees (teilnehmer) ---
+# --- Attendees (attendees) ---
 
 
-def test_create_event_passes_teilnehmer_through(tools, fake_service):
+def test_create_event_passes_attendees_through(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    teilnehmer = [{"email": "a@example.com", "rolle": "optional"}]
+    attendees = [{"email": "a@example.com", "role": "optional"}]
     _run(
         tools["create_event"].fn(
-            kalender_name="Termine",
-            titel="Meeting",
+            calendar_name="Events",
+            title="Meeting",
             start="2026-07-20T14:00:00",
-            teilnehmer=teilnehmer,
+            attendees=attendees,
         )
     )
     (_, fields), _ = fake_service.create_event.call_args
-    assert fields.teilnehmer == teilnehmer
+    assert fields.attendees == attendees
 
 
-def test_create_event_teilnehmer_defaults_to_none(tools, fake_service):
+def test_create_event_attendees_defaults_to_none(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
     _run(
         tools["create_event"].fn(
-            kalender_name="Termine", titel="Meeting", start="2026-07-20T14:00:00"
+            calendar_name="Events", title="Meeting", start="2026-07-20T14:00:00"
         )
     )
     (_, fields), _ = fake_service.create_event.call_args
-    assert fields.teilnehmer is None
+    assert fields.attendees is None
 
 
-def test_update_event_passes_teilnehmer_through(tools, fake_service):
-    teilnehmer = [{"email": "b@example.com"}]
+def test_update_event_passes_attendees_through(tools, fake_service):
+    attendees = [{"email": "b@example.com"}]
+    _run(tools["update_event"].fn(calendar_name="Events", event_uid="event-1", attendees=attendees))
+    (_, _, fields), _ = fake_service.update_event.call_args
+    assert fields.attendees == attendees
+
+
+def test_update_event_can_clear_attendees(tools, fake_service):
     _run(
         tools["update_event"].fn(
-            kalender_name="Termine", event_uid="event-1", teilnehmer=teilnehmer
+            calendar_name="Events", event_uid="event-1", clear_fields=["attendees"]
         )
     )
     (_, _, fields), _ = fake_service.update_event.call_args
-    assert fields.teilnehmer == teilnehmer
-
-
-def test_update_event_can_clear_teilnehmer(tools, fake_service):
-    _run(
-        tools["update_event"].fn(
-            kalender_name="Termine", event_uid="event-1", felder_leeren=["teilnehmer"]
-        )
-    )
-    (_, _, fields), _ = fake_service.update_event.call_args
-    assert fields.clear == ("teilnehmer",)
+    assert fields.clear == ("attendees",)
 
 
 def test_update_events_delegates(tools, fake_service):
     expected_res = {
-        "kalender_name": "Termine",
+        "calendar_name": "Events",
         "erfolgreich": 2,
         "fehlgeschlagen": 0,
-        "ergebnisse": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
+        "results": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
     }
     fake_service.update_events.return_value = expected_res
     res = _run(
         tools["update_events"].fn(
-            kalender_name="Termine",
+            calendar_name="Events",
             event_uids=["u1", "u2"],
-            ort="Büro",
-            felder_leeren=["beschreibung"],
+            location="Büro",
+            clear_fields=["description"],
         )
     )
     assert res == expected_res
     (cal_name, uids, fields), _ = fake_service.update_events.call_args
-    assert cal_name == "Termine"
+    assert cal_name == "Events"
     assert uids == ["u1", "u2"]
-    assert fields.ort == "Büro"
-    assert fields.clear == ("beschreibung",)
+    assert fields.location == "Büro"
+    assert fields.clear == ("description",)
 
 
 def test_update_exdates_delegates(tools, fake_service):
     fake_service.change_exdates.return_value = {
-        "kalender_name": "Termine",
+        "calendar_name": "Events",
         "erfolgreich": 2,
         "fehlgeschlagen": 0,
-        "ergebnisse": [
+        "results": [
             {"uid": "u1", "status": "ok", "added": 1, "removed": 0, "total": 7, "skipped": []},
             {
                 "uid": "u2",
@@ -1270,7 +1266,7 @@ def test_update_exdates_delegates(tools, fake_service):
 
     res = _run(
         tools["update_exdates"].fn(
-            calendar_name="Termine",
+            calendar_name="Events",
             event_uids=["u1", "u2"],
             add=["2026-07-27"],
         )
@@ -1278,7 +1274,7 @@ def test_update_exdates_delegates(tools, fake_service):
 
     # The tool's surface is English end to end, unlike the German batch shape
     # `_batch_over_events` returns underneath it.
-    assert res["calendar_name"] == "Termine"
+    assert res["calendar_name"] == "Events"
     assert (res["succeeded"], res["failed"]) == (2, 0)
     assert res["results"][0] == {
         "uid": "u1",
@@ -1290,21 +1286,19 @@ def test_update_exdates_delegates(tools, fake_service):
     }
     assert res["results"][1]["skipped"] == [{"value": "2026-07-27", "reason": "no occurrence"}]
     args, _ = fake_service.change_exdates.call_args
-    assert args == ("Termine", ["u1", "u2"], ["2026-07-27"], None, True)
+    assert args == ("Events", ["u1", "u2"], ["2026-07-27"], None, True)
 
 
 def test_update_exdates_renames_failed_entries(tools, fake_service):
     fake_service.change_exdates.return_value = {
-        "kalender_name": "Termine",
+        "calendar_name": "Events",
         "erfolgreich": 0,
         "fehlgeschlagen": 1,
-        "ergebnisse": [{"uid": "u1", "status": "fehler", "fehler": "Event 'u1' was not found."}],
+        "results": [{"uid": "u1", "status": "error", "error": "Event 'u1' was not found."}],
     }
 
     res = _run(
-        tools["update_exdates"].fn(
-            calendar_name="Termine", event_uids=["u1"], remove=["2026-07-27"]
-        )
+        tools["update_exdates"].fn(calendar_name="Events", event_uids=["u1"], remove=["2026-07-27"])
     )
 
     assert res["results"] == [
@@ -1314,15 +1308,15 @@ def test_update_exdates_renames_failed_entries(tools, fake_service):
 
 def test_delete_events_delegates(tools, fake_service):
     expected_res = {
-        "kalender_name": "Termine",
+        "calendar_name": "Events",
         "erfolgreich": 2,
         "fehlgeschlagen": 0,
-        "ergebnisse": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
+        "results": [{"uid": "u1", "status": "ok"}, {"uid": "u2", "status": "ok"}],
     }
     fake_service.delete_events.return_value = expected_res
-    res = _run(tools["delete_events"].fn(kalender_name="Termine", event_uids=["u1", "u2"]))
+    res = _run(tools["delete_events"].fn(calendar_name="Events", event_uids=["u1", "u2"]))
     assert res == expected_res
-    fake_service.delete_events.assert_called_once_with("Termine", ["u1", "u2"])
+    fake_service.delete_events.assert_called_once_with("Events", ["u1", "u2"])
 
 
 # --- respond_to_event ---
@@ -1331,25 +1325,25 @@ def test_delete_events_delegates(tools, fake_service):
 def test_respond_to_event_delegates(tools, fake_service):
     result = _run(
         tools["respond_to_event"].fn(
-            kalender_name="Termine",
+            calendar_name="Events",
             event_uid="event-1",
-            antwort="zugesagt",
-            kommentar="Bin dabei",
+            response="accepted",
+            comment="Bin dabei",
         )
     )
     fake_service.respond_to_event.assert_called_once_with(
-        "Termine", "event-1", "zugesagt", "Bin dabei"
+        "Events", "event-1", "accepted", "Bin dabei"
     )
-    assert result == {"uid": "event-1", "antwort": "zugesagt"}
+    assert result == {"uid": "event-1", "response": "accepted"}
 
 
-def test_respond_to_event_kommentar_defaults_to_none(tools, fake_service):
+def test_respond_to_event_comment_defaults_to_none(tools, fake_service):
     _run(
         tools["respond_to_event"].fn(
-            kalender_name="Termine", event_uid="event-1", antwort="abgesagt"
+            calendar_name="Events", event_uid="event-1", response="cancelled"
         )
     )
-    fake_service.respond_to_event.assert_called_once_with("Termine", "event-1", "abgesagt", None)
+    fake_service.respond_to_event.assert_called_once_with("Events", "event-1", "cancelled", None)
 
 
 def test_respond_to_event_not_an_attendee_becomes_clean_tool_error(tools, fake_service):
@@ -1361,7 +1355,7 @@ def test_respond_to_event_not_an_attendee_becomes_clean_tool_error(tools, fake_s
     with pytest.raises(ToolError, match="not listed as an attendee"):
         _run(
             tools["respond_to_event"].fn(
-                kalender_name="Termine", event_uid="event-1", antwort="zugesagt"
+                calendar_name="Events", event_uid="event-1", response="accepted"
             )
         )
 
@@ -1371,24 +1365,24 @@ def test_respond_to_event_not_an_attendee_becomes_clean_tool_error(tools, fake_s
 
 def test_get_free_busy_delegates_own_availability(tools, fake_service):
     fake_service.get_free_busy.return_value = {
-        "von": "2026-07-20T00:00:00+00:00",
-        "bis": "2026-07-21T00:00:00+00:00",
-        "benutzer": None,
+        "start": "2026-07-20T00:00:00+00:00",
+        "end": "2026-07-21T00:00:00+00:00",
+        "user": None,
         "belegt": [],
     }
-    result = _run(tools["get_free_busy"].fn(von="2026-07-20", bis="2026-07-21"))
+    result = _run(tools["get_free_busy"].fn(start="2026-07-20", end="2026-07-21"))
     fake_service.get_free_busy.assert_called_once_with("2026-07-20", "2026-07-21", None)
     assert result["belegt"] == []
 
 
-def test_get_free_busy_passes_benutzer_through(tools, fake_service):
+def test_get_free_busy_passes_user_through(tools, fake_service):
     fake_service.get_free_busy.return_value = {
-        "von": "2026-07-20T00:00:00+00:00",
-        "bis": "2026-07-21T00:00:00+00:00",
-        "benutzer": "bob@example.com",
+        "start": "2026-07-20T00:00:00+00:00",
+        "end": "2026-07-21T00:00:00+00:00",
+        "user": "bob@example.com",
         "belegt": [],
     }
-    _run(tools["get_free_busy"].fn(von="2026-07-20", bis="2026-07-21", benutzer="bob@example.com"))
+    _run(tools["get_free_busy"].fn(start="2026-07-20", end="2026-07-21", user="bob@example.com"))
     fake_service.get_free_busy.assert_called_once_with(
         "2026-07-20", "2026-07-21", "bob@example.com"
     )
@@ -1399,53 +1393,53 @@ def test_get_free_busy_passes_benutzer_through(tools, fake_service):
 
 def test_share_calendar_delegates(tools, fake_service):
     fake_service.share_calendar.return_value = {
-        "kalender_name": "Privat",
-        "empfaenger": "bob",
-        "schreibzugriff": True,
+        "calendar_name": "Private",
+        "recipient": "bob",
+        "write_access": True,
     }
     result = _run(
-        tools["share_calendar"].fn(kalender_name="Privat", empfaenger="bob", schreibzugriff=True)
+        tools["share_calendar"].fn(calendar_name="Private", recipient="bob", write_access=True)
     )
-    fake_service.share_calendar.assert_called_once_with("Privat", "bob", False, True)
-    assert result == {"kalender_name": "Privat", "empfaenger": "bob", "schreibzugriff": True}
+    fake_service.share_calendar.assert_called_once_with("Private", "bob", False, True)
+    assert result == {"calendar_name": "Private", "recipient": "bob", "write_access": True}
 
 
-def test_share_calendar_defaults_gruppe_and_schreibzugriff_false(tools, fake_service):
+def test_share_calendar_defaults_group_and_write_access_false(tools, fake_service):
     fake_service.share_calendar.return_value = {
-        "kalender_name": "Privat",
-        "empfaenger": "team",
-        "schreibzugriff": False,
+        "calendar_name": "Private",
+        "recipient": "team",
+        "write_access": False,
     }
-    _run(tools["share_calendar"].fn(kalender_name="Privat", empfaenger="team"))
-    fake_service.share_calendar.assert_called_once_with("Privat", "team", False, False)
+    _run(tools["share_calendar"].fn(calendar_name="Private", recipient="team"))
+    fake_service.share_calendar.assert_called_once_with("Private", "team", False, False)
 
 
-def test_share_calendar_passes_gruppe_through(tools, fake_service):
+def test_share_calendar_passes_group_through(tools, fake_service):
     fake_service.share_calendar.return_value = {
-        "kalender_name": "Privat",
-        "empfaenger": "team",
-        "schreibzugriff": False,
+        "calendar_name": "Private",
+        "recipient": "team",
+        "write_access": False,
     }
-    _run(tools["share_calendar"].fn(kalender_name="Privat", empfaenger="team", gruppe=True))
-    fake_service.share_calendar.assert_called_once_with("Privat", "team", True, False)
+    _run(tools["share_calendar"].fn(calendar_name="Private", recipient="team", group=True))
+    fake_service.share_calendar.assert_called_once_with("Private", "team", True, False)
 
 
 def test_unshare_calendar_delegates(tools, fake_service):
     result = _run(
-        tools["unshare_calendar"].fn(kalender_name="Privat", empfaenger="bob", gruppe=False)
+        tools["unshare_calendar"].fn(calendar_name="Private", recipient="bob", group=False)
     )
-    fake_service.unshare_calendar.assert_called_once_with("Privat", "bob", False)
-    assert result == {"kalender_name": "Privat", "empfaenger": "bob"}
+    fake_service.unshare_calendar.assert_called_once_with("Private", "bob", False)
+    assert result == {"calendar_name": "Private", "recipient": "bob"}
 
 
 def test_list_calendar_shares_delegates(tools, fake_service):
     fake_service.list_calendar_shares.return_value = [
-        {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": True, "status": "akzeptiert"}
+        {"recipient": "bob", "type": "user", "write_access": True, "status": "akzeptiert"}
     ]
-    result = _run(tools["list_calendar_shares"].fn(kalender_name="Privat"))
-    fake_service.list_calendar_shares.assert_called_once_with("Privat")
+    result = _run(tools["list_calendar_shares"].fn(calendar_name="Private"))
+    fake_service.list_calendar_shares.assert_called_once_with("Private")
     assert result == [
-        {"empfaenger": "bob", "typ": "benutzer", "schreibzugriff": True, "status": "akzeptiert"}
+        {"recipient": "bob", "type": "user", "write_access": True, "status": "akzeptiert"}
     ]
 
 
@@ -1456,10 +1450,10 @@ def test_list_trash_delegates(tools, fake_service):
     fake_service.list_trash.return_value = [
         {
             "id": "42.ics",
-            "titel": "Einkaufen",
-            "typ": "aufgabe",
-            "kalender": "personal",
-            "geloescht_am": "2026-07-10T12:00:00+00:00",
+            "title": "Shopping",
+            "type": "task",
+            "calendar": "personal",
+            "deleted_at": "2026-07-10T12:00:00+00:00",
         }
     ]
     result = _run(tools["list_trash"].fn())
@@ -1478,61 +1472,59 @@ def test_restore_from_trash_delegates(tools, fake_service):
 
 def test_export_calendar_delegates(tools, fake_service):
     fake_service.export_calendar.return_value = {
-        "kalender_name": "Privat",
+        "calendar_name": "Private",
         "ics": "BEGIN:VCALENDAR\nEND:VCALENDAR\n",
     }
-    result = _run(tools["export_calendar"].fn(kalender_name="Privat"))
-    fake_service.export_calendar.assert_called_once_with("Privat")
+    result = _run(tools["export_calendar"].fn(calendar_name="Private"))
+    fake_service.export_calendar.assert_called_once_with("Private")
     assert result["ics"].startswith("BEGIN:VCALENDAR")
 
 
 def test_import_ics_delegates(tools, fake_service):
     fake_service.import_ics.return_value = {
-        "kalender_name": "Privat",
+        "calendar_name": "Private",
         "importiert": 2,
         "uebersprungen": 1,
     }
     ics_text = "BEGIN:VCALENDAR\nEND:VCALENDAR\n"
-    result = _run(tools["import_ics"].fn(kalender_name="Privat", ics=ics_text))
-    fake_service.import_ics.assert_called_once_with("Privat", ics_text)
-    assert result == {"kalender_name": "Privat", "importiert": 2, "uebersprungen": 1}
+    result = _run(tools["import_ics"].fn(calendar_name="Private", ics=ics_text))
+    fake_service.import_ics.assert_called_once_with("Private", ics_text)
+    assert result == {"calendar_name": "Private", "importiert": 2, "uebersprungen": 1}
 
 
-def test_link_task_to_event_defaults_to_zeitblock(tools, fake_service):
+def test_link_task_to_event_defaults_to_time_block(tools, fake_service):
     result = _run(
         tools["link_task_to_event"].fn(
-            list_name="Privat",
+            list_name="Private",
             task_uid="task-1",
-            kalender_name="Termine",
+            calendar_name="Events",
             event_uid="event-1",
         )
     )
     fake_service.link_task_to_event.assert_called_once_with(
-        "Privat", "task-1", "Termine", "event-1", "zeitblock"
+        "Private", "task-1", "Events", "event-1", "time_block"
     )
-    assert result == {"task_uid": "task-1", "event_uid": "event-1", "beziehung": "zeitblock"}
+    assert result == {"task_uid": "task-1", "event_uid": "event-1", "relation": "time_block"}
 
 
 def test_list_events_for_task_delegates(tools, fake_service):
-    fake_service.list_events_for_task.return_value = [
-        {"uid": "event-1", "kalender_name": "Termine"}
-    ]
-    result = _run(tools["list_events_for_task"].fn(list_name="Privat", task_uid="task-1"))
+    fake_service.list_events_for_task.return_value = [{"uid": "event-1", "calendar_name": "Events"}]
+    result = _run(tools["list_events_for_task"].fn(list_name="Private", task_uid="task-1"))
     fake_service.list_events_for_task.assert_called_once_with(
-        "Privat", "task-1", calendar_names=None
+        "Private", "task-1", calendar_names=None
     )
-    assert result == [{"uid": "event-1", "kalender_name": "Termine"}]
+    assert result == [{"uid": "event-1", "calendar_name": "Events"}]
 
 
-def test_list_events_for_task_passes_kalender_namen_through(tools, fake_service):
+def test_list_events_for_task_passes_calendar_names_through(tools, fake_service):
     fake_service.list_events_for_task.return_value = []
     _run(
         tools["list_events_for_task"].fn(
-            list_name="Privat", task_uid="task-1", kalender_namen=["Termine"]
+            list_name="Private", task_uid="task-1", calendar_names=["Events"]
         )
     )
     fake_service.list_events_for_task.assert_called_once_with(
-        "Privat", "task-1", calendar_names=["Termine"]
+        "Private", "task-1", calendar_names=["Events"]
     )
 
 
@@ -1540,14 +1532,14 @@ def test_create_event_from_task_delegates(tools, fake_service):
     fake_service.create_event_from_task.return_value = "event-uid"
     result = _run(
         tools["create_event_from_task"].fn(
-            list_name="Privat",
+            list_name="Private",
             task_uid="task-1",
-            kalender_name="Termine",
-            dauer_minuten=30,
+            calendar_name="Events",
+            duration_minutes=30,
         )
     )
     fake_service.create_event_from_task.assert_called_once_with(
-        "Privat", "task-1", "Termine", None, 30, None, None, None, None
+        "Private", "task-1", "Events", None, 30, None, None, None, None
     )
     assert result == {"uid": "event-uid", "task_uid": "task-1"}
 
@@ -1556,49 +1548,49 @@ def test_create_event_from_task_passes_new_fields(tools, fake_service):
     fake_service.create_event_from_task.return_value = "event-uid"
     _run(
         tools["create_event_from_task"].fn(
-            list_name="Privat",
+            list_name="Private",
             task_uid="task-1",
-            kalender_name="Termine",
+            calendar_name="Events",
             start="2026-07-20T14:00:00",
-            ende="2026-07-20T16:00:00",
-            beschreibung="",
-            erinnerungen=["-PT30M"],
-            sichtbarkeit="privat",
+            end="2026-07-20T16:00:00",
+            description="",
+            reminders=["-PT30M"],
+            visibility="private",
         )
     )
     fake_service.create_event_from_task.assert_called_once_with(
-        "Privat",
+        "Private",
         "task-1",
-        "Termine",
+        "Events",
         "2026-07-20T14:00:00",
         None,
         "2026-07-20T16:00:00",
         "",
         ["-PT30M"],
-        "privat",
+        "private",
     )
 
 
 def test_get_agenda_delegates(tools, fake_service):
-    fake_service.get_agenda.return_value = {"datum": "2026-07-20", "termine": [], "aufgaben": []}
-    result = _run(tools["get_agenda"].fn(datum="2026-07-20"))
+    fake_service.get_agenda.return_value = {"date": "2026-07-20", "events": [], "tasks": []}
+    result = _run(tools["get_agenda"].fn(date="2026-07-20"))
     fake_service.get_agenda.assert_called_once_with(
         "2026-07-20", calendar_names=None, list_names=None
     )
-    assert result["datum"] == "2026-07-20"
+    assert result["date"] == "2026-07-20"
 
 
 def test_list_tags_delegates(tools, fake_service):
-    fake_service.list_tags.return_value = [{"tag": "Arbeit", "anzahl": 3}]
-    result = _run(tools["list_tags"].fn(kalender_namen=["Cal1"], listen_namen=["List1"]))
+    fake_service.list_tags.return_value = [{"tag": "Work", "count": 3}]
+    result = _run(tools["list_tags"].fn(calendar_names=["Cal1"], list_names=["List1"]))
     fake_service.list_tags.assert_called_once_with(calendar_names=["Cal1"], list_names=["List1"])
-    assert result == [{"tag": "Arbeit", "anzahl": 3}]
+    assert result == [{"tag": "Work", "count": 3}]
 
 
 def test_calendar_not_found_becomes_clean_tool_error(tools, fake_service):
     fake_service.get_event.side_effect = CalendarNotFoundError("Calendar 'X' was not found.")
     with pytest.raises(ToolError, match="was not found"):
-        _run(tools["get_event"].fn(kalender_name="X", event_uid="e1"))
+        _run(tools["get_event"].fn(calendar_name="X", event_uid="e1"))
 
 
 def test_task_mcp_error_becomes_clean_tool_error(tools, fake_service):
@@ -1637,12 +1629,12 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
         due_after=None,
         limit=None,
         *,
-        prioritaet=None,
+        priority=None,
         tag=None,
-        suchtext=None,
-        ohne_erinnerung=False,
-        ohne_sichtbarkeit=False,
-        ohne_tags=False,
+        search_text=None,
+        without_reminder=False,
+        without_visibility=False,
+        without_tags=False,
         uid_regex=None,
     ):
         # Spelled out rather than (*args, **kwargs) on purpose: this is the
@@ -1814,9 +1806,9 @@ READ_ONLY_TOOLS = {
     "list_calendar_shares",
     "list_trash",
     "export_calendar",
-    "list_notizen",
-    "get_notiz",
-    "search_notizen",
+    "list_notes",
+    "get_note",
+    "search_notes",
 }
 
 #: Tools that modify Nextcloud state in a way that is not trivially undone.
@@ -1837,10 +1829,10 @@ DESTRUCTIVE_TOOLS = {
     "move_event",
     "respond_to_event",
     "unshare_calendar",
-    "update_notiz",
-    "replace_in_notiz",
-    "update_notiz_abschnitt",
-    "delete_notiz",
+    "update_note",
+    "replace_in_note",
+    "update_note_section",
+    "delete_note",
 }
 
 

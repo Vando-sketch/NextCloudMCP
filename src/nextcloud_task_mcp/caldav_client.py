@@ -99,16 +99,16 @@ _BATCH_UID_LIMIT = 200
 
 # A date-only string is what makes an event all-day (see `parse_datetime_input`).
 _ALL_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-# Far enough in the past that no realistic `ende` can land before it.
+# Far enough in the past that no realistic `end` can land before it.
 _PROBE_START = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 # The two supported task<->event link semantics, mapped to the RELATED-TO
 # RELTYPE written on the *event* (never on the task - a RELATED-TO added to a
 # VTODO would make Nextcloud Tasks render the task as a subtask of a
 # non-task, garbling its UI; the event side has no such interpretation):
-#   "zeitblock":      the event reserves time for the task (event = child).
-#   "voraussetzung":  the event must happen before the task (event = parent).
-_LINK_RELTYPES: dict[str, str] = {"zeitblock": "PARENT", "voraussetzung": "CHILD"}
+#   "time_block":      the event reserves time for the task (event = child).
+#   "prerequisite":  the event must happen before the task (event = parent).
+_LINK_RELTYPES: dict[str, str] = {"time_block": "PARENT", "prerequisite": "CHILD"}
 
 # The single field name `move_task`/`move_event` accept in their `clear`
 # argument. Moving an object between collections almost always changes its
@@ -116,8 +116,8 @@ _LINK_RELTYPES: dict[str, str] = {"zeitblock": "PARENT", "voraussetzung": "CHILD
 # move calls carry that one field as a shortcut - but they stay move tools,
 # not general-purpose update tools, so the rest of `mapping._CLEAR_SPECS` /
 # `event_mapping._CLEAR_SPECS` is deliberately not reachable through them.
-_MOVE_TASK_CLEARABLE = "uebergeordnete_aufgabe"
-_MOVE_EVENT_CLEARABLE = "verknuepfte_aufgabe"
+_MOVE_TASK_CLEARABLE = "parent_task"
+_MOVE_EVENT_CLEARABLE = "linked_task"
 
 # Runs of anything that isn't an ASCII letter/digit collapse to a single
 # hyphen, so "Groceries & Errands!" -> "groceries-errands" (leading/trailing
@@ -143,8 +143,7 @@ def _validate_move_clear(
     unknown = sorted({name for name in names if name != allowed})
     if unknown:
         raise error(
-            f"Unknown felder_leeren entry/entries: {', '.join(unknown)}. "
-            f"Expected one of: {allowed}."
+            f"Unknown clear_fields entry/entries: {', '.join(unknown)}. Expected one of: {allowed}."
         )
     if names and value is not None:
         raise error(f"Cannot both set and clear the same field in one call: {allowed}.")
@@ -257,7 +256,7 @@ _ICAL_NS = "http://apple.com/ns/ical/"
 _INVITE_STATUS_MAP = {
     "invite-accepted": "akzeptiert",
     "invite-declined": "abgelehnt",
-    "invite-noresponse": "ausstehend",
+    "invite-noresponse": "pending",
     "invite-invalid": "ungueltig",
     "invite-deleted": "geloescht",
 }
@@ -277,15 +276,15 @@ def _local_name(tag: str) -> str:
     return tag.split("}", 1)[1] if "}" in tag else tag
 
 
-def _principal_href(empfaenger: str, gruppe: bool) -> str:
+def _principal_href(recipient: str, group: bool) -> str:
     """Build the "principal:principals/<users|groups>/<id>" href Nextcloud's
     sharing plugin expects in a `{oc}share` request's `{DAV:}href`."""
-    kind = "groups" if gruppe else "users"
-    return f"principal:principals/{kind}/{empfaenger}"
+    kind = "groups" if group else "users"
+    return f"principal:principals/{kind}/{recipient}"
 
 
 def _parse_principal_href(href: str) -> tuple[str | None, str]:
-    """Reverse of `_principal_href`: recover (id, "benutzer"|"gruppe") from a
+    """Reverse of `_principal_href`: recover (id, "user"|"group") from a
     share entry's `{DAV:}href` text (as returned in a `{oc}invite` listing).
 
     Parsed liberally: the leading "principal:" scheme prefix is optional, and
@@ -299,11 +298,11 @@ def _parse_principal_href(href: str) -> tuple[str | None, str]:
         remainder = remainder[len("principal:") :]
     parts = [p for p in remainder.strip("/").split("/") if p]
     if not parts:
-        return None, "benutzer"
+        return None, "user"
     if len(parts) >= 2 and parts[-2] in ("users", "groups"):
-        kind = "gruppe" if parts[-2] == "groups" else "benutzer"
+        kind = "group" if parts[-2] == "groups" else "user"
         return unquote(parts[-1]), kind
-    return unquote(parts[-1]), "benutzer"
+    return unquote(parts[-1]), "user"
 
 
 def _share_request_body(principal_href: str, *, remove: bool, read_write: bool) -> str:
@@ -451,8 +450,8 @@ def _parse_invite_response(tree: Any) -> list[dict[str, Any]]:
             href_el = user_el.find(_clark(_DAV_NS, "href"))
             if href_el is None or not href_el.text:
                 continue
-            empfaenger, typ = _parse_principal_href(href_el.text)
-            if not empfaenger:
+            recipient, type = _parse_principal_href(href_el.text)
+            if not recipient:
                 continue
             access_el = user_el.find(_clark(_OC_NS, "access"))
             read_write = access_el is not None and any(
@@ -466,9 +465,9 @@ def _parse_invite_response(tree: Any) -> list[dict[str, Any]]:
                     break
             shares.append(
                 {
-                    "empfaenger": empfaenger,
-                    "typ": typ,
-                    "schreibzugriff": read_write,
+                    "recipient": recipient,
+                    "type": type,
+                    "write_access": read_write,
                     "status": status,
                 }
             )
@@ -511,7 +510,7 @@ def _parse_deleted_at(raw: str | None) -> str | None:
 
 def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None]:
     """Best-effort SUMMARY/component-kind extraction from a trashbin item's
-    raw calendar-data, for `list_trash`'s "titel"/"typ" fields.
+    raw calendar-data, for `list_trash`'s "title"/"type" fields.
 
     Returns (None, None) if `ics_text` is missing or unparseable - a trashbin
     listing entry is still useful without a title.
@@ -525,10 +524,10 @@ def _derive_title_and_type(ics_text: str | None) -> tuple[str | None, str | None
     for component in parsed.walk():
         if component.name == "VEVENT":
             summary = component.get("summary")
-            return (str(summary) if summary else None), "termin"
+            return (str(summary) if summary else None), "event"
         if component.name == "VTODO":
             summary = component.get("summary")
-            return (str(summary) if summary else None), "aufgabe"
+            return (str(summary) if summary else None), "task"
     return None, None
 
 
@@ -702,9 +701,9 @@ def _reject_occurrence_uid(task_uid: str) -> None:
     raise InvalidTaskDataError(
         f"'{task_uid}' identifies the occurrence on {occurrence} of a recurring task, "
         "not a task on its own - single occurrences cannot be edited, completed or "
-        f"deleted. Use the series' own uid '{series_uid}' (reported as 'serie_uid' on "
+        f"deleted. Use the series' own uid '{series_uid}' (reported as 'series_uid' on "
         "every expanded instance) to act on the whole series, or add the occurrence to "
-        "the series' ausnahme_daten to skip just that one."
+        "the series' exception_dates to skip just that one."
     )
 
 
@@ -1492,12 +1491,12 @@ class CalDavService:
         due_after: str | None = None,
         limit: int | None = None,
         *,
-        prioritaet: str | None = None,
+        priority: str | None = None,
         tag: str | None = None,
-        suchtext: str | None = None,
-        ohne_erinnerung: bool = False,
-        ohne_sichtbarkeit: bool = False,
-        ohne_tags: bool = False,
+        search_text: str | None = None,
+        without_reminder: bool = False,
+        without_visibility: bool = False,
+        without_tags: bool = False,
         uid_regex: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return tasks across one, several, or all VTODO task lists, parsed into German task dicts.
@@ -1508,15 +1507,15 @@ class CalDavService:
         name queries that list once, not twice. `""` is a name like any other,
         i.e. an unknown one.
 
-        `due_before`/`due_after`/`prioritaet`/`tag`/`suchtext`/`limit` - and the
-        cleanup filters `ohne_erinnerung`/`ohne_sichtbarkeit`/`ohne_tags`/
+        `due_before`/`due_after`/`priority`/`tag`/`search_text`/`limit` - and the
+        cleanup filters `without_reminder`/`without_visibility`/`without_tags`/
         `uid_regex` - filter the
         parsed results via `mapping.filter_tasks`, which also expands recurring
         tasks into their occurrences when `due_before` bounds the window (see
-        `mapping._expand_recurring_tasks`). Each task dict gains a "liste"
+        `mapping._expand_recurring_tasks`). Each task dict gains a "list"
         key set to its task list display name. That name is what every other task
         tool takes, with one honest exception: Nextcloud permits two task lists to
-        share a display name, and then "liste" cannot tell them apart (nor can any
+        share a display name, and then "list" cannot tell them apart (nor can any
         by-name call - `_resolve_collection` reports such a name as ambiguous
         rather than guessing). Renaming one of them in Nextcloud is the only fix.
 
@@ -1528,19 +1527,19 @@ class CalDavService:
             list_names = [list_names]
         if list_names is not None and not list_names:
             # Nothing to query, but a caller passing limit=0 or an unknown
-            # prioritaet still deserves to hear about it rather than get a
+            # priority still deserves to hear about it rather than get a
             # plausible-looking empty result.
             return mapping.filter_tasks(
                 [],
                 due_before=due_before,
                 due_after=due_after,
-                prioritaet=prioritaet,
+                priority=priority,
                 tag=tag,
-                suchtext=suchtext,
+                search_text=search_text,
                 limit=limit,
-                ohne_erinnerung=ohne_erinnerung,
-                ohne_sichtbarkeit=ohne_sichtbarkeit,
-                ohne_tags=ohne_tags,
+                without_reminder=without_reminder,
+                without_visibility=without_visibility,
+                without_tags=without_tags,
                 uid_regex=uid_regex,
             )
 
@@ -1554,13 +1553,13 @@ class CalDavService:
             tasks,
             due_before=due_before,
             due_after=due_after,
-            prioritaet=prioritaet,
+            priority=priority,
             tag=tag,
-            suchtext=suchtext,
+            search_text=search_text,
             limit=limit,
-            ohne_erinnerung=ohne_erinnerung,
-            ohne_sichtbarkeit=ohne_sichtbarkeit,
-            ohne_tags=ohne_tags,
+            without_reminder=without_reminder,
+            without_visibility=without_visibility,
+            without_tags=without_tags,
             uid_regex=uid_regex,
         )
 
@@ -1571,8 +1570,8 @@ class CalDavService:
         parsed = []
         for todo in todos:
             task = mapping.parse_vtodo(todo.icalendar_component)
-            task["liste"] = list_name
-            task["liste_url"] = list_url
+            task["list"] = list_name
+            task["list_url"] = list_url
             parsed.append(task)
         return parsed
 
@@ -1655,8 +1654,8 @@ class CalDavService:
 
     def create_task(self, list_name: str, fields: mapping.TaskFields) -> str:
         """Create a new task in the given list and return its UID."""
-        if fields.titel is None:
-            raise InvalidTaskDataError("titel is required to create a task.")
+        if fields.title is None:
+            raise InvalidTaskDataError("title is required to create a task.")
         with self._lock:
             new_uid = str(uuid.uuid4())
             todo = Todo()
@@ -1771,7 +1770,7 @@ class CalDavService:
         list_name: str,
         task_uid: str,
         target_list: str,
-        uebergeordnete_aufgabe: str | None = None,
+        parent_task: str | None = None,
         clear: tuple[str, ...] | list[str] = (),
     ) -> dict[str, str]:
         """Move a task from one task list to another, optionally re-parenting it.
@@ -1784,23 +1783,23 @@ class CalDavService:
             list_name: Display name of the source task list.
             task_uid: UID of the task to move.
             target_list: Display name of the target task list.
-            uebergeordnete_aufgabe: Optional new parent task UID, applied in the
+            parent_task: Optional new parent task UID, applied in the
                 *target* list once the move succeeded. As in `update_task`, this
                 replaces the task's RELATED-TO rather than adding to it.
-            clear: Optional `("uebergeordnete_aufgabe",)` to detach the task from
+            clear: Optional `("parent_task",)` to detach the task from
                 its parent instead - the usual counterpart of a move, since a
                 parent left behind in the source list would otherwise keep the
                 moved task nested under a task in another list. Any other field
                 name raises `InvalidTaskDataError`; use `update_task` for those.
 
         Returns:
-            {"uid": task_uid, "von": source, "nach": target, "methode": "MOVE" | "kopiert"},
-            plus "hierarchie": "gesetzt" | "geleert" when the parent was changed.
+            {"uid": task_uid, "from": source, "to": target, "method": "MOVE" | "copied"},
+            plus "hierarchy": "set" | "cleared" when the parent was changed.
         """
         clear_parent = _validate_move_clear(
             clear,
             _MOVE_TASK_CLEARABLE,
-            uebergeordnete_aufgabe,
+            parent_task,
             InvalidTaskDataError,
         )
         # Checked before the move so a bad UID can't leave the task moved but
@@ -1809,22 +1808,22 @@ class CalDavService:
 
         with self._lock:
             result = self._move_object(list_name, task_uid, target_list, "VTODO")
-            if uebergeordnete_aufgabe is None and not clear_parent:
+            if parent_task is None and not clear_parent:
                 return result
 
             fields = mapping.TaskFields(
-                uebergeordnete_aufgabe=uebergeordnete_aufgabe,
+                parent_task=parent_task,
                 clear=(_MOVE_TASK_CLEARABLE,) if clear_parent else (),
             )
             self._apply_move_hierarchy(
                 lambda: self.update_task(target_list, task_uid, fields),
                 uid=task_uid,
-                target_display=result["nach"],
+                target_display=result["to"],
                 kind_article="Task",
                 field_name=_MOVE_TASK_CLEARABLE,
                 retry_tool="update_task",
             )
-            result["hierarchie"] = "geleert" if clear_parent else "gesetzt"
+            result["hierarchy"] = "cleared" if clear_parent else "set"
             return result
 
     def _apply_move_hierarchy(
@@ -1862,10 +1861,10 @@ class CalDavService:
 
     @staticmethod
     def _range_bound(value: str | None, *, exclusive_end: bool) -> datetime | None:
-        """Normalize a `von`/`bis` filter value to a timezone-aware datetime.
+        """Normalize a `start`/`end` filter value to a timezone-aware datetime.
 
-        A date-only value expands to the start of that day (for `von`) or the
-        start of the *next* day (for `bis`, making a date-only upper bound
+        A date-only value expands to the start of that day (for `start`) or the
+        start of the *next* day (for `end`, making a date-only upper bound
         inclusive of the whole day - the resulting datetime is used as the
         exclusive end of a CalDAV time-range filter). Naive datetimes are
         interpreted in the server's default timezone, matching
@@ -1918,7 +1917,7 @@ class CalDavService:
         return result
 
     def list_calendars(self) -> list[dict[str, Any]]:
-        """Return all VEVENT-supporting calendars as {"name", "url", "farbe", "komponenten"}.
+        """Return all VEVENT-supporting calendars as {"name", "url", "color", "komponenten"}.
 
         Task-only lists (VTODO) are excluded - `list_task_lists` is their
         counterpart. `komponenten` reports the full advertised component set
@@ -1938,22 +1937,22 @@ class CalDavService:
                 # missing from that batch falls back to a per-calendar
                 # color PROPFIND; the color is cosmetic, so a failure there
                 # just yields no color rather than erroring out.
-                farbe: str | None
+                color: str | None
                 meta = self._collection_meta_for(calendar)
                 if meta is not None:
-                    farbe = meta["color"]
+                    color = meta["color"]
                 else:
                     try:
                         props = calendar.get_properties([ical_elements.CalendarColor()])
                         raw = props.get(ical_elements.CalendarColor.tag)
-                        farbe = str(raw) if raw else None
+                        color = str(raw) if raw else None
                     except Exception:
-                        farbe = None
+                        color = None
                 result.append(
                     {
                         "name": name,
                         "url": str(calendar.url),
-                        "farbe": farbe,
+                        "color": color,
                         "komponenten": sorted(components),
                     }
                 )
@@ -1970,7 +1969,7 @@ class CalDavService:
                     self._calendar_cache.pop(("VEVENT", dup_name), None)
             return result
 
-    def create_calendar(self, display_name: str, farbe: str | None = None) -> dict[str, Any]:
+    def create_calendar(self, display_name: str, color: str | None = None) -> dict[str, Any]:
         """Create a new VEVENT calendar, optionally with a "#RRGGBB" color.
 
         Mirrors `create_task_list`'s conflict handling: a display-name clash
@@ -1980,9 +1979,9 @@ class CalDavService:
         """
         if not display_name or not display_name.strip():
             raise InvalidEventDataError("display_name is required to create a calendar.")
-        if farbe is not None and not _COLOR_RE.match(farbe):
+        if color is not None and not _COLOR_RE.match(color):
             raise InvalidEventDataError(
-                f"farbe must look like '#RRGGBB' (or '#RRGGBBAA'), got '{farbe}'."
+                f"color must look like '#RRGGBB' (or '#RRGGBBAA'), got '{color}'."
             )
 
         slug = _slugify(display_name)
@@ -2009,15 +2008,15 @@ class CalDavService:
                 kind="calendar",
             )
 
-            if farbe is not None:
+            if color is not None:
                 try:
-                    calendar.set_properties([ical_elements.CalendarColor(farbe)])
+                    calendar.set_properties([ical_elements.CalendarColor(color)])
                 except Exception as exc:
                     raise _translate(exc) from exc
 
             self._invalidate_collection_caches()
             self._cache_collection("VEVENT", display_name, calendar, fetched_at=monotonic())
-            return {"name": display_name, "url": str(calendar.url), "farbe": farbe}
+            return {"name": display_name, "url": str(calendar.url), "color": color}
 
     def delete_calendar(self, calendar_name: str) -> None:
         """Permanently delete an event calendar and every event inside it.
@@ -2046,7 +2045,7 @@ class CalDavService:
         self,
         calendar_name: str,
         new_display_name: str | None = None,
-        farbe: str | None = None,
+        color: str | None = None,
     ) -> dict[str, Any]:
         """Rename an event calendar and/or set its color (PROPPATCH).
 
@@ -2057,11 +2056,11 @@ class CalDavService:
         """
         if new_display_name is not None and not new_display_name.strip():
             raise InvalidEventDataError("new_display_name must not be empty.")
-        if new_display_name is None and farbe is None:
-            raise InvalidEventDataError("Nothing to update: give new_display_name and/or farbe.")
-        if farbe is not None and not _COLOR_RE.match(farbe):
+        if new_display_name is None and color is None:
+            raise InvalidEventDataError("Nothing to update: give new_display_name and/or color.")
+        if color is not None and not _COLOR_RE.match(color):
             raise InvalidEventDataError(
-                f"farbe must look like '#RRGGBB' (or '#RRGGBBAA'), got '{farbe}'."
+                f"color must look like '#RRGGBB' (or '#RRGGBBAA'), got '{color}'."
             )
 
         with self._lock:
@@ -2098,8 +2097,8 @@ class CalDavService:
             props: list[Any] = []
             if new_display_name is not None:
                 props.append(dav.DisplayName(new_display_name))
-            if farbe is not None:
-                props.append(ical_elements.CalendarColor(farbe))
+            if color is not None:
+                props.append(ical_elements.CalendarColor(color))
             try:
                 calendar.set_properties(props)
             except Exception as exc:
@@ -2110,71 +2109,71 @@ class CalDavService:
             # A color change is reflected in the cached metadata, so drop it.
             self._invalidate_collection_caches()
             self._cache_collection("VEVENT", final_name, calendar, fetched_at=monotonic())
-            return {"name": final_name, "url": str(calendar.url), "farbe": farbe}
+            return {"name": final_name, "url": str(calendar.url), "color": color}
 
     def list_events(
         self,
         calendar_names: list[str] | None = None,
-        von: str | None = None,
-        bis: str | None = None,
-        suchtext: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        search_text: str | None = None,
         tag: str | None = None,
         limit: int | None = None,
         expand: bool = False,
         *,
-        ohne_erinnerung: bool = False,
-        ohne_sichtbarkeit: bool = False,
-        ohne_tags: bool = False,
+        without_reminder: bool = False,
+        without_visibility: bool = False,
+        without_tags: bool = False,
         uid_regex: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return events across one, several, or all VEVENT calendars, sorted by start.
 
-        `von`/`bis` bound the query server-side (CalDAV time-range REPORT), so
+        `start`/`end` bound the query server-side (CalDAV time-range REPORT), so
         recurring events that have an occurrence in the window are matched
         even when their master event started long before it. With
         `expand=True`, recurring events are additionally expanded into their
         individual occurrences within the window (requires both bounds).
-        `suchtext`/`tag`/`limit` - and the cleanup filters `ohne_erinnerung`/
-        `ohne_sichtbarkeit`/`ohne_tags`/`uid_regex` - filter the parsed
+        `search_text`/`tag`/`limit` - and the cleanup filters `without_reminder`/
+        `without_visibility`/`without_tags`/`uid_regex` - filter the parsed
         results client-side via `event_mapping.filter_events`.
         """
         with self._lock:
-            events = self._collect_events(calendar_names, von, bis, expand)
+            events = self._collect_events(calendar_names, start, end, expand)
 
         result = event_mapping.filter_events(
             events,
-            suchtext=suchtext,
+            search_text=search_text,
             tag=tag,
             limit=limit,
-            ohne_erinnerung=ohne_erinnerung,
-            ohne_sichtbarkeit=ohne_sichtbarkeit,
-            ohne_tags=ohne_tags,
+            without_reminder=without_reminder,
+            without_visibility=without_visibility,
+            without_tags=without_tags,
             uid_regex=uid_regex,
         )
-        # "quelle_url" is collected alongside "kalender" for `get_agenda`'s
+        # "source_url" is collected alongside "calendar" for `get_agenda`'s
         # provenance (see `_collect_events`), but isn't part of this method's
         # documented return shape - only `get_agenda` keeps it.
         for item in result:
-            item.pop("quelle_url", None)
+            item.pop("source_url", None)
         return result
 
     def _collect_events(
         self,
         calendar_names: list[str] | None,
-        von: str | None,
-        bis: str | None,
+        start: str | None,
+        end: str | None,
         expand: bool,
     ) -> list[dict[str, Any]]:
         """Query and parse VEVENTs from the target calendars.
 
         Shared by `list_events` and `get_agenda` so the two can never
-        disagree about which events a given (calendar_names, von, bis,
+        disagree about which events a given (calendar_names, start, end,
         expand) selection matches - `get_agenda` applies the exact same
         query rather than re-deriving the logic. Each parsed dict carries
-        "kalender" (the calendar's display name) and "quelle_url" (the
+        "calendar" (the calendar's display name) and "source_url" (the
         CalDAV URL of the specific calendar it was actually read from - the
         *resolved* collection, so it reflects a stale-cache retry if one
-        happened, see `_with_collection`). `list_events` strips "quelle_url"
+        happened, see `_with_collection`). `list_events` strips "source_url"
         before returning; `get_agenda` keeps it, since that's what makes a
         returned event traceable to one specific calendar even when two
         calendars share a display name (the failure mode this was added
@@ -2182,11 +2181,11 @@ class CalDavService:
 
         Must be called with `self._lock` held, like every other CalDAV op.
         """
-        start_bound = self._range_bound(von, exclusive_end=False)
-        end_bound = self._range_bound(bis, exclusive_end=True)
+        start_bound = self._range_bound(start, exclusive_end=False)
+        end_bound = self._range_bound(end, exclusive_end=True)
         if expand and (start_bound is None or end_bound is None):
             raise InvalidEventDataError(
-                "Expanding recurring events requires both von and bis bounds."
+                "Expanding recurring events requires both start and end bounds."
             )
 
         def op(calendar: DAVCalendar) -> tuple[list[Any], str]:
@@ -2226,8 +2225,8 @@ class CalDavService:
 
             for obj in objs:
                 parsed = event_mapping.parse_vevent(obj.icalendar_component)
-                parsed["kalender"] = name
-                parsed["quelle_url"] = source_url
+                parsed["calendar"] = name
+                parsed["source_url"] = source_url
                 events.append(parsed)
 
         return events
@@ -2248,24 +2247,24 @@ class CalDavService:
             except Exception as exc:
                 raise _translate(exc) from exc
             parsed = event_mapping.parse_vevent(event_obj.icalendar_component)
-            parsed["kalender"] = calendar_name
+            parsed["calendar"] = calendar_name
             return parsed
 
     def create_event(self, calendar_name: str, fields: event_mapping.EventFields) -> str:
         """Create a new event in the given calendar and return its UID.
 
-        If `fields.teilnehmer` adds attendees, ORGANIZER is set to the
+        If `fields.attendees` adds attendees, ORGANIZER is set to the
         caller's own address (discovered lazily, see
         `_get_own_organizer_address`) - Nextcloud's CalDAV server then does
         server-side scheduling (iMIP invitation mails) once the event is
         saved with both ORGANIZER and ATTENDEEs present.
         """
-        if fields.titel is None:
-            raise InvalidEventDataError("titel is required to create an event.")
+        if fields.title is None:
+            raise InvalidEventDataError("title is required to create an event.")
         if fields.start is None:
             raise InvalidEventDataError("start is required to create an event.")
         with self._lock:
-            own_organizer = self._get_own_organizer_address() if fields.teilnehmer else None
+            own_organizer = self._get_own_organizer_address() if fields.attendees else None
             new_uid = str(uuid.uuid4())
             event = Event()
             event.add("uid", new_uid)
@@ -2298,10 +2297,10 @@ class CalDavService:
         """Update only the given (non-None) fields of an existing event.
 
         Same ORGANIZER-on-first-attendee and server-side-scheduling behavior
-        as `create_event` when `fields.teilnehmer` sets attendees.
+        as `create_event` when `fields.attendees` sets attendees.
         """
         with self._lock:
-            own_organizer = self._get_own_organizer_address() if fields.teilnehmer else None
+            own_organizer = self._get_own_organizer_address() if fields.attendees else None
 
             def op(calendar: DAVCalendar):
                 event_obj = calendar.event_by_uid(event_uid)
@@ -2324,8 +2323,8 @@ class CalDavService:
         self,
         calendar_name: str,
         event_uid: str,
-        antwort: str,
-        kommentar: str | None = None,
+        response: str,
+        comment: str | None = None,
     ) -> None:
         """Set the caller's own PARTSTAT on an event they were invited to (RSVP reply).
 
@@ -2339,14 +2338,14 @@ class CalDavService:
         scheduling mechanism that sends the original invitations (see
         create_event/update_event).
         """
-        partstat = event_mapping.response_label_to_partstat(antwort)
+        partstat = event_mapping.response_label_to_partstat(response)
         with self._lock:
             own_addresses = self._get_own_calendar_user_addresses()
 
             def op(calendar: DAVCalendar):
                 event_obj = calendar.event_by_uid(event_uid)
                 event_mapping.apply_own_attendee_response(
-                    event_obj.icalendar_component, own_addresses, partstat, kommentar
+                    event_obj.icalendar_component, own_addresses, partstat, comment
                 )
                 event_obj.save()
 
@@ -2366,14 +2365,14 @@ class CalDavService:
         A batch must not stop halfway because the 40th event was the first to
         reveal a bad RRULE, so the patch is applied to a throwaway VEVENT
         first: every check `apply_event_fields` performs - unknown
-        `felder_leeren` names, setting and clearing the same field, bad
+        `clear_fields` names, setting and clearing the same field, bad
         status/visibility/RRULE/date, an attendee without an email - happens
         there, on nothing. The probe carries a DTSTART because relative
         reminders validate against its presence.
 
-        The probe's DTSTART deliberately matches the patch's own `ende` kind
+        The probe's DTSTART deliberately matches the patch's own `end` kind
         and lies far in the past: `apply_event_fields` checks DTSTART against
-        DTEND, so a timed probe would reject an all-day `ende` that every
+        DTEND, so a timed probe would reject an all-day `end` that every
         real all-day event in the batch would have accepted. Whether the
         patch actually fits a *given* event is per-event and is reported per
         UID, not here.
@@ -2381,14 +2380,14 @@ class CalDavService:
         patch_fields = [f.name for f in dataclasses.fields(fields) if f.name != "clear"]
         if not fields.clear and all(getattr(fields, name) is None for name in patch_fields):
             raise InvalidEventDataError(
-                "No fields to update given - set at least one field, or name one in felder_leeren."
+                "No fields to update given - set at least one field, or name one in clear_fields."
             )
 
         probe = Event()
         if fields.start is None:
             # With `start` in the patch, `apply_event_fields` sets DTSTART on
             # the probe itself before it validates anything against it.
-            all_day_end = fields.ende is not None and _ALL_DAY_RE.match(fields.ende) is not None
+            all_day_end = fields.end is not None and _ALL_DAY_RE.match(fields.end) is not None
             probe.add("dtstart", date(1970, 1, 1) if all_day_end else _PROBE_START)
         event_mapping.apply_event_fields(probe, fields)
 
@@ -2406,7 +2405,7 @@ class CalDavService:
 
         A batch is only useful if one bad UID doesn't discard the work done
         for the others, so a failure that belongs to a single event (unknown
-        UID, edit conflict) becomes an entry in `ergebnisse` and the loop
+        UID, edit conflict) becomes an entry in `results` and the loop
         continues. Anything saying the whole call is broken - bad
         credentials, transport failure, the calendar itself gone - still
         propagates, because continuing would just produce one identical
@@ -2461,7 +2460,7 @@ class CalDavService:
                         detail = operation(calendar, uid)
                 except caldav_error.NotFoundError:
                     results.append(
-                        {"uid": uid, "status": "fehler", "fehler": f"Event '{uid}' was not found."}
+                        {"uid": uid, "status": "error", "error": f"Event '{uid}' was not found."}
                     )
                     failed += 1
                 except Exception as exc:
@@ -2480,7 +2479,7 @@ class CalDavService:
                         reason = str(translated)
                     else:
                         raise translated from exc
-                    results.append({"uid": uid, "status": "fehler", "fehler": reason})
+                    results.append({"uid": uid, "status": "error", "error": reason})
                     failed += 1
                     continue
                 else:
@@ -2488,10 +2487,10 @@ class CalDavService:
                     succeeded += 1
 
             return {
-                "kalender_name": calendar_name,
+                "calendar_name": calendar_name,
                 "erfolgreich": succeeded,
                 "fehlgeschlagen": failed,
-                "ergebnisse": results,
+                "results": results,
             }
 
     def update_events(
@@ -2509,7 +2508,7 @@ class CalDavService:
         with self._lock:
             # Looked up once for the whole batch - it costs a principal
             # request and is the same address for every event.
-            own_organizer = self._get_own_organizer_address() if fields.teilnehmer else None
+            own_organizer = self._get_own_organizer_address() if fields.attendees else None
 
             def operation(calendar: DAVCalendar, uid: str) -> None:
                 event_obj = calendar.event_by_uid(uid)
@@ -2531,7 +2530,7 @@ class CalDavService:
     ) -> dict[str, Any]:
         """Add and/or remove exception dates on several event series at once.
 
-        The additive counterpart of `update_events` with `ausnahme_daten`,
+        The additive counterpart of `update_events` with `exception_dates`,
         which replaces each event's whole EXDATE set and therefore has to be
         handed every value the series already had. Here each event is read,
         merged and written server-side, so cancelling the same days across
@@ -2598,7 +2597,7 @@ class CalDavService:
         calendar_name: str,
         event_uid: str,
         target_calendar: str,
-        verknuepfte_aufgabe: str | None = None,
+        linked_task: str | None = None,
         clear: tuple[str, ...] | list[str] = (),
     ) -> dict[str, str]:
         """Move an event from one calendar to another, optionally re-linking its task.
@@ -2611,44 +2610,44 @@ class CalDavService:
             calendar_name: Display name of the source calendar.
             event_uid: UID of the event to move.
             target_calendar: Display name of the target calendar.
-            verknuepfte_aufgabe: Optional task UID to link the event to, applied
+            linked_task: Optional task UID to link the event to, applied
                 in the *target* calendar once the move succeeded. As in
                 `update_event`, this replaces the event's whole RELATED-TO set
-                (so any "voraussetzung" link goes with it) rather than adding one
+                (so any "prerequisite" link goes with it) rather than adding one
                 - `link_task_to_event` is the additive counterpart.
-            clear: Optional `("verknuepfte_aufgabe",)` to drop the event's task
+            clear: Optional `("linked_task",)` to drop the event's task
                 links instead. Any other field name raises
                 `InvalidEventDataError`; use `update_event` for those.
 
         Returns:
-            {"uid": event_uid, "von": source, "nach": target, "methode": "MOVE" | "kopiert"},
-            plus "hierarchie": "gesetzt" | "geleert" when the link was changed.
+            {"uid": event_uid, "from": source, "to": target, "method": "MOVE" | "copied"},
+            plus "hierarchy": "set" | "cleared" when the link was changed.
         """
         clear_link = _validate_move_clear(
             clear,
             _MOVE_EVENT_CLEARABLE,
-            verknuepfte_aufgabe,
+            linked_task,
             InvalidEventDataError,
         )
 
         with self._lock:
             result = self._move_object(calendar_name, event_uid, target_calendar, "VEVENT")
-            if verknuepfte_aufgabe is None and not clear_link:
+            if linked_task is None and not clear_link:
                 return result
 
             fields = event_mapping.EventFields(
-                verknuepfte_aufgabe=verknuepfte_aufgabe,
+                linked_task=linked_task,
                 clear=(_MOVE_EVENT_CLEARABLE,) if clear_link else (),
             )
             self._apply_move_hierarchy(
                 lambda: self.update_event(target_calendar, event_uid, fields),
                 uid=event_uid,
-                target_display=result["nach"],
+                target_display=result["to"],
                 kind_article="Event",
                 field_name=_MOVE_EVENT_CLEARABLE,
                 retry_tool="update_event",
             )
-            result["hierarchie"] = "geleert" if clear_link else "gesetzt"
+            result["hierarchy"] = "cleared" if clear_link else "set"
             return result
 
     def _move_object(
@@ -2668,9 +2667,9 @@ class CalDavService:
             if source_url_norm == target_url_norm:
                 return {
                     "uid": uid,
-                    "von": source_display,
-                    "nach": target_display,
-                    "methode": "MOVE",
+                    "from": source_display,
+                    "to": target_display,
+                    "method": "MOVE",
                 }
 
             kind_str = "event" if component == "VEVENT" else "task"
@@ -2733,9 +2732,9 @@ class CalDavService:
                 if status in (200, 201, 204):
                     return {
                         "uid": uid,
-                        "von": source_display,
-                        "nach": target_display,
-                        "methode": "MOVE",
+                        "from": source_display,
+                        "to": target_display,
+                        "method": "MOVE",
                     }
                 if status == 412:
                     # `Overwrite: F` - the target already holds this UID. Not
@@ -2866,9 +2865,9 @@ class CalDavService:
 
                 return {
                     "uid": uid,
-                    "von": source_display,
-                    "nach": target_display,
-                    "methode": "kopiert",
+                    "from": source_display,
+                    "to": target_display,
+                    "method": "copied",
                 }
 
             # Unreachable: every branch above either returns, raises, or sets
@@ -2885,7 +2884,7 @@ class CalDavService:
         task_uid: str,
         calendar_name: str,
         event_uid: str,
-        beziehung: str = "zeitblock",
+        relation: str = "time_block",
     ) -> None:
         """Link a task (VTODO) to an event (VEVENT) via RELATED-TO on the event.
 
@@ -2895,10 +2894,10 @@ class CalDavService:
         while the calendar app simply ignores the property (it round-trips
         as raw data). See `_LINK_RELTYPES` for the two supported semantics.
         """
-        reltype = _LINK_RELTYPES.get(beziehung)
+        reltype = _LINK_RELTYPES.get(relation)
         if reltype is None:
             raise InvalidEventDataError(
-                f"Unknown beziehung '{beziehung}'. Expected one of: {', '.join(_LINK_RELTYPES)}."
+                f"Unknown relation '{relation}'. Expected one of: {', '.join(_LINK_RELTYPES)}."
             )
 
         with self._lock:
@@ -2943,7 +2942,7 @@ class CalDavService:
         `link_task_to_event`'s docstring for why), so there is no CalDAV
         query that starts from a task UID and finds the events pointing at
         it: every event in the queried calendars has to be fetched and its
-        parsed `verknuepfte_aufgaben` checked for `task_uid`. Verifies the
+        parsed `linked_tasks` checked for `task_uid`. Verifies the
         task exists first, same check and error as `link_task_to_event`.
         """
         with self._lock:
@@ -2985,8 +2984,8 @@ class CalDavService:
 
                 for obj in objs:
                     parsed = event_mapping.parse_vevent(obj.icalendar_component)
-                    if any(rel["uid"] == task_uid for rel in parsed["verknuepfte_aufgaben"]):
-                        parsed["kalender_name"] = name
+                    if any(rel["uid"] == task_uid for rel in parsed["linked_tasks"]):
+                        parsed["calendar_name"] = name
                         events.append(parsed)
 
             events.sort(key=event_mapping._start_sort_key)
@@ -2998,53 +2997,53 @@ class CalDavService:
         task_uid: str,
         calendar_name: str,
         start: str | None = None,
-        dauer_minuten: int | None = None,
-        ende: str | None = None,
-        beschreibung: str | None = None,
-        erinnerungen: list[str] | None = None,
-        sichtbarkeit: str | None = None,
+        duration_minutes: int | None = None,
+        end: str | None = None,
+        description: str | None = None,
+        reminders: list[str] | None = None,
+        visibility: str | None = None,
     ) -> str:
         """Create a calendar event from an existing task (timeboxing) and link them.
 
         Title, location and tags are always copied from the task; the event
         starts at `start` (or, if omitted, the task's due date/time). A
-        date-only start produces a one-day all-day event instead - `ende`
+        date-only start produces a one-day all-day event instead - `end`
         must then also be a date, or absent (both left to `create_event`'s
         own `_check_start_end_consistency`, not duplicated here).
 
-        The event's length is `ende` (an explicit end) XOR `dauer_minuten` (a
+        The event's length is `end` (an explicit end) XOR `duration_minutes` (a
         length in minutes from `start`) - passing both is rejected, since
         they'd disagree about where the event ends. With neither, the event
-        runs 60 minutes (`dauer_minuten` defaults to `None` rather than `60`
+        runs 60 minutes (`duration_minutes` defaults to `None` rather than `60`
         so a call passing neither can tell "not given" from "given as 60" -
         both currently behave the same way, but only the former is meant to
-        keep doing so if the default ever changes). `dauer_minuten` is
+        keep doing so if the default ever changes). `duration_minutes` is
         ignored for an all-day start, same as before.
 
-        `beschreibung` overrides the task's `notizen` for the event's
-        description; `None` (the default) inherits `notizen` unchanged, while
+        `description` overrides the task's `notes` for the event's
+        description; `None` (the default) inherits `notes` unchanged, while
         an explicit `""` clears it - `is not None`, not truthiness, decides
-        which happened. `erinnerungen`/`sichtbarkeit` pass straight through
+        which happened. `reminders`/`visibility` pass straight through
         to the new event.
 
         The new event carries RELATED-TO;RELTYPE=PARENT with the task's UID
-        (the "zeitblock" link semantics).
+        (the "time_block" link semantics).
         """
-        if ende is not None and dauer_minuten is not None:
+        if end is not None and duration_minutes is not None:
             raise InvalidEventDataError(
-                "ende and dauer_minuten cannot both be given; pass at most one to "
+                "end and duration_minutes cannot both be given; pass at most one to "
                 "control how long the event runs."
             )
-        if dauer_minuten is not None and dauer_minuten <= 0:
-            raise InvalidEventDataError(f"dauer_minuten must be > 0, got {dauer_minuten}.")
+        if duration_minutes is not None and duration_minutes <= 0:
+            raise InvalidEventDataError(f"duration_minutes must be > 0, got {duration_minutes}.")
 
         with self._lock:
             task = self.get_task(list_name, task_uid)
 
-            start_spec = start if start is not None else task.get("faellig_datum")
+            start_spec = start if start is not None else task.get("due_date")
             if start_spec is None:
                 raise InvalidEventDataError(
-                    "The task has no faellig_datum (due date); pass an explicit start "
+                    "The task has no due_date (due date); pass an explicit start "
                     "for the event instead."
                 )
 
@@ -3061,44 +3060,44 @@ class CalDavService:
                 parsed_start = parsed_start.astimezone(mapping.get_default_timezone())
             if isinstance(parsed_start, datetime):
                 start_value = _zone_preserving_isoformat(parsed_start)
-                if ende is not None:
-                    ende_value = ende
+                if end is not None:
+                    end_value = end
                 else:
-                    # `dauer_minuten`/the 60-minute default is a real duration:
+                    # `duration_minutes`/the 60-minute default is a real duration:
                     # adding it to a zone-aware datetime would do wall-clock
                     # arithmetic, stretching a block that spans a DST change by
                     # the transition's own hour.
-                    effective_minutes = dauer_minuten if dauer_minuten is not None else 60
+                    effective_minutes = duration_minutes if duration_minutes is not None else 60
                     parsed_end = (
                         parsed_start.astimezone(timezone.utc) + timedelta(minutes=effective_minutes)
                     ).astimezone(parsed_start.tzinfo)
-                    ende_value = _zone_preserving_isoformat(parsed_end)
+                    end_value = _zone_preserving_isoformat(parsed_end)
             else:
                 # All-day due date -> one-day all-day event (inclusive end),
-                # unless an explicit ende overrides it; dauer_minuten has no
+                # unless an explicit end overrides it; duration_minutes has no
                 # meaning for an all-day event and is ignored either way.
                 start_value = parsed_start.isoformat()
-                ende_value = ende if ende is not None else start_value
+                end_value = end if end is not None else start_value
 
-            beschreibung_value = beschreibung if beschreibung is not None else task.get("notizen")
+            description_value = description if description is not None else task.get("notes")
 
             fields = event_mapping.EventFields(
-                titel=task.get("titel") or "Aufgabe",
+                title=task.get("title") or "Task",
                 start=start_value,
-                ende=ende_value,
-                beschreibung=beschreibung_value,
-                ort=task.get("ort"),
+                end=end_value,
+                description=description_value,
+                location=task.get("location"),
                 tags=task.get("tags") or None,
-                wiederholung=task.get("wiederholung"),
-                erinnerungen=erinnerungen,
-                sichtbarkeit=sichtbarkeit,
-                verknuepfte_aufgabe=task_uid,
+                recurrence=task.get("recurrence"),
+                reminders=reminders,
+                visibility=visibility,
+                linked_task=task_uid,
             )
             return self.create_event(calendar_name, fields)
 
     def get_agenda(
         self,
-        datum: str,
+        date: str,
         calendar_names: list[str] | None = None,
         list_names: list[str] | None = None,
     ) -> dict[str, Any]:
@@ -3107,21 +3106,21 @@ class CalDavService:
         CalDAV has no single query spanning VEVENTs and VTODOs, so this is
         plain server-side composition: a time-range event query (recurring
         events expanded to that day's occurrences) plus a due-date-filtered
-        task listing per VTODO list. `datum` must be a date-only "YYYY-MM-DD"
+        task listing per VTODO list. `date` must be a date-only "YYYY-MM-DD"
         string; day boundaries are local days in the server's default timezone
         (`MCP_DEFAULT_TIMEZONE`), consistent with the rule used everywhere else
         in this server, and applied identically to the events and the tasks.
 
         Unlike `list_events`/`list_tasks`, every returned entry also carries a
-        "quelle_url" key - the CalDAV URL of the exact collection (calendar or
-        task list) it came from, alongside the existing "kalender"/"liste"
+        "source_url" key - the CalDAV URL of the exact collection (calendar or
+        task list) it came from, alongside the existing "calendar"/"list"
         display name. A display name alone can't tell two same-named
         collections apart (Nextcloud doesn't enforce uniqueness), so it's not
         enough to trace a surprising agenda entry back to a real collection;
         the URL is unambiguous. This is what makes a future "agenda shows
         something no other tool can find" report traceable to one specific
         collection instead of a guess. (Tasks additionally retain their
-        "liste_url" from `list_tasks`).
+        "list_url" from `list_tasks`).
 
         Because a CalDAV time-range REPORT resolves all-day and floating values
         in the *calendar collection's* timezone (RFC 4791 9.9) - the Nextcloud
@@ -3132,10 +3131,10 @@ class CalDavService:
         floating one an hour before midnight go missing, purely from the two
         zones disagreeing.
         """
-        parsed = mapping.parse_datetime_input(datum)
+        parsed = mapping.parse_datetime_input(date)
         if isinstance(parsed, datetime):
             raise InvalidEventDataError(
-                f"datum must be a date-only 'YYYY-MM-DD' string, got '{datum}'."
+                f"date must be a date-only 'YYYY-MM-DD' string, got '{date}'."
             )
 
         day_start, day_end = event_mapping.local_day_window(parsed)
@@ -3146,36 +3145,36 @@ class CalDavService:
             try:
                 raw_events = self._collect_events(
                     calendar_names,
-                    von=(parsed - timedelta(days=1)).isoformat(),
-                    bis=(parsed + timedelta(days=1)).isoformat(),
+                    start=(parsed - timedelta(days=1)).isoformat(),
+                    end=(parsed + timedelta(days=1)).isoformat(),
                     expand=True,
                 )
                 filtered_events = event_mapping.filter_events(
-                    raw_events, suchtext=None, tag=None, limit=None
+                    raw_events, search_text=None, tag=None, limit=None
                 )
-                termine = event_mapping.events_in_window(filtered_events, day_start, day_end)
+                events = event_mapping.events_in_window(filtered_events, day_start, day_end)
 
                 if list_names is None:
                     raw_tasks = self._tasks_from_every_list(only_open=True)
                 else:
                     raw_tasks = self._tasks_from_named_lists(list_names, only_open=True)
 
-                aufgaben = mapping.filter_tasks(
+                tasks = mapping.filter_tasks(
                     raw_tasks,
-                    due_before=datum,
-                    due_after=datum,
-                    prioritaet=None,
+                    due_before=date,
+                    due_after=date,
+                    priority=None,
                     tag=None,
-                    suchtext=None,
+                    search_text=None,
                     limit=None,
                 )
             finally:
                 self._ttl_frozen = False
 
-            for task in aufgaben:
-                task["quelle_url"] = task["liste_url"]
+            for task in tasks:
+                task["source_url"] = task["list_url"]
 
-            return {"datum": parsed.isoformat(), "termine": termine, "aufgaben": aufgaben}
+            return {"date": parsed.isoformat(), "events": events, "tasks": tasks}
 
     def list_tags(
         self,
@@ -3193,7 +3192,7 @@ class CalDavService:
         first one seen", which would depend on the order the server happens to
         return collections in and could differ between two identical calls.
 
-        The returned list is sorted by `anzahl` descending, with ties broken
+        The returned list is sorted by `count` descending, with ties broken
         alphabetically by `tag` (case-insensitively, so a capitalized tag does
         not jump ahead of every lowercase one).
 
@@ -3220,14 +3219,14 @@ class CalDavService:
             # An empty list means "none of that kind" to both collectors, so it
             # needs no special case here - unlike `None`, which means "all".
             events = self._collect_events(
-                _dedup_strings(calendar_names), von=None, bis=None, expand=False
+                _dedup_strings(calendar_names), start=None, end=None, expand=False
             )
             if list_names is None:
                 tasks = self._tasks_from_every_list(only_open=False)
             else:
                 tasks = self._tasks_from_named_lists(list_names, only_open=False)
 
-            # Folded for counting - "Arbeit" and "arbeit" are one tag to
+            # Folded for counting - "Work" and "work" are one tag to
             # Nextcloud's UI too - but every spelling is kept so the reported
             # one can be picked deterministically below.
             spellings: dict[str, Counter[str]] = {}
@@ -3245,48 +3244,48 @@ class CalDavService:
             # Folded for the tie-break too: sorting on the display spelling
             # would put every capitalized tag before every lowercase one.
             tag_entries.sort(key=lambda item: (-item[1], item[0].lower()))
-            return [{"tag": tag, "anzahl": count} for tag, count in tag_entries]
+            return [{"tag": tag, "count": count} for tag, count in tag_entries]
 
     # ------------------------------------------------------------------
     # Free-busy
     # ------------------------------------------------------------------
 
-    def get_free_busy(self, von: str, bis: str, benutzer: str | None = None) -> dict[str, Any]:
-        """Return merged busy intervals in [von, bis] for the caller, or another user.
+    def get_free_busy(self, start: str, end: str, user: str | None = None) -> dict[str, Any]:
+        """Return merged busy intervals in [start, end] for the caller, or another user.
 
-        With `benutzer=None`, busy blocks are computed from every VEVENT
+        With `user=None`, busy blocks are computed from every VEVENT
         calendar the caller can see: events in range are fetched the same way
         as `list_events` (a server-side CalDAV time-range REPORT), then
         non-cancelled, non-transparent ones contribute a busy interval (see
         `event_mapping.event_busy_interval`), merged and sorted (see
         `event_mapping.merge_busy_intervals`).
 
-        With `benutzer` set, a CalDAV RFC 6638 free-busy scheduling request is
+        With `user` set, a CalDAV RFC 6638 free-busy scheduling request is
         sent to the server (`principal.freebusy_request`, POSTing a VFREEBUSY
         to the schedule-outbox) asking about that user - the server resolves
-        `benutzer` against its own known accounts, not this client. If the
+        `user` against its own known accounts, not this client. If the
         server rejects the request (unknown user, scheduling disabled, ...)
         this raises a `TaskMcpError` with a clean, actionable message.
         """
-        start_bound = self._range_bound(von, exclusive_end=False)
-        end_bound = self._range_bound(bis, exclusive_end=True)
+        start_bound = self._range_bound(start, exclusive_end=False)
+        end_bound = self._range_bound(end, exclusive_end=True)
         if start_bound is None or end_bound is None:
-            raise InvalidEventDataError("von and bis are required for get_free_busy.")
+            raise InvalidEventDataError("start and end are required for get_free_busy.")
 
         with self._lock:
-            if benutzer is None:
+            if user is None:
                 merged = self._own_free_busy(start_bound, end_bound)
             else:
-                merged = self._free_busy_for_user(benutzer, start_bound, end_bound)
+                merged = self._free_busy_for_user(user, start_bound, end_bound)
 
         return {
-            "von": mapping.format_datetime_output(start_bound),
-            "bis": mapping.format_datetime_output(end_bound),
-            "benutzer": benutzer,
+            "start": mapping.format_datetime_output(start_bound),
+            "end": mapping.format_datetime_output(end_bound),
+            "user": user,
             "belegt": [
                 {
-                    "von": mapping.format_datetime_output(start),
-                    "bis": mapping.format_datetime_output(end),
+                    "start": mapping.format_datetime_output(start),
+                    "end": mapping.format_datetime_output(end),
                 }
                 for start, end in merged
             ],
@@ -3316,11 +3315,11 @@ class CalDavService:
         return event_mapping.merge_busy_intervals(intervals)
 
     def _free_busy_for_user(
-        self, benutzer: str, start: datetime, end: datetime
+        self, user: str, start: datetime, end: datetime
     ) -> list[tuple[datetime, datetime]]:
         principal = self._get_principal()
-        is_mailto = benutzer.strip().lower().startswith("mailto:")
-        address = benutzer if is_mailto else f"mailto:{benutzer}"
+        is_mailto = user.strip().lower().startswith("mailto:")
+        address = user if is_mailto else f"mailto:{user}"
         bare = address[len("mailto:") :]
 
         # RFC 5545 3.6.4 (and RFC 6638's scheduling profile of it): a
@@ -3338,9 +3337,7 @@ class CalDavService:
             raise _translate(exc) from exc
 
         if not isinstance(response, dict):
-            raise TaskMcpError(
-                f"Nextcloud returned an unexpected free/busy response for '{benutzer}'."
-            )
+            raise TaskMcpError(f"Nextcloud returned an unexpected free/busy response for '{user}'.")
 
         errors = response.get("errors") or {}
         entry = response.get(address, response.get(bare))
@@ -3356,7 +3353,7 @@ class CalDavService:
         if entry is None:
             detail = errors.get(address) or errors.get(bare) or next(iter(errors.values()), None)
             message = (
-                f"Nextcloud could not provide free/busy information for '{benutzer}' "
+                f"Nextcloud could not provide free/busy information for '{user}' "
                 "(the user may be unknown, or scheduling may be disabled on the server)."
             )
             if detail:
@@ -3378,26 +3375,26 @@ class CalDavService:
 
     def share_calendar(
         self,
-        kalender_name: str,
-        empfaenger: str,
-        gruppe: bool = False,
-        schreibzugriff: bool = False,
+        calendar_name: str,
+        recipient: str,
+        group: bool = False,
+        write_access: bool = False,
     ) -> dict[str, Any]:
         """Share a task list or event calendar with a Nextcloud user or group.
 
         Uses Nextcloud's own CalDAV sharing extension (POST `{DAV:}share` to
         the collection's own URL) - this has no equivalent in any CalDAV RFC,
         so it only works against a real Nextcloud server. Calling this again
-        for the same `empfaenger` updates their access level rather than
+        for the same `recipient` updates their access level rather than
         creating a duplicate share.
         """
-        if not empfaenger or not empfaenger.strip():
-            raise TaskMcpError("empfaenger is required to share a calendar.")
+        if not recipient or not recipient.strip():
+            raise TaskMcpError("recipient is required to share a calendar.")
 
         with self._lock:
-            calendar = self._resolve_collection_any(kalender_name)
+            calendar = self._resolve_collection_any(calendar_name)
             body = _share_request_body(
-                _principal_href(empfaenger, gruppe), remove=False, read_write=schreibzugriff
+                _principal_href(recipient, group), remove=False, read_write=write_access
             )
             response = self._dav_request(
                 calendar.url,
@@ -3405,32 +3402,32 @@ class CalDavService:
                 body,
                 {"Content-Type": "application/xml; charset=utf-8"},
                 forbidden_message=(
-                    f"Nextcloud denied sharing '{kalender_name}' with '{empfaenger}' "
+                    f"Nextcloud denied sharing '{calendar_name}' with '{recipient}' "
                     "(permission denied, or the sharing backend is disabled)."
                 ),
             )
-            self._raise_for_share_response(response, kalender_name, empfaenger)
+            self._raise_for_share_response(response, calendar_name, recipient)
 
         return {
-            "kalender_name": kalender_name,
-            "empfaenger": empfaenger,
-            "schreibzugriff": schreibzugriff,
+            "calendar_name": calendar_name,
+            "recipient": recipient,
+            "write_access": write_access,
         }
 
-    def unshare_calendar(self, kalender_name: str, empfaenger: str, gruppe: bool = False) -> None:
+    def unshare_calendar(self, calendar_name: str, recipient: str, group: bool = False) -> None:
         """Remove a user's or group's share of a task list or event calendar.
 
-        A no-op (not an error) if `empfaenger` doesn't currently have a share
+        A no-op (not an error) if `recipient` doesn't currently have a share
         of this calendar - Nextcloud's sharing plugin doesn't distinguish
         "removed" from "wasn't shared" in its response.
         """
-        if not empfaenger or not empfaenger.strip():
-            raise TaskMcpError("empfaenger is required to unshare a calendar.")
+        if not recipient or not recipient.strip():
+            raise TaskMcpError("recipient is required to unshare a calendar.")
 
         with self._lock:
-            calendar = self._resolve_collection_any(kalender_name)
+            calendar = self._resolve_collection_any(calendar_name)
             body = _share_request_body(
-                _principal_href(empfaenger, gruppe), remove=True, read_write=False
+                _principal_href(recipient, group), remove=True, read_write=False
             )
             response = self._dav_request(
                 calendar.url,
@@ -3438,34 +3435,34 @@ class CalDavService:
                 body,
                 {"Content-Type": "application/xml; charset=utf-8"},
                 forbidden_message=(
-                    f"Nextcloud denied unsharing '{kalender_name}' from '{empfaenger}' "
+                    f"Nextcloud denied unsharing '{calendar_name}' from '{recipient}' "
                     "(permission denied, or the sharing backend is disabled)."
                 ),
             )
-            self._raise_for_share_response(response, kalender_name, empfaenger)
+            self._raise_for_share_response(response, calendar_name, recipient)
 
-    def _raise_for_share_response(self, response: Any, kalender_name: str, empfaenger: str) -> None:
+    def _raise_for_share_response(self, response: Any, calendar_name: str, recipient: str) -> None:
         if response.status in (200, 204, 207):
             return
         if response.status == 404:
             raise TaskMcpError(
-                f"Nextcloud could not find user/group '{empfaenger}' to share "
-                f"'{kalender_name}' with."
+                f"Nextcloud could not find user/group '{recipient}' to share "
+                f"'{calendar_name}' with."
             )
         if response.status == 400:
             raise TaskMcpError(
-                f"Nextcloud rejected the sharing request for '{kalender_name}' as invalid "
-                f"(check that '{empfaenger}' is a valid user/group id)."
+                f"Nextcloud rejected the sharing request for '{calendar_name}' as invalid "
+                f"(check that '{recipient}' is a valid user/group id)."
             )
         logger.warning(
-            "Unexpected sharing response %s for calendar %s", response.status, kalender_name
+            "Unexpected sharing response %s for calendar %s", response.status, calendar_name
         )
         raise TaskMcpError(
-            f"Nextcloud rejected the sharing request for '{kalender_name}' "
+            f"Nextcloud rejected the sharing request for '{calendar_name}' "
             f"(HTTP {response.status})."
         )
 
-    def list_calendar_shares(self, kalender_name: str) -> list[dict[str, Any]]:
+    def list_calendar_shares(self, calendar_name: str) -> list[dict[str, Any]]:
         """List everyone a task list or event calendar is currently shared with.
 
         Reads Nextcloud's `{oc}invite` DAV property (PROPFIND, Depth 0) -
@@ -3473,25 +3470,25 @@ class CalDavService:
         server.
         """
         with self._lock:
-            calendar = self._resolve_collection_any(kalender_name)
+            calendar = self._resolve_collection_any(calendar_name)
             response = self._dav_request(
                 calendar.url,
                 "PROPFIND",
                 _invite_propfind_body(),
                 {"Content-Type": "application/xml; charset=utf-8", "Depth": "0"},
                 forbidden_message=(
-                    f"Nextcloud denied reading the shares of '{kalender_name}' (permission denied)."
+                    f"Nextcloud denied reading the shares of '{calendar_name}' (permission denied)."
                 ),
             )
             if response.status not in (200, 207):
                 logger.warning(
                     "Unexpected share-listing response %s for calendar %s",
                     response.status,
-                    kalender_name,
+                    calendar_name,
                 )
                 raise TaskMcpError(
                     f"Nextcloud returned an unexpected error listing the shares of "
-                    f"'{kalender_name}' (HTTP {response.status})."
+                    f"'{calendar_name}' (HTTP {response.status})."
                 )
             return _parse_invite_response(response.tree)
 
@@ -3538,23 +3535,23 @@ class CalDavService:
                 calendar_data_el = props.get(_clark(_CALDAV_NS, "calendar-data"))
                 displayname_el = props.get(_clark(_DAV_NS, "displayname"))
 
-                titel, typ = _derive_title_and_type(
+                title, type = _derive_title_and_type(
                     calendar_data_el.text if calendar_data_el is not None else None
                 )
-                if titel is None and displayname_el is not None and displayname_el.text:
-                    titel = displayname_el.text.strip()
+                if title is None and displayname_el is not None and displayname_el.text:
+                    title = displayname_el.text.strip()
 
                 items.append(
                     {
                         "id": name,
-                        "titel": titel,
-                        "typ": typ,
-                        "kalender": (
+                        "title": title,
+                        "type": type,
+                        "calendar": (
                             calendar_uri_el.text.strip()
                             if calendar_uri_el is not None and calendar_uri_el.text
                             else None
                         ),
-                        "geloescht_am": _parse_deleted_at(
+                        "deleted_at": _parse_deleted_at(
                             deleted_el.text if deleted_el is not None else None
                         ),
                     }
@@ -3600,7 +3597,7 @@ class CalDavService:
     # ICS import / export
     # ------------------------------------------------------------------
 
-    def export_calendar(self, kalender_name: str) -> dict[str, str]:
+    def export_calendar(self, calendar_name: str) -> dict[str, str]:
         """Export a task list or event calendar as a single ICS (VCALENDAR) text.
 
         Built client-side for portability: every object in the collection
@@ -3612,7 +3609,7 @@ class CalDavService:
         are de-duplicated by TZID.
         """
         with self._lock:
-            calendar = self._resolve_collection_any(kalender_name)
+            calendar = self._resolve_collection_any(calendar_name)
 
             try:
                 events = calendar.events() if self._supports_component(calendar, "VEVENT") else []
@@ -3623,7 +3620,7 @@ class CalDavService:
                 )
             except caldav_error.NotFoundError as exc:
                 raise TaskMcpError(
-                    f"Calendar or task list '{kalender_name}' was not found."
+                    f"Calendar or task list '{calendar_name}' was not found."
                 ) from exc
             except Exception as exc:
                 raise _translate(exc) from exc
@@ -3646,9 +3643,9 @@ class CalDavService:
                             seen_tzids.add(tzid)
                     merged.add_component(component)
 
-            return {"kalender_name": kalender_name, "ics": merged.to_ical().decode("utf-8")}
+            return {"calendar_name": calendar_name, "ics": merged.to_ical().decode("utf-8")}
 
-    def import_ics(self, kalender_name: str, ics: str) -> dict[str, Any]:
+    def import_ics(self, calendar_name: str, ics: str) -> dict[str, Any]:
         """Import ICS text into a task list or event calendar.
 
         Top-level VEVENT/VTODO components are grouped by UID (so a recurring
@@ -3679,7 +3676,7 @@ class CalDavService:
             raise InvalidIcsDataError("ics must contain at least one VEVENT or VTODO component.")
 
         with self._lock:
-            calendar = self._resolve_collection_any(kalender_name)
+            calendar = self._resolve_collection_any(calendar_name)
 
             importiert = 0
             uebersprungen = 0
@@ -3709,7 +3706,7 @@ class CalDavService:
                 importiert += 1
 
         return {
-            "kalender_name": kalender_name,
+            "calendar_name": calendar_name,
             "importiert": importiert,
             "uebersprungen": uebersprungen,
         }

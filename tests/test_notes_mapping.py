@@ -12,17 +12,17 @@ from nextcloud_task_mcp.notes_mapping import (
 
 
 def test_to_request_body_includes_only_given_fields():
-    body = to_request_body(NoteFields(titel="Projekt X"))
-    assert body == {"title": "Projekt X"}
+    body = to_request_body(NoteFields(title="Project X"))
+    assert body == {"title": "Project X"}
 
 
 def test_to_request_body_maps_all_fields():
     body = to_request_body(
-        NoteFields(titel="Projekt X", kategorie="Arbeit", inhalt="Text", favorit=True)
+        NoteFields(title="Project X", category="Work", content="Text", favorite=True)
     )
     assert body == {
-        "title": "Projekt X",
-        "category": "Arbeit",
+        "title": "Project X",
+        "category": "Work",
         "content": "Text",
         "favorite": True,
     }
@@ -32,19 +32,19 @@ def test_to_request_body_empty_fields_yields_empty_body():
     assert to_request_body(NoteFields()) == {}
 
 
-def test_to_request_body_false_favorit_is_included():
-    # Regression: `if fields.favorit is not None` must not collapse to a
-    # plain truthiness check - explicitly un-favoriting (favorit=False) has
+def test_to_request_body_false_favorite_is_included():
+    # Regression: `if fields.favorite is not None` must not collapse to a
+    # plain truthiness check - explicitly un-favoriting (favorite=False) has
     # to reach the request body, not be treated as "not given".
-    body = to_request_body(NoteFields(favorit=False))
+    body = to_request_body(NoteFields(favorite=False))
     assert body == {"favorite": False}
 
 
 def test_parse_note_summary_maps_fields():
     note = {
         "id": 42,
-        "title": "Projekt X",
-        "category": "Arbeit",
+        "title": "Project X",
+        "category": "Work",
         "favorite": True,
         "modified": 1735689600,  # 2025-01-01T00:00:00Z
         "content": "should be ignored by the summary parser",
@@ -52,18 +52,18 @@ def test_parse_note_summary_maps_fields():
     result = parse_note_summary(note)
     assert result == {
         "id": 42,
-        "titel": "Projekt X",
-        "kategorie": "Arbeit",
-        "favorit": True,
+        "title": "Project X",
+        "category": "Work",
+        "favorite": True,
         # Formatted in the server's default timezone, like every other
         # timestamp this server returns (+01:00 on 1 January in Europe/Berlin).
-        "geaendert": "2025-01-01T01:00:00+01:00",
+        "changed": "2025-01-01T01:00:00+01:00",
     }
-    assert "inhalt" not in result
+    assert "content" not in result
 
 
 def test_parse_note_summary_modified_follows_the_default_timezone():
-    """A note's `geaendert` is an output timestamp like any other.
+    """A note's `changed` is an output timestamp like any other.
 
     Hardcoding UTC here contradicts the rule the rest of the server follows
     and makes two timestamps in the same answer (a task's due date, a note's
@@ -71,17 +71,17 @@ def test_parse_note_summary_modified_follows_the_default_timezone():
     """
     note = {"id": 1, "title": "Foo", "modified": 1735689600}
     mapping.set_default_timezone("America/New_York")
-    assert parse_note_summary(note)["geaendert"] == "2024-12-31T19:00:00-05:00"
+    assert parse_note_summary(note)["changed"] == "2024-12-31T19:00:00-05:00"
 
 
 def test_parse_note_summary_empty_category_becomes_none():
     note = {"id": 1, "title": "Foo", "category": "", "favorite": False, "modified": 0}
-    assert parse_note_summary(note)["kategorie"] is None
+    assert parse_note_summary(note)["category"] is None
 
 
 def test_parse_note_summary_missing_modified_is_none():
     note = {"id": 1, "title": "Foo", "category": "", "favorite": False}
-    assert parse_note_summary(note)["geaendert"] is None
+    assert parse_note_summary(note)["changed"] is None
 
 
 def test_parse_note_includes_content_and_readonly():
@@ -95,10 +95,10 @@ def test_parse_note_includes_content_and_readonly():
         "readonly": True,
     }
     result = parse_note(note)
-    assert result["inhalt"] == "Full text"
+    assert result["content"] == "Full text"
     assert result["schreibgeschuetzt"] is True
 
 
 def test_parse_note_missing_content_is_empty_string():
     note = {"id": 1, "title": "Foo", "category": "", "favorite": False, "modified": 0}
-    assert parse_note(note)["inhalt"] == ""
+    assert parse_note(note)["content"] == ""

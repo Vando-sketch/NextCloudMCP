@@ -38,7 +38,7 @@ Current baseline: 56 tests passing, 2 skipped (integration), 79% coverage,
 
 | # | Severity | Finding |
 |---|----------|---------|
-| C1 | Medium | Inconsistent parameter naming: `create_task` uses `liste` while the other five tools use `list_name` (`server.py:81` vs `65/138/184/198`). Tool parameter names are the contract the LLM client reasons about; the asymmetry invites wrong calls. |
+| C1 | Medium | Inconsistent parameter naming: `create_task` uses `list` while the other five tools use `list_name` (`server.py:81` vs `65/138/184/198`). Tool parameter names are the contract the LLM client reasons about; the asymmetry invites wrong calls. |
 | C2 | Medium | No `get_task` tool — reading one task requires fetching the whole list through the LLM context. `_get_todo` + `parse_vtodo` already do the work internally. |
 | C3 | Medium | The 13-field task parameter list is hand-duplicated across five places (two tools, two service methods, `apply_task_fields`), including the umlaut→ASCII kwarg translation — one typo away from a silent field drop. |
 | C4 | Low | `list_tasks` has no filtering (due-date range, search) or limit; every call ships the entire list. |
@@ -149,10 +149,10 @@ Depends on WP2 (touches the same files; avoid conflicts by sequencing after it).
    layer, `CalDavService`, and `apply_task_fields`, eliminating the five hand-copied
    13-field parameter lists. (C3)
 4. **Clearing fields**: accept the sentinel string `""` (empty) — or a dedicated
-   `felder_leeren: list[str]` parameter — in `update_task` to unset a property;
+   `clear_fields: list[str]` parameter — in `update_task` to unset a property;
    wire through to a `del component[name]` path in `apply_task_fields`. (B3)
-5. **`server.py`**: rename `create_task`'s `liste` → `list_name` (or all →
-   `liste`; pick one, apply everywhere) and add a `get_task(list_name, task_uid)`
+5. **`server.py`**: rename `create_task`'s `list` → `list_name` (or all →
+   `list`; pick one, apply everywhere) and add a `get_task(list_name, task_uid)`
    tool reusing `_get_todo` + `parse_vtodo`. (C1, C2)
 6. **`caldav_client.py`**: cache calendars by name (invalidate on
    `TaskListNotFoundError`); raise a clear error when two calendars share a display
@@ -215,7 +215,7 @@ Lowest priority; purely additive.
 2. `.pre-commit-config.yaml` (ruff check --fix, ruff format, mypy) and a short
    CONTRIBUTING.md; start a CHANGELOG.md. (E10)
 3. `list_tasks` filtering: optional due-date range and limit parameters. (C4)
-4. Surface `RRULE` read-only in `parse_vtodo` (`wiederholung` field). (C5)
+4. Surface `RRULE` read-only in `parse_vtodo` (`recurrence` field). (C5)
 5. Pass `rate_limit_*` options to `DAVClient` for 429/503 backoff. (A5)
 6. Optional: scheduled GitHub Actions job running the integration suite against a
    `nextcloud` Docker container. (E11)

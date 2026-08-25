@@ -68,10 +68,10 @@ class InvalidIcsDataError(TaskMcpError):
     containing at least one VEVENT or VTODO."""
 
 
-class NotizNotFoundError(TaskMcpError):
+class NoteNotFoundError(TaskMcpError):
     """Raised when the requested note id does not exist."""
 
 
-class InvalidNotizDataError(TaskMcpError):
+class InvalidNoteDataError(TaskMcpError):
     """Raised when note field values are rejected by the Notes API, or when
     a note tool call is missing data it needs (e.g. no fields to update)."""

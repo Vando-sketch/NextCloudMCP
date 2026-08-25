@@ -15,25 +15,25 @@ from icalendar import Alarm, vDuration, vRecur
 
 from .errors import InvalidTaskDataError
 
-PRIORITY_LABELS: dict[str, int] = {"hoch": 1, "mittel": 5, "niedrig": 9}
+PRIORITY_LABELS: dict[str, int] = {"high": 1, "medium": 5, "low": 9}
 VISIBILITY_LABELS: dict[str, str] = {
-    "öffentlich": "PUBLIC",
-    "privat": "PRIVATE",
-    "vertraulich": "CONFIDENTIAL",
+    "public": "PUBLIC",
+    "private": "PRIVATE",
+    "confidential": "CONFIDENTIAL",
 }
 # Reverse of VISIBILITY_LABELS for parsing CLASS back to German; an unknown
 # CLASS value (a foreign client's extension) reads as None, like a missing one.
 _ICAL_CLASS_TO_LABEL: dict[str, str] = {v: k for k, v in VISIBILITY_LABELS.items()}
 # RFC 5545 VTODO STATUS values <-> the German labels `update_task`'s `status`
-# parameter and `list_tasks`/`get_task`'s `status` result key use. "erledigt"
-# and "offen" existed before this map did (as the two-valued collapse
-# `parse_vtodo` used to do); "in-arbeit"/"abgesagt" are new. See
+# parameter and `list_tasks`/`get_task`'s `status` result key use. "completed"
+# and "open" existed before this map did (as the two-valued collapse
+# `parse_vtodo` used to do); "in-progress"/"cancelled" are new. See
 # `task_status_label_to_ical`/`parse_vtodo` for the write/read sides.
 TASK_STATUS_LABELS: dict[str, str] = {
-    "offen": "NEEDS-ACTION",
-    "in-arbeit": "IN-PROCESS",
-    "erledigt": "COMPLETED",
-    "abgesagt": "CANCELLED",
+    "open": "NEEDS-ACTION",
+    "in-progress": "IN-PROCESS",
+    "completed": "COMPLETED",
+    "cancelled": "CANCELLED",
 }
 _ICAL_TASK_STATUS_TO_LABEL: dict[str, str] = {v: k for k, v in TASK_STATUS_LABELS.items()}
 
@@ -51,26 +51,26 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # compare equal.
 _TriggerKey = tuple[str, datetime] | tuple[str, timedelta]
 
-# Maps the German, LLM-facing `felder_leeren` entry name to the
-# (TaskFields attribute name, iCalendar property name) it clears. "titel" is
+# Maps the German, LLM-facing `clear_fields` entry name to the
+# (TaskFields attribute name, iCalendar property name) it clears. "title" is
 # deliberately absent - clearing the title is not a supported operation.
-# "erinnerungen" has no single iCalendar property (it clears all VALARM
+# "reminders" has no single iCalendar property (it clears all VALARM
 # subcomponents instead), hence the `None` ical name, handled specially in
 # `apply_task_fields`.
 _CLEAR_SPECS: dict[str, tuple[str, str | None]] = {
-    "start_datum": ("start_datum", "dtstart"),
-    "faellig_datum": ("faellig_datum", "due"),
-    "prioritaet": ("prioritaet", "priority"),
-    "fortschritt_prozent": ("fortschritt_prozent", "percent-complete"),
-    "ort": ("ort", "location"),
+    "start_date": ("start_date", "dtstart"),
+    "due_date": ("due_date", "due"),
+    "priority": ("priority", "priority"),
+    "progress_percent": ("progress_percent", "percent-complete"),
+    "location": ("location", "location"),
     "url": ("url", "url"),
     "tags": ("tags", "categories"),
-    "erinnerungen": ("erinnerungen", None),
-    "notizen": ("notizen", "description"),
-    "sichtbarkeit": ("sichtbarkeit", "class"),
-    "uebergeordnete_aufgabe": ("uebergeordnete_aufgabe", "related-to"),
-    "wiederholung": ("wiederholung", "rrule"),
-    "ausnahme_daten": ("ausnahme_daten", "exdate"),
+    "reminders": ("reminders", None),
+    "notes": ("notes", "description"),
+    "visibility": ("visibility", "class"),
+    "parent_task": ("parent_task", "related-to"),
+    "recurrence": ("recurrence", "rrule"),
+    "exception_dates": ("exception_dates", "exdate"),
 }
 
 
@@ -91,32 +91,32 @@ class TaskFields:
     validation rules (unknown names, and setting+clearing the same field in
     one call, both raise `InvalidTaskDataError`).
 
-    `ausnahme_daten`, when set, *replaces* the task's full EXDATE set (not an
-    append), mirroring `EventFields.ausnahme_daten` down to the validation.
+    `exception_dates`, when set, *replaces* the task's full EXDATE set (not an
+    append), mirroring `EventFields.exception_dates` down to the validation.
 
     `status` (only settable via `update_task`, not `create_task` - a task is
-    always created open) is one of `TASK_STATUS_LABELS`: `"erledigt"` mirrors
-    `complete_task` (STATUS/PERCENT-COMPLETE/COMPLETED), `"offen"` is the
+    always created open) is one of `TASK_STATUS_LABELS`: `"completed"` mirrors
+    `complete_task` (STATUS/PERCENT-COMPLETE/COMPLETED), `"open"` is the
     reopen path (removes COMPLETED, resets PERCENT-COMPLETE to 0), and
-    `"in-arbeit"`/`"abgesagt"` only set STATUS. If `fortschritt_prozent` is
+    `"in-progress"`/`"cancelled"` only set STATUS. If `progress_percent` is
     also given in the same call, its explicit value wins over whatever
     `status` would otherwise derive - see `apply_task_fields`'s write order.
     """
 
-    titel: str | None = None
-    start_datum: str | None = None
-    faellig_datum: str | None = None
-    prioritaet: str | None = None
-    fortschritt_prozent: int | None = None
-    ort: str | None = None
+    title: str | None = None
+    start_date: str | None = None
+    due_date: str | None = None
+    priority: str | None = None
+    progress_percent: int | None = None
+    location: str | None = None
     url: str | None = None
     tags: list[str] | None = None
-    erinnerungen: list[str] | None = None
-    notizen: str | None = None
-    sichtbarkeit: str | None = None
-    uebergeordnete_aufgabe: str | None = None
-    wiederholung: str | None = None
-    ausnahme_daten: list[str] | None = None
+    reminders: list[str] | None = None
+    notes: str | None = None
+    visibility: str | None = None
+    parent_task: str | None = None
+    recurrence: str | None = None
+    exception_dates: list[str] | None = None
     status: str | None = None
     clear: tuple[str, ...] | list[str] = field(default_factory=tuple)
 
@@ -254,7 +254,7 @@ def local_midnight(day: date) -> datetime:
 
     The one definition of where a day starts, shared by every part of the
     server that has to decide which day something falls in: `get_agenda`'s
-    events and tasks, `von`/`bis` and `faellig_vor`/`faellig_nach` bounds, and
+    events and tasks, `start`/`end` and `due_before`/`due_after` bounds, and
     the instant an all-day value is compared at.
 
     Not every day has a midnight: America/Santiago, Asia/Beirut and others move
@@ -273,7 +273,7 @@ def priority_label_to_ical(label: str) -> int:
         return PRIORITY_LABELS[label]
     except KeyError:
         raise InvalidTaskDataError(
-            f"Unknown prioritaet '{label}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
+            f"Unknown priority '{label}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
         ) from None
 
 
@@ -286,11 +286,11 @@ def ical_priority_to_label(value: int | None) -> str | None:
     if not value:
         return None
     if 1 <= value <= 4:
-        return "hoch"
+        return "high"
     if value == 5:
-        return "mittel"
+        return "medium"
     if 6 <= value <= 9:
-        return "niedrig"
+        return "low"
     return None
 
 
@@ -310,7 +310,7 @@ def visibility_label_to_ical(label: str) -> str:
         return VISIBILITY_LABELS[label]
     except KeyError:
         raise InvalidTaskDataError(
-            f"Unknown sichtbarkeit '{label}'. Expected one of: {', '.join(VISIBILITY_LABELS)}."
+            f"Unknown visibility '{label}'. Expected one of: {', '.join(VISIBILITY_LABELS)}."
         ) from None
 
 
@@ -464,7 +464,7 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
             continue
         if "=" not in part:
             raise InvalidTaskDataError(
-                f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
+                f"Could not parse recurrence '{text}' as an RFC 5545 RRULE "
                 "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
             )
         key = part.split("=")[0].upper()
@@ -475,9 +475,9 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
         seen.add(key)
 
     if "FREQ" not in seen:
-        raise InvalidTaskDataError("wiederholung requires a FREQ part.")
+        raise InvalidTaskDataError("recurrence requires a FREQ part.")
     if "UNTIL" in seen and "COUNT" in seen:
-        raise InvalidTaskDataError("wiederholung cannot contain both UNTIL and COUNT.")
+        raise InvalidTaskDataError("recurrence cannot contain both UNTIL and COUNT.")
 
     try:
         recur = vRecur.from_ical(stripped)
@@ -485,7 +485,7 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
         recur = None
     if not recur:
         raise InvalidTaskDataError(
-            f"Could not parse wiederholung '{text}' as an RFC 5545 RRULE "
+            f"Could not parse recurrence '{text}' as an RFC 5545 RRULE "
             "(e.g. 'FREQ=WEEKLY;BYDAY=MO')."
         )
 
@@ -533,7 +533,7 @@ def parse_rrule_text(text: str, anchor: date | datetime | None = None) -> vRecur
 # The two helpers that reject bad input raise `InvalidTaskDataError` and are
 # re-raised as `InvalidEventDataError` by thin wrappers on the event side -
 # the same pattern `parse_datetime_input`/`parse_rrule_text` already follow.
-# The German field name (`ausnahme_daten`) and the error wording are shared;
+# The German field name (`exception_dates`) and the error wording are shared;
 # only the noun and the tools named in the hint differ per component kind,
 # which is what the `noun`/`reader` arguments carry.
 # ----------------------------------------------------------------------
@@ -632,7 +632,7 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _exdate_values(component, entries: list[str], *, noun: str = "event") -> list[date | datetime]:
-    """Parse `ausnahme_daten` entries into values anchored to the DTSTART.
+    """Parse `exception_dates` entries into values anchored to the DTSTART.
 
     Every value of one EXDATE property shares that property's parameters, so
     they must all be expressed the same way: in the zone DTSTART names when it
@@ -671,13 +671,13 @@ def _exdate_values(component, entries: list[str], *, noun: str = "event") -> lis
     if len(kinds) > 1:
         if start_value is None:
             raise InvalidTaskDataError(
-                "ausnahme_daten entries must all be of one kind: either date-only "
+                "exception_dates entries must all be of one kind: either date-only "
                 "'YYYY-MM-DD' values or full datetimes, not both."
             )
         expected = "date-only 'YYYY-MM-DD' values" if all_day else "full datetimes"
         state = "all-day" if all_day else "not all-day"
         raise InvalidTaskDataError(
-            f"ausnahme_daten entries must match the {noun}'s start: use {expected}, "
+            f"exception_dates entries must match the {noun}'s start: use {expected}, "
             f"because the {noun} is {state}."
         )
     return values
@@ -910,7 +910,7 @@ def resolve_exdate_specs(component, specs: list[str], *, noun: str = "event") ->
     """Resolve exception-date specs against the component's own recurrence set.
 
     Two things separate this from the `_exdate_values` +
-    `_check_exdates_match_occurrences` pair that `ausnahme_daten` goes through
+    `_check_exdates_match_occurrences` pair that `exception_dates` goes through
     on create/update, and both exist for the same reason - cancelling the same
     days across several series at once:
 
@@ -1069,8 +1069,8 @@ def _check_exdates_match_occurrences(
 
     spec = next(iter(wanted.values()))
     raise InvalidTaskDataError(
-        f"ausnahme_daten entry '{spec}' does not name an occurrence of this {noun}'s "
-        f"wiederholung, so it would cancel nothing. Pass the occurrence exactly as "
+        f"exception_dates entry '{spec}' does not name an occurrence of this {noun}'s "
+        f"recurrence, so it would cancel nothing. Pass the occurrence exactly as "
         f"{reader} reported its '{field_name}' - a value without a timezone is "
         f"read in the server's default timezone, not in the {noun}'s."
     )
@@ -1082,24 +1082,24 @@ def _check_rrule_anchor(todo, fields: TaskFields) -> None:
     Runs after all clears/sets in `apply_task_fields`, so it validates the
     component's *final* state - the same rule
     `event_mapping._check_start_end_consistency` follows for DTSTART/DTEND.
-    That matters for `update_task`: a call that only sets `wiederholung` must
+    That matters for `update_task`: a call that only sets `recurrence` must
     be checked against whatever DTSTART the stored task already has, not
     just the fields passed in this call, so it isn't rejected merely because
     the anchor wasn't repeated here - and, symmetrically, an update that both
-    sets `wiederholung` and clears the task's only anchor in the same call
+    sets `recurrence` and clears the task's only anchor in the same call
     must still be rejected.
     """
     if "rrule" not in todo:
         return
 
-    touched_rrule = fields.wiederholung is not None or "wiederholung" in fields.clear
-    touched_start = fields.start_datum is not None or "start_datum" in fields.clear
+    touched_rrule = fields.recurrence is not None or "recurrence" in fields.clear
+    touched_start = fields.start_date is not None or "start_date" in fields.clear
     if not (touched_rrule or touched_start):
         return
 
     if "dtstart" not in todo:
         raise InvalidTaskDataError(
-            "wiederholung requires the task to have a start_datum to recur from."
+            "recurrence requires the task to have a start_date to recur from."
         )
 
 
@@ -1140,7 +1140,7 @@ def _parse_trigger(
         delta = vDuration.from_ical(spec.strip())
     except Exception:
         raise InvalidTaskDataError(
-            f"Could not parse Erinnerung '{spec}': expected an ISO 8601 duration "
+            f"Could not parse Reminder '{spec}': expected an ISO 8601 duration "
             "like '-P1D' / '-PT1H', or an absolute ISO 8601 datetime."
         ) from None
 
@@ -1150,8 +1150,8 @@ def _parse_trigger(
         related = "START"
     else:
         raise InvalidTaskDataError(
-            f"Relative Erinnerung '{spec}' needs the task to have a faellig_datum or "
-            "start_datum to be relative to."
+            f"Relative Reminder '{spec}' needs the task to have a due_date or "
+            "start_date to be relative to."
         )
     return delta, {"RELATED": related}
 
@@ -1221,7 +1221,7 @@ def _has_anchor(component, related: str) -> bool:
 def _read_alarm(alarm, component) -> tuple[str, _TriggerKey] | None:
     """Render one VALARM's TRIGGER as a reminder spec plus its identity, or None.
 
-    None means "this alarm has no `erinnerungen` spelling": returning a string
+    None means "this alarm has no `reminders` spelling": returning a string
     for it would either be a lie about when it fires or a value the write path
     would reject. That covers a missing TRIGGER, a repeated TRIGGER property
     (`icalendar` hands those back as a list), a DATE-valued trigger, an
@@ -1277,7 +1277,7 @@ def apply_alarms(component, specs: list[str], description: str) -> None:
       "replaces all reminders" means);
     - an alarm this format cannot express (see `_read_alarm`) is never touched,
       because it was never visible to the caller in the first place. Clearing
-      "erinnerungen" via `felder_leeren` still removes every VALARM.
+      "reminders" via `clear_fields` still removes every VALARM.
 
     Duplicate specs (including different spellings of the same trigger) produce
     one alarm, not several.
@@ -1316,7 +1316,7 @@ def _validate_clear(fields: TaskFields, clear: tuple[str, ...]) -> None:
     unknown = sorted({name for name in clear if name not in _CLEAR_SPECS})
     if unknown:
         raise InvalidTaskDataError(
-            f"Unknown felder_leeren entry/entries: {', '.join(unknown)}. "
+            f"Unknown clear_fields entry/entries: {', '.join(unknown)}. "
             f"Expected one of: {', '.join(_CLEAR_SPECS)}."
         )
     conflicts = sorted(
@@ -1335,40 +1335,40 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     and update_task their "only set what's provided" semantics. Field names
     listed in `fields.clear` are removed from the component entirely (B3);
     clearing and setting the same field in one call, or naming an unknown
-    field (including "titel", which cannot be cleared), raises
+    field (including "title", which cannot be cleared), raises
     `InvalidTaskDataError`. "status" is deliberately absent from `_CLEAR_SPECS`
-    - setting `status="offen"` is the documented reset path, so there is
+    - setting `status="open"` is the documented reset path, so there is
     nothing left to clear.
 
-    `start_datum`/`faellig_datum` keep the zone they name and are otherwise
+    `start_date`/`due_date` keep the zone they name and are otherwise
     written in the zone the task's DTSTART already uses (`_anchored`), exactly
     as `apply_event_fields` does for DTSTART/DTEND. A recurring VTODO pinned to
     a fixed UTC instant slides an hour at every DST transition, and DTSTART and
     DUE anchored to two different zones silently change the task's window at
     the next one (finding 5.7).
 
-    `ausnahme_daten` *replaces* the task's whole EXDATE set, and is validated
+    `exception_dates` *replaces* the task's whole EXDATE set, and is validated
     exactly as `apply_event_fields` validates the event-side field of the same
     name (literally the same helpers): entries of the wrong value kind, and
     entries naming no occurrence of the task's series, are rejected rather than
-    stored to cancel nothing. Clearing `wiederholung` also drops EXDATE and
+    stored to cancel nothing. Clearing `recurrence` also drops EXDATE and
     RDATE, which mean nothing without a recurrence set (finding 5.8).
     """
     clear = tuple(fields.clear or ())
     _validate_clear(fields, clear)
 
     # Clears run first, so a later set of a *different* field (and the
-    # erinnerungen rebuild below) observe the final DTSTART/DUE presence.
+    # reminders rebuild below) observe the final DTSTART/DUE presence.
     for name in clear:
         _, ical_name = _CLEAR_SPECS[name]
-        if name == "erinnerungen":
+        if name == "reminders":
             todo.subcomponents = [c for c in todo.subcomponents if c.name != "VALARM"]
-        elif name == "wiederholung":
+        elif name == "recurrence":
             # EXDATE and RDATE only mean anything relative to a recurrence set.
             # Dropping the RRULE and leaving them behind orphans them on the
             # component: they cancel and add nothing, no tool reports them as a
             # problem, and they silently come back to life the day someone sets
-            # `wiederholung` again (finding 5.8).
+            # `recurrence` again (finding 5.8).
             for orphaned in (ical_name, "exdate", "rdate"):
                 if orphaned is not None and orphaned in todo:
                     del todo[orphaned]
@@ -1380,11 +1380,11 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
     # instead of each keeping whichever zone it happened to parse in.
     zone = _component_zone(todo)
 
-    if fields.titel is not None:
-        _set(todo, "summary", fields.titel)
-    if fields.start_datum is not None:
-        start_value = parse_datetime_input(fields.start_datum, keep_zone=True)
-        if not names_timezone(fields.start_datum):
+    if fields.title is not None:
+        _set(todo, "summary", fields.title)
+    if fields.start_date is not None:
+        start_value = parse_datetime_input(fields.start_date, keep_zone=True)
+        if not names_timezone(fields.start_date):
             # A start that names no zone means "this instant", not "this task
             # now lives in that zone" - so it is written in the task's own.
             # Naming a zone explicitly is how a task is *moved* to one, and
@@ -1392,78 +1392,78 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
             start_value = _anchored(start_value, zone)
         _set(todo, "dtstart", start_value)
         zone = _component_zone(todo)
-    if fields.faellig_datum is not None:
-        due_value = parse_datetime_input(fields.faellig_datum, keep_zone=True)
-        if not names_timezone(fields.faellig_datum):
+    if fields.due_date is not None:
+        due_value = parse_datetime_input(fields.due_date, keep_zone=True)
+        if not names_timezone(fields.due_date):
             due_value = _anchored(due_value, zone)
         _set(todo, "due", due_value)
-    if fields.prioritaet is not None:
-        _set(todo, "priority", priority_label_to_ical(fields.prioritaet))
+    if fields.priority is not None:
+        _set(todo, "priority", priority_label_to_ical(fields.priority))
     if fields.status is not None:
-        # Runs *before* the fortschritt_prozent block below, deliberately:
-        # "erledigt"/"offen" both derive a PERCENT-COMPLETE value (100/0) as
-        # a side effect, but an explicit fortschritt_prozent in the same call
+        # Runs *before* the progress_percent block below, deliberately:
+        # "completed"/"open" both derive a PERCENT-COMPLETE value (100/0) as
+        # a side effect, but an explicit progress_percent in the same call
         # must win over that derived value - writing status first and letting
-        # fortschritt_prozent's own `_set` run after is what makes the later
+        # progress_percent's own `_set` run after is what makes the later
         # write stick.
-        if fields.status == "erledigt":
+        if fields.status == "completed":
             mark_completed(todo)
         else:
             _set(todo, "status", task_status_label_to_ical(fields.status))
             # A COMPLETED timestamp left behind by an earlier completion would
             # outlive the status change and hide the task: caldav's pending
-            # filter (`todos(include_completed=False)`, used by nur_offene and
+            # filter (`todos(include_completed=False)`, used by only_open and
             # by get_agenda) drops any VTODO that merely *has* a COMPLETED
             # property, whatever its STATUS says. A task moved back to
-            # "in-arbeit" would then read as in progress and still be missing
+            # "in-progress" would then read as in progress and still be missing
             # from every open-task listing, so no non-completed status may
             # leave one behind.
             if "completed" in todo:
                 del todo["completed"]
-            if fields.status == "offen":
+            if fields.status == "open":
                 # Reopening also undoes the 100% `mark_completed` wrote;
-                # "in-arbeit"/"abgesagt" keep whatever progress was recorded.
+                # "in-progress"/"cancelled" keep whatever progress was recorded.
                 _set(todo, "percent-complete", 0)
-    if fields.fortschritt_prozent is not None:
-        if not 0 <= fields.fortschritt_prozent <= 100:
+    if fields.progress_percent is not None:
+        if not 0 <= fields.progress_percent <= 100:
             raise InvalidTaskDataError(
-                f"fortschritt_prozent must be between 0 and 100, got {fields.fortschritt_prozent}."
+                f"progress_percent must be between 0 and 100, got {fields.progress_percent}."
             )
-        _set(todo, "percent-complete", fields.fortschritt_prozent)
-    if fields.ort is not None:
-        _set(todo, "location", fields.ort)
+        _set(todo, "percent-complete", fields.progress_percent)
+    if fields.location is not None:
+        _set(todo, "location", fields.location)
     if fields.url is not None:
         _set(todo, "url", fields.url)
     if fields.tags is not None:
         _set(todo, "categories", list(fields.tags))
-    if fields.notizen is not None:
-        _set(todo, "description", fields.notizen)
-    if fields.sichtbarkeit is not None:
-        _set(todo, "class", visibility_label_to_ical(fields.sichtbarkeit))
-    if fields.uebergeordnete_aufgabe is not None:
+    if fields.notes is not None:
+        _set(todo, "description", fields.notes)
+    if fields.visibility is not None:
+        _set(todo, "class", visibility_label_to_ical(fields.visibility))
+    if fields.parent_task is not None:
         _set(
             todo,
             "related-to",
-            fields.uebergeordnete_aufgabe,
+            fields.parent_task,
             parameters={"RELTYPE": "PARENT"},
         )
-    if fields.wiederholung is not None:
+    if fields.recurrence is not None:
         anchor_val = None
         dtstart_prop = todo.get("dtstart")
         if dtstart_prop is not None:
             anchor_val = getattr(dtstart_prop, "dt", None)
-        _set(todo, "rrule", parse_rrule_text(fields.wiederholung, anchor_val))
-    if fields.ausnahme_daten is not None:
+        _set(todo, "rrule", parse_rrule_text(fields.recurrence, anchor_val))
+    if fields.exception_dates is not None:
         # Replace, not append: drop every existing EXDATE, then write all
         # entries as one EXDATE property with a comma-separated value list.
-        # Runs after `wiederholung` above, so setting a rule and its exceptions
+        # Runs after `recurrence` above, so setting a rule and its exceptions
         # in one call checks the exceptions against the rule this call writes.
         # (`_extract_exdates` reads back all three wire forms other clients may
         # produce: one property, repeated properties, comma lists.)
         if "exdate" in todo:
             del todo["exdate"]
-        if fields.ausnahme_daten:
-            exdate_entries = list(fields.ausnahme_daten)
+        if fields.exception_dates:
+            exdate_entries = list(fields.exception_dates)
             exdate_values = _exdate_values(todo, exdate_entries, noun="task")
             _check_exdates_match_occurrences(
                 todo,
@@ -1471,12 +1471,12 @@ def apply_task_fields(todo, fields: TaskFields) -> None:
                 exdate_values,
                 noun="task",
                 reader="list_tasks/get_task",
-                field_name="start_datum",
+                field_name="start_date",
             )
             todo.add("exdate", exdate_values)
 
-    if fields.erinnerungen is not None:
-        apply_alarms(todo, list(fields.erinnerungen), str(todo.get("summary", "Reminder")))
+    if fields.reminders is not None:
+        apply_alarms(todo, list(fields.reminders), str(todo.get("summary", "Reminder")))
 
     _check_rrule_anchor(todo, fields)
 
@@ -1535,7 +1535,7 @@ def _extract_rrule(component) -> str | None:
     `icalendar` exposes RRULE as a `vRecur` property; `.to_ical()` serializes
     it back to the same textual form RFC 5545 (and Nextcloud Tasks) uses,
     rather than exposing icalendar's internal dict representation. This is
-    the read side of `wiederholung` - see `parse_rrule_text`/`TaskFields.wiederholung`
+    the read side of `recurrence` - see `parse_rrule_text`/`TaskFields.recurrence`
     for the write side (`create_task`/`update_task`).
     """
     rrule = component.get("rrule")
@@ -1668,11 +1668,11 @@ def _trigger_zone(prop: Any) -> timezone | ZoneInfo | None:
 def parse_vtodo(component) -> dict[str, Any]:
     """Parse an icalendar VTODO component into the server's German task dict.
 
-    "status" is one of `TASK_STATUS_LABELS` ("offen"/"in-arbeit"/"erledigt"/
-    "abgesagt"). A missing STATUS property reads as "offen" per RFC 5545's own
+    "status" is one of `TASK_STATUS_LABELS` ("open"/"in-progress"/"completed"/
+    "cancelled"). A missing STATUS property reads as "open" per RFC 5545's own
     default (NEEDS-ACTION); a STATUS value this server doesn't know (a foreign
     client's extension, or a typo written directly via another CalDAV client)
-    also reads as "offen" rather than raising - this is a read path, and a
+    also reads as "open" rather than raising - this is a read path, and a
     liberal one, same stance as `ical_role_to_label`/`RELTYPE_LABELS` on the
     event side: an unrecognized value must never break a listing.
     """
@@ -1682,27 +1682,27 @@ def parse_vtodo(component) -> dict[str, Any]:
     class_value = component.get("class")
     return {
         "uid": str(component.get("uid")),
-        "titel": str(component.get("summary", "")),
-        "start_datum": _format_date_property(component, "dtstart"),
-        "faellig_datum": _format_date_property(component, "due"),
-        "prioritaet": ical_priority_to_label(int(priority)) if priority is not None else None,
-        "fortschritt_prozent": int(percent) if percent is not None else 0,
-        "status": _ICAL_TASK_STATUS_TO_LABEL.get(status, "offen"),
-        "sichtbarkeit": (
+        "title": str(component.get("summary", "")),
+        "start_date": _format_date_property(component, "dtstart"),
+        "due_date": _format_date_property(component, "due"),
+        "priority": ical_priority_to_label(int(priority)) if priority is not None else None,
+        "progress_percent": int(percent) if percent is not None else 0,
+        "status": _ICAL_TASK_STATUS_TO_LABEL.get(status, "open"),
+        "visibility": (
             _ICAL_CLASS_TO_LABEL.get(str(class_value).upper()) if class_value is not None else None
         ),
-        "ort": _get_text(component, "location"),
+        "location": _get_text(component, "location"),
         "url": _get_text(component, "url"),
         "tags": _extract_categories(component),
-        "erinnerungen": extract_alarms(component),
-        "notizen": _get_text(component, "description"),
-        "uebergeordnete_uid": _extract_parent_uid(component),
-        "wiederholung": _extract_rrule(component),
-        "ausnahme_daten": _extract_exdates(component),
+        "reminders": extract_alarms(component),
+        "notes": _get_text(component, "description"),
+        "parent_uid": _extract_parent_uid(component),
+        "recurrence": _extract_rrule(component),
+        "exception_dates": _extract_exdates(component),
         # Both only ever set by `_expand_recurring_tasks`: a stored VTODO is a
         # series or a plain task, never one occurrence of one.
-        "wiederholung_von": None,
-        "serie_uid": None,
+        "recurrence_id": None,
+        "series_uid": None,
     }
 
 
@@ -1714,8 +1714,8 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
     compare directly, so it's expanded to a single instant within that day in
     the default timezone: start-of-day (00:00:00) when `end_of_day` is False,
     end-of-day (23:59:59) when True. Callers use `end_of_day=True` only for the
-    `faellig_vor` (due-before) bound, so a date-only bound like "2026-07-20"
-    still includes tasks due at any time on the 20th; `faellig_nach`
+    `due_before` (due-before) bound, so a date-only bound like "2026-07-20"
+    still includes tasks due at any time on the 20th; `due_after`
     (due-after) bounds and the tasks' own stored due values use
     `end_of_day=False` (start-of-day), so a date-only bound includes tasks due
     from the very start of that day onward, and an all-day task's own due date
@@ -1730,7 +1730,7 @@ def _to_comparable_datetime(value: str, *, end_of_day: bool) -> datetime:
 
 
 def _task_due_instant(due_text: str | None) -> datetime | None:
-    """A task's own stored `faellig_datum` as a comparable instant, or None.
+    """A task's own stored `due_date` as a comparable instant, or None.
 
     None means "cannot be placed on a timeline at all": either the task has no
     due date, or the value the server stores is not one this server can read
@@ -1744,7 +1744,7 @@ def _task_due_instant(due_text: str | None) -> datetime | None:
     try:
         return _to_comparable_datetime(due_text, end_of_day=False)
     except InvalidTaskDataError:
-        _logger.debug("Ignoring unreadable faellig_datum %r while filtering/sorting", due_text)
+        _logger.debug("Ignoring unreadable due_date %r while filtering/sorting", due_text)
         return None
 
 
@@ -1752,7 +1752,7 @@ def _collation_key(value: str) -> tuple[str, str]:
     """A rough locale-independent collation key for a title.
 
     Raw codepoint order files every umlaut after "Z" ("Ärztin" behind
-    "Zahnarzt"), which reads as no order at all in a German-facing listing.
+    "Dentist"), which reads as no order at all in a German-facing listing.
     Decomposing (NFKD) and dropping the combining marks sorts "Ä" with "A";
     case-folding sorts "ärztin" with "Ärztin" and "ß" with "ss", which is
     also DIN 5007 variant 1's rule. This is not full locale-aware collation -
@@ -1776,12 +1776,12 @@ def _fold(value: str) -> str:
 
 
 def _task_sort_key(task: dict[str, Any]) -> tuple[int, datetime, tuple[str, str]]:
-    """Sort key for tasks: faellig_datum ascending, tasks without due date last, then by titel."""
-    titel = _collation_key(str(task.get("titel") or ""))
-    due = _task_due_instant(task.get("faellig_datum"))
+    """Sort key for tasks: due_date ascending, tasks without due date last, then by title."""
+    title = _collation_key(str(task.get("title") or ""))
+    due = _task_due_instant(task.get("due_date"))
     if due is None:
-        return (1, datetime.max.replace(tzinfo=timezone.utc), titel)
-    return (0, due, titel)
+        return (1, datetime.max.replace(tzinfo=timezone.utc), title)
+    return (0, due, title)
 
 
 #: Separates a series UID from the occurrence it identifies in the synthetic
@@ -1871,7 +1871,7 @@ def _expand_recurring_tasks(
     - it only runs at all when `window_end` is set, i.e. when the caller asked
       for tasks due before some date. Without an upper bound there is no window
       to expand into, and the series is left as the single master row it is
-      today - `wiederholung` intact - rather than flooding an unfiltered
+      today - `recurrence` intact - rather than flooding an unfiltered
       `list_tasks` with a hundred copies of every recurring task;
     - occurrences ascend, so the scan stops at the first one past `window_end`;
     - and `_TASK_EXPANSION_LIMIT`/`_RECURRENCE_SCAN_LIMIT` cap what one task can
@@ -1883,12 +1883,12 @@ def _expand_recurring_tasks(
     Degrading to today's behaviour is always safe; inventing occurrences is not.
 
     Each emitted instance is marked so no caller can mistake it for the stored
-    task: `wiederholung_von` names the occurrence, `wiederholung` is `None`
-    (nothing about an instance recurs), `serie_uid` points at the stored task,
+    task: `recurrence_id` names the occurrence, `recurrence` is `None`
+    (nothing about an instance recurs), `series_uid` points at the stored task,
     and `uid` is a synthetic "<series uid>#<occurrence>" that every write path
     rejects by name (`split_occurrence_uid`). An instance is a read-only view of
     one date in a series; `update_task`/`complete_task` act on series, and take
-    `serie_uid`.
+    `series_uid`.
     """
     if window_end is None:
         return tasks
@@ -1910,14 +1910,14 @@ def _occurrences_of(
     window_end: datetime,
 ) -> list[dict[str, Any]] | None:
     """The in-window instances of one recurring task, or None to leave it as is."""
-    rrule_text = task.get("wiederholung")
-    due_text = task.get("faellig_datum")
+    rrule_text = task.get("recurrence")
+    due_text = task.get("due_date")
     if not rrule_text or not due_text:
         # No rule, or nothing due to place the occurrences on: a task with no
         # DUE is excluded from a due-filtered listing either way.
         return None
 
-    start_text = task.get("start_datum")
+    start_text = task.get("start_date")
     try:
         due_anchor = parse_datetime_input(due_text, keep_zone=True)
         # RFC 5545 generates the recurrence set from DTSTART; DUE only rides
@@ -1943,7 +1943,7 @@ def _occurrences_of(
     shift = due_anchor - anchor if start_text else timedelta(0)
 
     skipped = set()
-    for entry in task.get("ausnahme_daten") or []:
+    for entry in task.get("exception_dates") or []:
         try:
             value = parse_datetime_input(entry, keep_zone=True)
         except InvalidTaskDataError:
@@ -1966,14 +1966,14 @@ def _occurrences_of(
 
         occurrence_id = format_datetime_output(occ_start)
         instance = dict(task)
-        instance["wiederholung"] = None
-        instance["wiederholung_von"] = occurrence_id
-        instance["ausnahme_daten"] = []
-        instance["serie_uid"] = task.get("uid")
+        instance["recurrence"] = None
+        instance["recurrence_id"] = occurrence_id
+        instance["exception_dates"] = []
+        instance["series_uid"] = task.get("uid")
         instance["uid"] = f"{task.get('uid')}{_OCCURRENCE_UID_SEPARATOR}{occurrence_id}"
         if start_text:
-            instance["start_datum"] = occurrence_id
-        instance["faellig_datum"] = format_datetime_output(occ_due)
+            instance["start_date"] = occurrence_id
+        instance["due_date"] = format_datetime_output(occ_due)
         instances.append(instance)
     return instances
 
@@ -1983,27 +1983,27 @@ def filter_tasks(
     *,
     due_before: str | None = None,
     due_after: str | None = None,
-    prioritaet: str | None = None,
+    priority: str | None = None,
     tag: str | None = None,
-    suchtext: str | None = None,
+    search_text: str | None = None,
     limit: int | None = None,
-    ohne_erinnerung: bool = False,
-    ohne_sichtbarkeit: bool = False,
-    ohne_tags: bool = False,
+    without_reminder: bool = False,
+    without_visibility: bool = False,
+    without_tags: bool = False,
     uid_regex: str | None = None,
 ) -> list[dict[str, Any]]:
     """Filter already-`parse_vtodo`-parsed task dicts and sort them.
 
     `due_before`/`due_after` are ISO 8601 date/datetime strings. When either is
-    actually given, tasks with no readable `faellig_datum` (due date) are excluded.
-    `prioritaet`: "hoch"/"mittel"/"niedrig", validated against `PRIORITY_LABELS`
+    actually given, tasks with no readable `due_date` (due date) are excluded.
+    `priority`: "high"/"medium"/"low", validated against `PRIORITY_LABELS`
     (unknown value raises `InvalidTaskDataError`).
-    `tag`: exact match against one `tags` entry, `suchtext`: substring match over
-    `titel` and `notizen` (skipping None values); both compare case- and
+    `tag`: exact match against one `tags` entry, `search_text`: substring match over
+    `title` and `notes` (skipping None values); both compare case- and
     spelling-insensitively (see `_fold`).
 
-    `ohne_erinnerung`/`ohne_sichtbarkeit`/`ohne_tags` keep only tasks whose
-    `erinnerungen` list is empty / whose `sichtbarkeit` is None (no readable
+    `without_reminder`/`without_visibility`/`without_tags` keep only tasks whose
+    `reminders` list is empty / whose `visibility` is None (no readable
     CLASS) / whose `tags` list is empty. `uid_regex` keeps only tasks whose
     stored `uid` contains a match for the given regular expression
     (`re.search`, case-sensitive - anchor with ^...$ for a full match; an
@@ -2018,19 +2018,19 @@ def filter_tasks(
     rejecting 0: an integer parameter spells "unset" as None, so 0 is a caller
     asking for zero results, which is a mistake worth reporting.
 
-    Results are sorted by `faellig_datum` ascending (tasks without a readable due
-    date last), then by `titel` (see `_collation_key`). `limit`, if given, must be a
+    Results are sorted by `due_date` ascending (tasks without a readable due
+    date last), then by `title` (see `_collation_key`). `limit`, if given, must be a
     positive integer and caps the number of results returned, applied last.
     """
     if limit is not None and limit <= 0:
         raise InvalidTaskDataError(f"limit must be greater than 0, got {limit}.")
 
-    if prioritaet:
-        if prioritaet not in PRIORITY_LABELS:
+    if priority:
+        if priority not in PRIORITY_LABELS:
             raise InvalidTaskDataError(
-                f"Unknown prioritaet '{prioritaet}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
+                f"Unknown priority '{priority}'. Expected one of: {', '.join(PRIORITY_LABELS)}."
             )
-        tasks = [task for task in tasks if task.get("prioritaet") == prioritaet]
+        tasks = [task for task in tasks if task.get("priority") == priority]
 
     if uid_regex:
         try:
@@ -2039,11 +2039,11 @@ def filter_tasks(
             raise InvalidTaskDataError(f"Invalid uid_regex '{uid_regex}': {exc}.") from exc
         tasks = [task for task in tasks if uid_pattern.search(str(task.get("uid") or ""))]
 
-    if ohne_erinnerung:
-        tasks = [task for task in tasks if not task.get("erinnerungen")]
-    if ohne_sichtbarkeit:
-        tasks = [task for task in tasks if task.get("sichtbarkeit") is None]
-    if ohne_tags:
+    if without_reminder:
+        tasks = [task for task in tasks if not task.get("reminders")]
+    if without_visibility:
+        tasks = [task for task in tasks if task.get("visibility") is None]
+    if without_tags:
         tasks = [task for task in tasks if not task.get("tags")]
 
     before_bound = _to_comparable_datetime(due_before, end_of_day=True) if due_before else None
@@ -2056,7 +2056,7 @@ def filter_tasks(
     if due_before or due_after:
         filtered: list[dict[str, Any]] = []
         for task in tasks:
-            due_dt = _task_due_instant(task.get("faellig_datum"))
+            due_dt = _task_due_instant(task.get("due_date"))
             if due_dt is None:
                 continue
             if before_bound is not None and due_dt > before_bound:
@@ -2070,14 +2070,14 @@ def filter_tasks(
         wanted = _fold(tag)
         tasks = [task for task in tasks if any(_fold(t) == wanted for t in task.get("tags") or [])]
 
-    if suchtext:
-        needle = _fold(suchtext)
+    if search_text:
+        needle = _fold(search_text)
         tasks = [
             task
             for task in tasks
             if any(
                 needle in _fold(value)
-                for value in (task.get("titel"), task.get("notizen"))
+                for value in (task.get("title"), task.get("notes"))
                 if value is not None
             )
         ]
