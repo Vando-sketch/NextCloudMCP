@@ -60,6 +60,9 @@ def test_all_tools_registered(tools):
         "complete_task",
         "delete_task",
         "move_task",
+        "update_tasks",
+        "delete_tasks",
+        "move_tasks",
         "list_calendars",
         "create_calendar",
         "delete_calendar",
@@ -706,6 +709,73 @@ def test_move_task_passes_clear_fields_through_as_tuple(tools, fake_service):
     fake_service.move_task.assert_called_once_with(
         "Private", "task-uid", "Work", None, ("parent_task",)
     )
+
+
+def test_update_tasks_delegates(tools, fake_service):
+    expected_res = {
+        "list_name": "Personal",
+        "succeeded": 2,
+        "failed": 0,
+        "results": [{"uid": "t1", "status": "ok"}, {"uid": "t2", "status": "ok"}],
+    }
+    fake_service.update_tasks.return_value = expected_res
+    res = _run(
+        tools["update_tasks"].fn(
+            list_name="Personal",
+            task_uids=["t1", "t2"],
+            priority="high",
+            clear_fields=["notes"],
+        )
+    )
+    assert res == expected_res
+    (list_name, uids, fields), _ = fake_service.update_tasks.call_args
+    assert list_name == "Personal"
+    assert uids == ["t1", "t2"]
+    assert fields.priority == "high"
+    assert fields.clear == ("notes",)
+
+
+def test_delete_tasks_delegates(tools, fake_service):
+    expected_res = {
+        "list_name": "Personal",
+        "succeeded": 2,
+        "failed": 0,
+        "results": [{"uid": "t1", "status": "ok"}, {"uid": "t2", "status": "ok"}],
+    }
+    fake_service.delete_tasks.return_value = expected_res
+    res = _run(tools["delete_tasks"].fn(list_name="Personal", task_uids=["t1", "t2"]))
+    assert res == expected_res
+    fake_service.delete_tasks.assert_called_once_with("Personal", ["t1", "t2"])
+
+
+def test_move_tasks_delegates(tools, fake_service):
+    expected_res = {
+        "list_name": "MCP-World",
+        "succeeded": 1,
+        "failed": 1,
+        "results": [
+            {
+                "uid": "t1",
+                "status": "ok",
+                "from": "MCP-World",
+                "to": "Archiv",
+                "method": "already_there",
+            },
+            {"uid": "t2", "status": "error", "error": "Task 't2' was not found."},
+        ],
+    }
+    fake_service.move_tasks.return_value = expected_res
+    res = _run(
+        tools["move_tasks"].fn(list_name="MCP-World", task_uids=["t1", "t2"], target_list="Archiv")
+    )
+    assert res == expected_res
+    fake_service.move_tasks.assert_called_once_with("MCP-World", ["t1", "t2"], "Archiv")
+
+
+def test_task_batch_tools_use_ascii_parameter_names(tools):
+    for tool_name in ("update_tasks", "delete_tasks", "move_tasks"):
+        for prop_name in tools[tool_name].parameters.get("properties", {}):
+            assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
 
 
 def test_move_event_delegates(tools, fake_service):
@@ -1923,6 +1993,9 @@ DESTRUCTIVE_TOOLS = {
     "complete_task",
     "delete_task",
     "move_task",
+    "update_tasks",
+    "delete_tasks",
+    "move_tasks",
     "delete_calendar",
     "update_calendar",
     "update_event",

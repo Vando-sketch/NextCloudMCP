@@ -774,7 +774,7 @@ def build_server(
 
         Returns:
             {"uid": ..., "from": source list, "to": target list,
-            "method": "MOVE" | "copied"}; additionally
+            "method": "MOVE" | "copied" | "already_there"}; additionally
             "hierarchy": "set" | "cleared" if the parent task was also changed.
             If only the hierarchy change fails, the error explicitly states
             that the move itself succeeded.
@@ -798,6 +798,131 @@ def build_server(
             target_list,
             parent_task,
             tuple(clear_fields) if clear_fields else (),
+        )
+        return res
+
+    @mcp.tool(annotations=_MODIFY)
+    async def update_tasks(
+        list_name: str,
+        task_uids: list[str],
+        title: str | None = None,
+        start_date: str | None = None,
+        due_date: str | None = None,
+        priority: str | None = None,
+        progress_percent: int | None = None,
+        location: str | None = None,
+        url: str | None = None,
+        tags: list[str] | None = None,
+        reminders: list[str] | None = None,
+        notes: str | None = None,
+        visibility: str | None = None,
+        parent_task: str | None = None,
+        recurrence: str | None = None,
+        exception_dates: list[str] | None = None,
+        status: str | None = None,
+        clear_fields: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update multiple tasks in a list with the same field patch.
+
+        The patch is validated up front before any writes take place. If the patch
+        is invalid or empty, the call fails immediately and no tasks are changed.
+
+        Use this rather than a loop of `update_task` calls whenever the same
+        change applies to several tasks - retagging, rescheduling a due date,
+        marking a set done via status="completed". A single failure (unknown UID,
+        a conflicting edit, a patch that doesn't fit one task) is reported
+        against that UID instead of stopping the rest, and a request that fails
+        transiently is retried before it is reported at all.
+
+        Args:
+            list_name: Display name of the task list containing the tasks.
+            task_uids: List of task UIDs to update. Max 200 UIDs per call.
+                Empty list is rejected. Duplicate UIDs are deduplicated while
+                preserving order. An occurrence UID ("<series_uid>#<date>") is
+                rejected for its own entry only, like in update_task.
+            (all other args): Same meaning and mapping as in update_task; fields left
+                as None are left unchanged. To clear fields, pass their names in
+                clear_fields.
+
+        Returns:
+            Dict containing list_name, succeeded count, failed count,
+            and results list with per-UID statuses.
+        """
+        fields = mapping.TaskFields(
+            title=title,
+            start_date=start_date,
+            due_date=due_date,
+            priority=priority,
+            progress_percent=progress_percent,
+            location=location,
+            url=url,
+            tags=tags,
+            reminders=reminders,
+            notes=notes,
+            visibility=visibility,
+            parent_task=parent_task,
+            recurrence=recurrence,
+            exception_dates=exception_dates,
+            status=status,
+            clear=tuple(clear_fields) if clear_fields else (),
+        )
+        res: dict[str, Any] = await _call(caldav_service.update_tasks, list_name, task_uids, fields)
+        return res
+
+    @mcp.tool(annotations=_MODIFY)
+    async def delete_tasks(list_name: str, task_uids: list[str]) -> dict[str, Any]:
+        """Permanently delete multiple tasks from a task list.
+
+        WARNING: this is irreversible from this server's point of view, and a
+        batch multiplies the damage a wrong UID list does. Confirm the list
+        with the user before calling this.
+
+        A UID that does not exist is reported as a failed entry; the other
+        tasks are still deleted.
+
+        Args:
+            list_name: Display name of the task list containing the tasks.
+            task_uids: List of task UIDs to delete. Max 200 UIDs per call.
+                Empty list is rejected. Duplicate UIDs are deduplicated while
+                preserving order.
+
+        Returns:
+            Dict containing list_name, succeeded count, failed count,
+            and results list with per-UID statuses.
+        """
+        res: dict[str, Any] = await _call(caldav_service.delete_tasks, list_name, task_uids)
+        return res
+
+    @mcp.tool(annotations=_MODIFY)
+    async def move_tasks(list_name: str, task_uids: list[str], target_list: str) -> dict[str, Any]:
+        """Move several tasks to a different task list.
+
+        The tool for reorganizing a list: both lists are resolved once, then
+        each task is moved exactly as `move_task` does it (CalDAV MOVE, else
+        copy-and-delete). A failure on one task becomes an entry in `results`
+        and the rest are still moved - which is the whole point of the batch
+        over thirteen individual calls.
+
+        If the server does not answer at all (502/503/504), the move is
+        retried rather than reported as an error. The call is safe to repeat
+        with the same UIDs: a task already in the target list is reported as
+        "already_there".
+
+        Args:
+            list_name: Display name of the source task list.
+            task_uids: UIDs of the tasks to move. At most 200 per call; an
+                empty list is rejected, and duplicates are removed while
+                preserving order.
+            target_list: Display name of the target task list.
+
+        Returns:
+            {"list_name", "succeeded", "failed", "results"}, where each entry
+            is {"uid", "status": "ok"|"error"}, plus for "ok"
+            {"from", "to", "method": "MOVE" | "copied" | "already_there"},
+            and for "error" {"error": reason}.
+        """
+        res: dict[str, Any] = await _call(
+            caldav_service.move_tasks, list_name, task_uids, target_list
         )
         return res
 
@@ -1437,7 +1562,7 @@ def build_server(
 
         Returns:
             {"uid": ..., "from": source calendar, "to": target calendar,
-            "method": "MOVE" | "copied"}; additionally
+            "method": "MOVE" | "copied" | "already_there"}; additionally
             "hierarchy": "set" | "cleared" if the link was also changed.
             If only the link change fails, the error explicitly states that
             the move itself succeeded.
