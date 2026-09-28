@@ -10,8 +10,10 @@ This project does not yet follow Semantic Versioning releases.
 ### Added
 
 - **Project logo.** A cloud-with-checkmark logo in Nextcloud blue lives in
-  `docs/assets/` (`logo.svg` app icon, `logo-mark.svg` transparent mark, plus
-  512px PNG renders) and heads the README. It deliberately uses its own cloud
+  `assets/` (`logo.svg` app icon, `logo-mark.svg` transparent mark, plus
+  512px PNG renders and a 1280x640 `social-preview.png` for GitHub) and heads
+  the README. `assets/logo.svg` is also where editors like T3 Code look for a
+  project icon. It deliberately uses its own cloud
   shape instead of the Nextcloud rings, which are a protected trademark.
 
 - **Tasks can be updated, deleted and moved in batches.** `update_tasks`,
