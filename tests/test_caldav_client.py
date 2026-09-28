@@ -19,10 +19,10 @@ from caldav.lib.url import URL
 from icalendar import Alarm, Calendar, Event, FreeBusy, Timezone, Todo, vRecur
 from lxml import etree
 
-from nextcloud_task_mcp import caldav_client as caldav_client_module
-from nextcloud_task_mcp import event_mapping, mapping
-from nextcloud_task_mcp.caldav_client import CalDavService, _translate
-from nextcloud_task_mcp.errors import (
+from nextcloud_organizer_mcp import caldav_client as caldav_client_module
+from nextcloud_organizer_mcp import event_mapping, mapping
+from nextcloud_organizer_mcp.caldav_client import CalDavService, _translate
+from nextcloud_organizer_mcp.errors import (
     AuthenticationFailedError,
     CalendarAlreadyExistsError,
     CalendarNotFoundError,
@@ -66,7 +66,7 @@ def _make_calendar(
 
 @pytest.fixture
 def mock_dav_client():
-    with patch("nextcloud_task_mcp.caldav_client.DAVClient") as mock_cls:
+    with patch("nextcloud_organizer_mcp.caldav_client.DAVClient") as mock_cls:
         yield mock_cls
 
 
@@ -77,7 +77,7 @@ def retry_sleep():
     Autouse so no test pays 1.5s for a retried batch item; yielded so the tests
     that care can assert how often (and how long) it would have slept.
     """
-    with patch("nextcloud_task_mcp.caldav_client._sleep") as mock_sleep:
+    with patch("nextcloud_organizer_mcp.caldav_client._sleep") as mock_sleep:
         yield mock_sleep
 
 
@@ -1799,7 +1799,7 @@ def test_ambiguous_list_name_reraises_as_task_mcp_error(service, principal, call
 
 
 def test_translate_scrubbed_branches_log_the_real_exception(caplog):
-    with caplog.at_level(logging.WARNING, logger="nextcloud_task_mcp.caldav_client"):
+    with caplog.at_level(logging.WARNING, logger="nextcloud_organizer_mcp.caldav_client"):
         _translate(caldav_error.DAVError(_SECRET_MARKER))
         _translate(_http_errors.RequestException(_SECRET_MARKER))
         _translate(RuntimeError(_SECRET_MARKER))

@@ -9,9 +9,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import pytest
 from icalendar import Calendar, Todo
 
-from nextcloud_task_mcp import mapping
-from nextcloud_task_mcp.errors import InvalidTaskDataError
-from nextcloud_task_mcp.mapping import TaskFields
+from nextcloud_organizer_mcp import mapping
+from nextcloud_organizer_mcp.errors import InvalidTaskDataError
+from nextcloud_organizer_mcp.mapping import TaskFields
 
 
 def _new_todo(uid: str = "task-1") -> Todo:
@@ -952,7 +952,7 @@ def test_missing_tzdata_falls_back_to_utc_instead_of_crashing_on_import(monkeypa
         raise ZoneInfoNotFoundError(f"No time zone found with key {name}")
 
     monkeypatch.setattr(mapping, "ZoneInfo", _no_tzdata)
-    with caplog.at_level(logging.WARNING, logger="nextcloud_task_mcp.mapping"):
+    with caplog.at_level(logging.WARNING, logger="nextcloud_organizer_mcp.mapping"):
         assert mapping._initial_default_timezone() is timezone.utc
     assert "MCP_DEFAULT_TIMEZONE" in caplog.text
 

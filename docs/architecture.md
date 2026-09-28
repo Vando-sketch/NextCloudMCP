@@ -3,7 +3,7 @@
 ## Module overview
 
 ```
-src/nextcloud_task_mcp/
+src/nextcloud_organizer_mcp/
 ├── server.py         FastMCP app: tool definitions, error-to-ToolError translation, entrypoint
 ├── personal_auth.py  OAuth 2.1 provider (vendored from crumrine/fastmcp-personal-auth)
 ├── caldav_client.py  CalDavService: persistent CalDAV connection + task CRUD

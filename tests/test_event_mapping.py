@@ -10,9 +10,9 @@ import pytest
 from icalendar import Calendar, Event, FreeBusy
 from icalendar.prop import vDDDTypes
 
-from nextcloud_task_mcp import event_mapping, mapping
-from nextcloud_task_mcp.errors import InvalidEventDataError
-from nextcloud_task_mcp.event_mapping import EventFields
+from nextcloud_organizer_mcp import event_mapping, mapping
+from nextcloud_organizer_mcp.errors import InvalidEventDataError
+from nextcloud_organizer_mcp.event_mapping import EventFields
 
 
 def _new_event(uid: str = "event-1") -> Event:

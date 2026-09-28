@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from nextcloud_task_mcp.config import ConfigError, Settings
+from nextcloud_organizer_mcp.config import ConfigError, Settings
 
 
 def _settings(**overrides) -> Settings:

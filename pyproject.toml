@@ -1,7 +1,7 @@
 [project]
-name = "nextcloud-task-mcp"
+name = "nextcloud-organizer-mcp"
 version = "0.1.0"
-description = "MCP server for managing Nextcloud Tasks (CalDAV VTODOs) via natural language"
+description = "MCP server for managing Nextcloud tasks, calendars and notes via natural language"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -37,9 +37,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Vando-sketch/NextCloudTaskMCP"
-Repository = "https://github.com/Vando-sketch/NextCloudTaskMCP"
-Issues = "https://github.com/Vando-sketch/NextCloudTaskMCP/issues"
+Homepage = "https://github.com/Vando-sketch/nextcloud-organizer-mcp"
+Repository = "https://github.com/Vando-sketch/nextcloud-organizer-mcp"
+Issues = "https://github.com/Vando-sketch/nextcloud-organizer-mcp/issues"
 
 [dependency-groups]
 dev = [
@@ -52,27 +52,32 @@ dev = [
 ]
 
 [project.scripts]
-nextcloud-task-mcp = "nextcloud_task_mcp.server:main"
-nextcloud-task-mcp-admin = "nextcloud_task_mcp.admin:main"
+nextcloud-organizer-mcp = "nextcloud_organizer_mcp.server:main"
+nextcloud-organizer-mcp-admin = "nextcloud_organizer_mcp.admin:main"
+# Deprecated aliases from before the rename (nextcloud-task-mcp), kept so
+# existing deployments whose systemd unit still runs the old command keep
+# working until they are migrated - see docs/deployment.md.
+nextcloud-task-mcp = "nextcloud_organizer_mcp.server:main"
+nextcloud-task-mcp-admin = "nextcloud_organizer_mcp.admin:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# `src/nextcloud_task_mcp/py.typed` (PEP 561 marker, E8) ships in the wheel
+# `src/nextcloud_organizer_mcp/py.typed` (PEP 561 marker, E8) ships in the wheel
 # with no extra config: hatchling includes every file under a listed
 # package's directory by default. Verified with `uv build --wheel` +
-# `unzip -l dist/*.whl` - `nextcloud_task_mcp/py.typed` is present at the
+# `unzip -l dist/*.whl` - `nextcloud_organizer_mcp/py.typed` is present at the
 # package root. No `force-include`/`artifacts` entry needed.
-packages = ["src/nextcloud_task_mcp"]
+packages = ["src/nextcloud_organizer_mcp"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 # Vendored verbatim from https://github.com/crumrine/fastmcp-personal-auth -
 # excluded from lint/format so it stays diffable against upstream.
-extend-exclude = ["src/nextcloud_task_mcp/personal_auth.py"]
+extend-exclude = ["src/nextcloud_organizer_mcp/personal_auth.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -84,7 +89,7 @@ testpaths = ["tests"]
 # Vendored verbatim from https://github.com/crumrine/fastmcp-personal-auth -
 # its token-lifecycle test coverage is WP4's job, not this gate's; excluded
 # the same way ruff excludes it above.
-omit = ["src/nextcloud_task_mcp/personal_auth.py"]
+omit = ["src/nextcloud_organizer_mcp/personal_auth.py"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -96,7 +101,7 @@ warn_redundant_casts = true
 # excluded from type checking so it stays diffable against upstream (mirrors
 # the ruff extend-exclude above). mypy's `exclude` is a regex matched against
 # file paths.
-exclude = "^src/nextcloud_task_mcp/personal_auth\\.py$"
+exclude = "^src/nextcloud_organizer_mcp/personal_auth\\.py$"
 
 [[tool.mypy.overrides]]
 module = ["caldav.*", "icalendar.*", "requests.*", "niquests.*", "lxml.*"]
