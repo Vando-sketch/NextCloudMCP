@@ -30,7 +30,7 @@ from conftest import (
 )
 from mcp.server.auth.provider import TokenError
 
-from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
+from nextcloud_organizer_mcp.personal_auth import PersonalAuthProvider
 
 
 def _provider(tmp_path: Path, **overrides) -> PersonalAuthProvider:
@@ -288,7 +288,7 @@ def test_refresh_token_rotation_preserves_bounded_expiry(tmp_path):
 
 
 def test_default_refresh_token_expiry_is_180_days(tmp_path):
-    from nextcloud_task_mcp.personal_auth import DEFAULT_REFRESH_TOKEN_EXPIRY
+    from nextcloud_organizer_mcp.personal_auth import DEFAULT_REFRESH_TOKEN_EXPIRY
 
     assert DEFAULT_REFRESH_TOKEN_EXPIRY == 180 * 24 * 60 * 60
 

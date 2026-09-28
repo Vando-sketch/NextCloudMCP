@@ -13,9 +13,9 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.requests import Request
 from starlette.responses import Response
 
-from nextcloud_task_mcp import mapping
-from nextcloud_task_mcp.config import Settings
-from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
+from nextcloud_organizer_mcp import mapping
+from nextcloud_organizer_mcp.config import Settings
+from nextcloud_organizer_mcp.personal_auth import PersonalAuthProvider
 
 #: Matches the value baked into the `settings` fixture below - tests that need
 #: to exercise the OAuth password gate reference this directly.

@@ -11,11 +11,11 @@ import time
 import pytest
 from conftest import run_async
 
-from nextcloud_task_mcp import mapping
-from nextcloud_task_mcp.caldav_client import CalDavService
-from nextcloud_task_mcp.errors import EventNotFoundError, NoteNotFoundError
-from nextcloud_task_mcp.notes_client import NotesService
-from nextcloud_task_mcp.notes_mapping import NoteFields
+from nextcloud_organizer_mcp import mapping
+from nextcloud_organizer_mcp.caldav_client import CalDavService
+from nextcloud_organizer_mcp.errors import EventNotFoundError, NoteNotFoundError
+from nextcloud_organizer_mcp.notes_client import NotesService
+from nextcloud_organizer_mcp.notes_mapping import NoteFields
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_INTEGRATION_TESTS") != "1",
@@ -53,7 +53,7 @@ def test_full_task_lifecycle(live_service, test_list_name):
     uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            title="nextcloud-task-mcp integration test task",
+            title="nextcloud-organizer-mcp integration test task",
             notes="Created by the automated integration test suite; safe to delete.",
         ),
     )
@@ -108,7 +108,7 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
     uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            title="nextcloud-task-mcp integration test recurring task",
+            title="nextcloud-organizer-mcp integration test recurring task",
             due_date="2026-07-20",
             recurrence="FREQ=DAILY",
             notes="Created by the automated integration test suite; safe to delete.",
@@ -188,7 +188,7 @@ def test_calendar_lifecycle(live_service):
 
 
 def test_event_lifecycle(live_service, test_calendar):
-    from nextcloud_task_mcp import event_mapping
+    from nextcloud_organizer_mcp import event_mapping
 
     uid = live_service.create_event(
         test_calendar,
@@ -234,7 +234,7 @@ def test_event_lifecycle(live_service, test_calendar):
 
 
 def test_all_day_event_round_trip(live_service, test_calendar):
-    from nextcloud_task_mcp import event_mapping
+    from nextcloud_organizer_mcp import event_mapping
 
     uid = live_service.create_event(
         test_calendar,
@@ -250,7 +250,7 @@ def test_all_day_event_round_trip(live_service, test_calendar):
 
 
 def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
-    from nextcloud_task_mcp import event_mapping
+    from nextcloud_organizer_mcp import event_mapping
 
     series_uid = live_service.create_event(
         test_calendar,
@@ -283,7 +283,7 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
 
 
 def test_task_event_linking_and_conversion(live_service, test_list_name, test_calendar):
-    from nextcloud_task_mcp import event_mapping, mapping
+    from nextcloud_organizer_mcp import event_mapping, mapping
 
     task_uid = live_service.create_task(
         test_list_name,
@@ -328,7 +328,7 @@ def test_task_event_linking_and_conversion(live_service, test_list_name, test_ca
 
 
 def test_get_agenda_combines_events_and_tasks(live_service, test_list_name, test_calendar):
-    from nextcloud_task_mcp import event_mapping, mapping
+    from nextcloud_organizer_mcp import event_mapping, mapping
 
     task_uid = live_service.create_task(
         test_list_name,
@@ -374,7 +374,7 @@ def move_target_list(live_service):
 
 def test_move_event_keeps_uid_and_every_property(live_service, test_calendar, move_target_calendar):
     """The whole point of MOVE over create+delete: nothing changes but the collection."""
-    from nextcloud_task_mcp import event_mapping
+    from nextcloud_organizer_mcp import event_mapping
 
     uid = live_service.create_event(
         test_calendar,
@@ -545,7 +545,7 @@ def test_move_task_reparents_in_the_target_list(live_service, test_list_name, mo
 
 def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_name, test_calendar):
     """One tag on an event and on a task has to come back as one entry counting two."""
-    from nextcloud_task_mcp import event_mapping
+    from nextcloud_organizer_mcp import event_mapping
 
     tag = f"MCP-Tag-Test-{_RUN_SUFFIX}"
     event_uid = live_service.create_event(
@@ -580,7 +580,7 @@ def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_na
 
 def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
     """Patch three events at once, read each back, then delete them all at once."""
-    from nextcloud_task_mcp import event_mapping
+    from nextcloud_organizer_mcp import event_mapping
 
     uids = [
         live_service.create_event(

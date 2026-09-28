@@ -1,7 +1,7 @@
 """HTTP-level tests for the OAuth 2.1 auth layer (PersonalAuthProvider).
 
 PersonalAuthProvider implements a full OAuth 2.1 + PKCE + Dynamic Client
-Registration flow (see nextcloud_task_mcp.personal_auth, vendored from
+Registration flow (see nextcloud_organizer_mcp.personal_auth, vendored from
 crumrine/fastmcp-personal-auth). Driving that flow end-to-end - a real
 client registering, opening a browser at /authorize, completing a redirect,
 exchanging a code with a PKCE verifier - has no stable, automatable surface
@@ -19,7 +19,7 @@ builds from `auth=...`:
 - the redirect-domain allow-list in /authorize rejects a disallowed redirect
   URI;
 - the MCP_OAUTH_PASSWORD gate is the interactive /consent page (LOCAL PATCH 5
-  in nextcloud_task_mcp/personal_auth.py - live testing against production
+  in nextcloud_organizer_mcp/personal_auth.py - live testing against production
   claude.ai showed the old `state`-carries-the-password check could never be
   satisfied by a real client): /authorize parks the request and redirects to
   the form without minting a code; the form enforces the password, a
@@ -45,8 +45,8 @@ import httpx
 import pytest
 from conftest import TEST_OAUTH_PASSWORD
 
-from nextcloud_task_mcp.caldav_client import CalDavService
-from nextcloud_task_mcp.server import build_server
+from nextcloud_organizer_mcp.caldav_client import CalDavService
+from nextcloud_organizer_mcp.server import build_server
 
 
 def _run(coro):
@@ -309,7 +309,7 @@ def test_consent_pending_key_is_single_use(app, settings):
 
 
 def test_consent_attempt_limit_invalidates_pending_key(app, settings):
-    from nextcloud_task_mcp.personal_auth import CONSENT_MAX_ATTEMPTS_PER_KEY
+    from nextcloud_organizer_mcp.personal_auth import CONSENT_MAX_ATTEMPTS_PER_KEY
 
     async def scenario():
         async with _http_client(app) as client:
@@ -338,7 +338,7 @@ def test_consent_ip_rate_limit_hard_rejects_even_correct_password(app, settings)
     # attempt limit alone would not stop password guessing - the per-IP
     # failure budget is the real backstop. httpx's ASGITransport presents all
     # requests from one client address, which is exactly what we need here.
-    from nextcloud_task_mcp.personal_auth import CONSENT_MAX_FAILURES_PER_IP
+    from nextcloud_organizer_mcp.personal_auth import CONSENT_MAX_FAILURES_PER_IP
 
     async def scenario():
         async with _http_client(app) as client:
@@ -366,8 +366,8 @@ def test_consent_ip_rate_limit_hard_rejects_even_correct_password(app, settings)
 def test_consent_pending_key_expires_after_ttl(app, settings, monkeypatch):
     from types import SimpleNamespace
 
-    from nextcloud_task_mcp import personal_auth
-    from nextcloud_task_mcp.personal_auth import CONSENT_PENDING_TTL_SECONDS
+    from nextcloud_organizer_mcp import personal_auth
+    from nextcloud_organizer_mcp.personal_auth import CONSENT_PENDING_TTL_SECONDS
 
     real_time = time.time()
 
@@ -421,7 +421,7 @@ def test_oauth_state_dir_permissions_enforced_even_if_dir_preexists(settings, tm
     # Path.mkdir(mode=...) is masked by the process umask and does not fix an
     # already-existing directory's permissions - PersonalAuthProvider must
     # chmod explicitly, not just pass mode= to mkdir.
-    from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
+    from nextcloud_organizer_mcp.personal_auth import PersonalAuthProvider
 
     state_dir = Path(settings.oauth_state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)

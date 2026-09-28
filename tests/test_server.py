@@ -12,18 +12,18 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastmcp.exceptions import ToolError
 
-from nextcloud_task_mcp import event_mapping, mapping
-from nextcloud_task_mcp.caldav_client import CalDavService
-from nextcloud_task_mcp.config import Settings
-from nextcloud_task_mcp.errors import (
+from nextcloud_organizer_mcp import event_mapping, mapping
+from nextcloud_organizer_mcp.caldav_client import CalDavService
+from nextcloud_organizer_mcp.config import Settings
+from nextcloud_organizer_mcp.errors import (
     CalendarNotFoundError,
     NoteNotFoundError,
     TaskListAlreadyExistsError,
     TaskListNotFoundError,
 )
-from nextcloud_task_mcp.notes_client import NotesService
-from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
-from nextcloud_task_mcp.server import build_server, main
+from nextcloud_organizer_mcp.notes_client import NotesService
+from nextcloud_organizer_mcp.personal_auth import PersonalAuthProvider
+from nextcloud_organizer_mcp.server import build_server, main
 
 
 def _run(coro):
@@ -1112,7 +1112,7 @@ def test_fields_whitelists_track_the_keys_the_parsers_actually_produce():
     """
     from icalendar import Event, Todo
 
-    from nextcloud_task_mcp.server import _EVENT_RESULT_KEYS, _TASK_RESULT_KEYS
+    from nextcloud_organizer_mcp.server import _EVENT_RESULT_KEYS, _TASK_RESULT_KEYS
 
     todo = Todo()
     todo.add("uid", "t1")
@@ -1521,7 +1521,7 @@ def test_respond_to_event_comment_defaults_to_none(tools, fake_service):
 
 
 def test_respond_to_event_not_an_attendee_becomes_clean_tool_error(tools, fake_service):
-    from nextcloud_task_mcp.errors import InvalidEventDataError
+    from nextcloud_organizer_mcp.errors import InvalidEventDataError
 
     fake_service.respond_to_event.side_effect = InvalidEventDataError(
         "You are not listed as an attendee of this event, so there is nothing to respond to."
@@ -1941,8 +1941,10 @@ def test_build_server_applies_shipped_default_timezone(settings, fake_service):
 
 def test_main_disables_uvicorn_access_log_and_passes_host_port(settings):
     with (
-        patch("nextcloud_task_mcp.server.Settings.from_env", return_value=settings) as from_env,
-        patch("nextcloud_task_mcp.server.FastMCP.run") as fastmcp_run,
+        patch(
+            "nextcloud_organizer_mcp.server.Settings.from_env", return_value=settings
+        ) as from_env,
+        patch("nextcloud_organizer_mcp.server.FastMCP.run") as fastmcp_run,
     ):
         main()
 

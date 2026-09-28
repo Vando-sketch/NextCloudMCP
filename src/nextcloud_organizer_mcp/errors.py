@@ -2,7 +2,7 @@
 
 These are deliberately separate from caldav/requests exceptions so that
 tool code never leaks raw stack traces or library internals to the MCP
-client - see :mod:`nextcloud_task_mcp.caldav_client` for the translation
+client - see :mod:`nextcloud_organizer_mcp.caldav_client` for the translation
 layer that converts library exceptions into these.
 """
 

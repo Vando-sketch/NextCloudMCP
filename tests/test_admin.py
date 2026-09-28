@@ -1,4 +1,4 @@
-"""Tests for the nextcloud-task-mcp-admin operator CLI (D5).
+"""Tests for the nextcloud-organizer-mcp-admin operator CLI (D5).
 
 `admin.py` is plain project code (unlike personal_auth.py) - normal ruff,
 mypy and coverage rules apply. These tests run it against a real
@@ -17,8 +17,8 @@ from pathlib import Path
 import pytest
 from conftest import TEST_OAUTH_PASSWORD, issue_token, run_async
 
-from nextcloud_task_mcp import admin
-from nextcloud_task_mcp.personal_auth import PersonalAuthProvider
+from nextcloud_organizer_mcp import admin
+from nextcloud_organizer_mcp.personal_auth import PersonalAuthProvider
 
 
 def _state_dir(tmp_path: Path) -> Path:

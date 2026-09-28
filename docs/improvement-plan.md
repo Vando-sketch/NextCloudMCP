@@ -175,7 +175,7 @@ patch log in `personal_auth.py`'s header current.
    `state_dir`, assert clients/tokens survive; corrupt `oauth_tokens.json` and
    assert graceful degradation. (E3)
 3. Bounded refresh-token lifetime (new setting, default e.g. 180 days) and a tiny
-   `nextcloud-task-mcp-admin` script (or documented procedure) to list/revoke
+   `nextcloud-organizer-mcp-admin` script (or documented procedure) to list/revoke
    entries in `oauth_tokens.json`. (D5)
 4. Dedicated test pinning the substring-vs-equality semantics of the password
    check, so any future change to it is deliberate. (D6)
@@ -196,7 +196,7 @@ Independent; can run in parallel with WP3/WP4 except where files overlap.
 2. Test that `main()` passes `uvicorn_config={"access_log": False}` (patch
    `FastMCP.run`). (E7)
 3. Add `pytest-cov` to dev deps; CI runs
-   `pytest --cov=src/nextcloud_task_mcp --cov-report=term-missing --cov-fail-under=80`
+   `pytest --cov=src/nextcloud_organizer_mcp --cov-report=term-missing --cov-fail-under=80`
    (raise the bar after WP4). (E5)
 4. Add `mypy` to dev deps with `[tool.mypy]` excluding the vendored
    `personal_auth.py` (mirroring the ruff exclude); add a CI step; fix any errors
@@ -210,7 +210,7 @@ Acceptance: CI green with coverage gate and mypy step on both matrix versions.
 
 Lowest priority; purely additive.
 
-1. `pyproject.toml`: `[project.urls]`, classifiers; add `src/nextcloud_task_mcp/py.typed`
+1. `pyproject.toml`: `[project.urls]`, classifiers; add `src/nextcloud_organizer_mcp/py.typed`
    and include it in the wheel. (E8)
 2. `.pre-commit-config.yaml` (ruff check --fix, ruff format, mypy) and a short
    CONTRIBUTING.md; start a CHANGELOG.md. (E10)
