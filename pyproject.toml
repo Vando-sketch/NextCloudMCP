@@ -16,7 +16,7 @@ classifiers = [
     "Topic :: Office/Business :: Scheduling",
 ]
 dependencies = [
-    "fastmcp>=2.9,<3",
+    "fastmcp>=2.9,<4",
     "caldav>=3.0,<4",
     "icalendar>=6.0,<8",
     # Already an indirect dependency via caldav (which uses it for its own
