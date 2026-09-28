@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="nextcloud-task-mcp logo" width="160">
+</p>
+
 # nextcloud-task-mcp
 
 An MCP server that manages tasks (VTODOs) and calendar events (VEVENTs) in a
