@@ -3,9 +3,25 @@
 All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This project does not yet follow Semantic Versioning releases.
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-09-28
+
+First public release.
+
+### Added
+
+- **Open-source release housekeeping.** `SECURITY.md` with a private
+  vulnerability-reporting process, Dependabot configuration for the uv lockfile
+  and GitHub Actions, and a release workflow that publishes to PyPI via trusted
+  publishing when a GitHub Release is published.
+
+### Removed
+
+- `docs/improvement-plan.md`, an internal review log that is not useful to
+  users.
 
 ### Changed
 
@@ -621,8 +637,7 @@ This project does not yet follow Semantic Versioning releases.
   stays disabled. During connector setup you now enter the password on that
   page instead of it (never) arriving via `state`.
 
-High-level summary of the improvement-plan work packages (see
-`docs/improvement-plan.md`) landed so far:
+High-level summary of the work packages from the initial code review:
 
 - **Security (WP1):** reject the placeholder `MCP_OAUTH_PASSWORD`; require a
   password on any non-local deployment; enforce `https://` on the CalDAV URL;
@@ -644,3 +659,6 @@ High-level summary of the improvement-plan work packages (see
   `CONTRIBUTING.md`, this changelog; `list_tasks` due-date/limit filtering;
   read-only `RRULE` surfacing; CalDAV rate-limit backoff; scheduled
   integration-test workflow.
+
+[Unreleased]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/releases/tag/v0.1.0
