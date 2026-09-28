@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="nextcloud-organizer-mcp logo" width="160">
+  <img src="https://raw.githubusercontent.com/Vando-sketch/nextcloud-organizer-mcp/main/assets/logo.svg" alt="nextcloud-organizer-mcp logo" width="160">
 </p>
 
 # nextcloud-organizer-mcp
@@ -24,6 +24,7 @@ Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, an
 - [Architecture](docs/architecture.md) — module layout, request flow, design decisions
 - [Contributing](CONTRIBUTING.md) — dev setup, checks to run, pre-commit, vendored-file rules
 - [Changelog](CHANGELOG.md) — notable changes by work package
+- [Security policy](SECURITY.md) — how to report vulnerabilities privately
 
 ## How it works
 
@@ -43,7 +44,14 @@ Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, an
 
 ## Setup
 
-Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.10+. Install the released package from PyPI:
+
+```bash
+uv tool install nextcloud-organizer-mcp   # or: pipx install nextcloud-organizer-mcp
+```
+
+and provide the environment variables below (see `.env.example`). Or run from a
+checkout with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync
