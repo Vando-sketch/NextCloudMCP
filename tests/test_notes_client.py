@@ -14,15 +14,15 @@ from typing import Any
 import httpx
 import pytest
 
-from nextcloud_task_mcp.errors import (
+from nextcloud_organizer_mcp.errors import (
     AuthenticationFailedError,
     ConnectionFailedError,
     InvalidNoteDataError,
     NoteNotFoundError,
     TaskMcpError,
 )
-from nextcloud_task_mcp.notes_client import NotesService
-from nextcloud_task_mcp.notes_mapping import NoteFields
+from nextcloud_organizer_mcp.notes_client import NotesService
+from nextcloud_organizer_mcp.notes_mapping import NoteFields
 
 
 def _run(coro: Any) -> Any:

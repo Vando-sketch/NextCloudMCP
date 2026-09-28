@@ -1,4 +1,4 @@
-"""FastMCP server exposing Nextcloud Tasks (CalDAV) as MCP tools."""
+"""FastMCP server exposing Nextcloud tasks, calendars and notes as MCP tools."""
 
 # No `from __future__ import annotations` here: with PEP 563 string annotations,
 # fastmcp (<3) rebuilds each tool function to resolve them and drops
@@ -261,7 +261,7 @@ def build_server(
         refresh_token_expiry_seconds=settings.oauth_refresh_token_expiry_seconds,
         state_dir=settings.oauth_state_dir,
     )
-    mcp = FastMCP(name="nextcloud-task-mcp", auth=auth)
+    mcp = FastMCP(name="nextcloud-organizer-mcp", auth=auth)
 
     caldav_service = service or CalDavService(
         url=settings.caldav_url,
