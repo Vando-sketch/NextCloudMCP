@@ -8,7 +8,7 @@ Funnel, with `tailscale funnel` terminating TLS in front of it.
 Claude (custom connector, cloud-side)
         │  HTTPS (Tailscale Funnel cert)
         ▼
-tailscale funnel  ──►  nextcloud-task-mcp (127.0.0.1:8000, plain HTTP)
+tailscale funnel  ──►  nextcloud-organizer-mcp (127.0.0.1:8000, plain HTTP)
                               │  HTTPS + app password
                               ▼
                       Nextcloud (CalDAV)
@@ -27,8 +27,8 @@ isolation from Tailscale is gone for this service.
 ```bash
 # as a dedicated user, e.g. "mcp"
 curl -LsSf https://astral.sh/uv/install.sh | sh   # install uv if not present
-git clone https://github.com/<your-user>/NextCloudTaskMCP.git
-cd NextCloudTaskMCP
+git clone https://github.com/<your-user>/nextcloud-organizer-mcp.git
+cd nextcloud-organizer-mcp
 uv sync --locked --no-dev
 ```
 
@@ -36,7 +36,7 @@ uv sync --locked --no-dev
 
 ## 2. Configure
 
-Create `/etc/nextcloud-task-mcp.env` (root-owned, mode `600` — it contains secrets):
+Create `/etc/nextcloud-organizer-mcp.env` (root-owned, mode `600` — it contains secrets):
 
 ```bash
 NEXTCLOUD_BASE_URL=https://cloud.example.com
@@ -60,7 +60,7 @@ MCP_OAUTH_PASSWORD=<long random value>
 
 # OAuth client/token state persists here across restarts - must be writable
 # by the "mcp" user. Matches the systemd StateDirectory set up below.
-MCP_OAUTH_STATE_DIR=/var/lib/nextcloud-task-mcp/oauth-state
+MCP_OAUTH_STATE_DIR=/var/lib/nextcloud-organizer-mcp/oauth-state
 
 MCP_HOST=127.0.0.1
 MCP_PORT=8000
@@ -103,20 +103,20 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 
 ## 3. systemd service
 
-`/etc/systemd/system/nextcloud-task-mcp.service`:
+`/etc/systemd/system/nextcloud-organizer-mcp.service`:
 
 ```ini
 [Unit]
-Description=Nextcloud Task MCP server
+Description=Organizer MCP for Nextcloud
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=mcp
-WorkingDirectory=/home/mcp/NextCloudTaskMCP
-EnvironmentFile=/etc/nextcloud-task-mcp.env
-ExecStart=/home/mcp/.local/bin/uv run --no-dev nextcloud-task-mcp
+WorkingDirectory=/home/mcp/nextcloud-organizer-mcp
+EnvironmentFile=/etc/nextcloud-organizer-mcp.env
+ExecStart=/home/mcp/.local/bin/uv run --no-dev nextcloud-organizer-mcp
 Restart=on-failure
 RestartSec=5
 
@@ -124,10 +124,10 @@ RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/mcp/NextCloudTaskMCP/.venv
-# Owned by "mcp", auto-created at /var/lib/nextcloud-task-mcp, writable even
+ReadWritePaths=/home/mcp/nextcloud-organizer-mcp/.venv
+# Owned by "mcp", auto-created at /var/lib/nextcloud-organizer-mcp, writable even
 # under ProtectSystem=strict. Holds the persisted OAuth client/token state.
-StateDirectory=nextcloud-task-mcp
+StateDirectory=nextcloud-organizer-mcp
 
 [Install]
 WantedBy=multi-user.target
@@ -135,8 +135,8 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now nextcloud-task-mcp
-sudo systemctl status nextcloud-task-mcp
+sudo systemctl enable --now nextcloud-organizer-mcp
+sudo systemctl status nextcloud-organizer-mcp
 ```
 
 ## 4. Expose via Tailscale Funnel
@@ -161,7 +161,7 @@ Make sure `PUBLIC_BASE_URL` in step 2 matches this URL exactly, then (re)start t
 service so it picks up the value:
 
 ```bash
-sudo systemctl restart nextcloud-task-mcp
+sudo systemctl restart nextcloud-organizer-mcp
 ```
 
 ## 5. Connect Claude
@@ -183,7 +183,7 @@ locally (opens a browser for one-time auth). Add to `claude_desktop_config.json`
 ```json
 {
   "mcpServers": {
-    "nextcloud-task-mcp": {
+    "nextcloud-organizer-mcp": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "https://<hostname>.<tailnet>.ts.net/mcp"]
     }
@@ -196,7 +196,7 @@ Requires Node.js.
 ### Claude Code
 
 ```bash
-claude mcp add nextcloud-task-mcp --transport http "https://<hostname>.<tailnet>.ts.net/mcp"
+claude mcp add nextcloud-organizer-mcp --transport http "https://<hostname>.<tailnet>.ts.net/mcp"
 ```
 
 ### Claude mobile (iOS/Android)
@@ -211,20 +211,20 @@ per authorized client for as long as they stay valid - by default, access tokens
 after `MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS` (30 days) and refresh tokens after
 `MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS` (180 days, see `.env.example`), but there is no
 built-in way to end a session early - e.g. after a lost device, or to confirm what's
-actually been issued. `nextcloud-task-mcp-admin` (installed alongside the server by `uv
+actually been issued. `nextcloud-organizer-mcp-admin` (installed alongside the server by `uv
 sync`) reads and edits `oauth_tokens.json` directly, without needing the server running:
 
 ```bash
 # List every issued access/refresh token (truncated - full values are never printed),
 # its client_id, and expiry. Defaults to $MCP_OAUTH_STATE_DIR, or .oauth-state/ if unset.
-nextcloud-task-mcp-admin --state-dir /var/lib/nextcloud-task-mcp/oauth-state list
+nextcloud-organizer-mcp-admin --state-dir /var/lib/nextcloud-organizer-mcp/oauth-state list
 
 # Revoke one token (and its paired access/refresh token) by prefix, as shown by `list`.
 # Claude will need to reconnect the connector (re-run the OAuth flow) afterwards.
-nextcloud-task-mcp-admin --state-dir /var/lib/nextcloud-task-mcp/oauth-state revoke pat_a1b2c3
+nextcloud-organizer-mcp-admin --state-dir /var/lib/nextcloud-organizer-mcp/oauth-state revoke pat_a1b2c3
 ```
 
-Stop the `nextcloud-task-mcp` service first if you want to be certain there's no
+Stop the `nextcloud-organizer-mcp` service first if you want to be certain there's no
 in-flight write racing the CLI's edit (both write the same file); the CLI itself always
 rewrites `oauth_tokens.json` atomically-enough for a single-operator workflow (open,
 truncate, write, `chmod 0600`), matching the permissions `PersonalAuthProvider` itself
@@ -233,11 +233,45 @@ uses.
 ## Updating
 
 ```bash
-cd ~/NextCloudTaskMCP
+cd ~/nextcloud-organizer-mcp
 git pull
 uv sync --locked --no-dev
-sudo systemctl restart nextcloud-task-mcp
+sudo systemctl restart nextcloud-organizer-mcp
 ```
+
+## Migrating from nextcloud-task-mcp
+
+The project used to be called `nextcloud-task-mcp`. The old
+`nextcloud-task-mcp` and `nextcloud-task-mcp-admin` commands are still
+installed as deprecated aliases, so an existing deployment keeps running after
+a plain `git pull && uv sync --locked --no-dev && sudo systemctl restart
+nextcloud-task-mcp`. To move it over to the new names (the OAuth state is kept,
+so Claude does not need to reconnect):
+
+```bash
+sudo systemctl disable --now nextcloud-task-mcp
+
+# Env file and persisted OAuth state
+sudo mv /etc/nextcloud-task-mcp.env /etc/nextcloud-organizer-mcp.env
+sudo mv /var/lib/nextcloud-task-mcp /var/lib/nextcloud-organizer-mcp
+sudo sed -i 's#/var/lib/nextcloud-task-mcp#/var/lib/nextcloud-organizer-mcp#' \
+    /etc/nextcloud-organizer-mcp.env
+
+# systemd unit: rename it, then point it at the new names
+sudo mv /etc/systemd/system/nextcloud-task-mcp.service \
+    /etc/systemd/system/nextcloud-organizer-mcp.service
+sudo sed -i 's/nextcloud-task-mcp/nextcloud-organizer-mcp/g' \
+    /etc/systemd/system/nextcloud-organizer-mcp.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now nextcloud-organizer-mcp
+journalctl -u nextcloud-organizer-mcp -n 20
+```
+
+The unit's `WorkingDirectory` and `ReadWritePaths` still point at the old
+checkout directory; that keeps working. To rename the checkout as well, `mv`
+it and update both lines before the `daemon-reload`. If the GitHub repository was
+renamed, `git remote set-url origin` to the new URL (GitHub also redirects the
+old one).
 
 ## Troubleshooting
 
@@ -252,5 +286,5 @@ sudo systemctl restart nextcloud-task-mcp
 | "Could not reach the Nextcloud server" | Nextcloud down, or the container can't resolve/route to it |
 | `tailscale funnel` refuses to start | Funnel not enabled for this node in the tailnet admin console (Settings → Funnel) |
 
-Server logs: `journalctl -u nextcloud-task-mcp -f`. Unexpected internal errors are logged
+Server logs: `journalctl -u nextcloud-organizer-mcp -f`. Unexpected internal errors are logged
 there with full tracebacks, while the MCP client only ever sees a short generic message.

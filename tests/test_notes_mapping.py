@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from nextcloud_task_mcp import mapping
-from nextcloud_task_mcp.notes_mapping import (
+from nextcloud_organizer_mcp import mapping
+from nextcloud_organizer_mcp.notes_mapping import (
     NoteFields,
     parse_note,
     parse_note_summary,

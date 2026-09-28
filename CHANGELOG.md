@@ -7,6 +7,17 @@ This project does not yet follow Semantic Versioning releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Renamed to `nextcloud-organizer-mcp`** ("Organizer MCP for Nextcloud").
+  The server long since covers calendars, events and notes, not just tasks, so
+  the old name `nextcloud-task-mcp` undersold it. The distribution, the Python
+  package (`nextcloud_organizer_mcp`), the CLI commands, the FastMCP server
+  name and the iCalendar `PRODID` all use the new name. The old
+  `nextcloud-task-mcp` / `nextcloud-task-mcp-admin` commands remain as
+  deprecated aliases so existing systemd units keep working; see "Migrating
+  from nextcloud-task-mcp" in `docs/deployment.md`.
+
 ### Added
 
 - **Project logo.** A cloud-with-checkmark logo in Nextcloud blue lives in
