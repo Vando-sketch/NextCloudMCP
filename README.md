@@ -1,14 +1,18 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="nextcloud-task-mcp logo" width="160">
+  <img src="assets/logo.svg" alt="nextcloud-organizer-mcp logo" width="160">
 </p>
 
-# nextcloud-task-mcp
+# nextcloud-organizer-mcp
 
-An MCP server that manages tasks (VTODOs) and calendar events (VEVENTs) in a
-self-hosted Nextcloud instance over CalDAV. Connect it to Claude as a custom
+**Organizer MCP for Nextcloud** - an MCP server that manages tasks (VTODOs) and
+calendar events (VEVENTs) over CalDAV, plus notes via the Nextcloud Notes app,
+in a self-hosted Nextcloud instance. Connect it to Claude as a custom
 connector to create, list, update and complete Nextcloud tasks, manage
 calendars and events (including recurring ones), link tasks to events
 (timeboxing), and get combined day agendas using natural language.
+
+This is a community project and is not affiliated with or endorsed by
+Nextcloud GmbH. (Formerly `nextcloud-task-mcp`.)
 
 Built with [FastMCP](https://gofastmcp.com) on the Streamable HTTP transport, and the
 [`caldav`](https://github.com/python-caldav/caldav) library for talking to Nextcloud.
@@ -70,7 +74,7 @@ Run the server:
 
 ```bash
 set -a; source .env; set +a
-uv run nextcloud-task-mcp
+uv run nextcloud-organizer-mcp
 ```
 
 It listens on `MCP_HOST:MCP_PORT` (default `127.0.0.1:8000`) at the `/mcp` path, using the
@@ -80,7 +84,7 @@ Streamable HTTP transport.
 
 The server authenticates MCP clients with **OAuth 2.1** (Dynamic Client Registration +
 PKCE), via [`PersonalAuthProvider`](https://github.com/crumrine/fastmcp-personal-auth) -
-vendored into [`src/nextcloud_task_mcp/personal_auth.py`](src/nextcloud_task_mcp/personal_auth.py)
+vendored into [`src/nextcloud_organizer_mcp/personal_auth.py`](src/nextcloud_organizer_mcp/personal_auth.py)
 since it ships as a single file to copy in, not an installable package. There is no
 static bearer token to configure.
 
@@ -129,7 +133,7 @@ registration endpoints once the server is public:
 **Local security patches.** The vendored `PersonalAuthProvider` carries five fixes for
 upstream issues found while building this integration, all confirmed by live
 reproduction against a running instance, not just by reading the code - see the "LOCAL
-PATCHES" note at the top of [`personal_auth.py`](src/nextcloud_task_mcp/personal_auth.py)
+PATCHES" note at the top of [`personal_auth.py`](src/nextcloud_organizer_mcp/personal_auth.py)
 for the full log. The most consequential: upstream's password check had a dead-code
 fallback that accepted *any* password (or none) as long as the redirect domain matched
 the allow-list, and its whole delivery mechanism - expecting the OAuth client to embed

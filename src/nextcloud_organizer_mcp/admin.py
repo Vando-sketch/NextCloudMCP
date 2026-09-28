@@ -1,6 +1,6 @@
 """Operator CLI for inspecting and revoking OAuth tokens (D5).
 
-`PersonalAuthProvider` (see nextcloud_task_mcp.personal_auth, vendored) has no
+`PersonalAuthProvider` (see nextcloud_organizer_mcp.personal_auth, vendored) has no
 built-in operator-facing revocation path: once a client is authorized, the
 only way to invalidate its tokens was to delete the whole state file (losing
 every other client's session too) or edit oauth_tokens.json by hand. This
@@ -17,9 +17,9 @@ keys. If that schema changes upstream, this module needs to change with it -
 there is no shared code path enforcing they stay in sync.
 
 Usage:
-    nextcloud-task-mcp-admin list
-    nextcloud-task-mcp-admin revoke <token-or-prefix>
-    nextcloud-task-mcp-admin --state-dir /var/lib/nextcloud-task-mcp/oauth-state list
+    nextcloud-organizer-mcp-admin list
+    nextcloud-organizer-mcp-admin revoke <token-or-prefix>
+    nextcloud-organizer-mcp-admin --state-dir /var/lib/nextcloud-organizer-mcp/oauth-state list
 """
 
 from __future__ import annotations
@@ -189,10 +189,10 @@ def cmd_revoke(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="nextcloud-task-mcp-admin",
+        prog="nextcloud-organizer-mcp-admin",
         description=(
             "Operator CLI for inspecting and revoking OAuth tokens issued by "
-            "nextcloud-task-mcp's PersonalAuthProvider."
+            "nextcloud-organizer-mcp's PersonalAuthProvider."
         ),
     )
     parser.add_argument(

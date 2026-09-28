@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from nextcloud_task_mcp.errors import InvalidNoteDataError
-from nextcloud_task_mcp.notes_sections import replace_section
+from nextcloud_organizer_mcp.errors import InvalidNoteDataError
+from nextcloud_organizer_mcp.notes_sections import replace_section
 
 DOC = (
     "# Title\n"

@@ -33,5 +33,5 @@ jobs:
 
       - name: Run unit tests
         run: |
-          uv run pytest -q --cov=src/nextcloud_task_mcp --cov-report=term-missing \
+          uv run pytest -q --cov=src/nextcloud_organizer_mcp --cov-report=term-missing \
             --cov-fail-under=90

@@ -18,13 +18,13 @@ before opening a PR:
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy src tests
-uv run pytest -q --cov=src/nextcloud_task_mcp --cov-report=term-missing --cov-fail-under=90
+uv run pytest -q --cov=src/nextcloud_organizer_mcp --cov-report=term-missing --cov-fail-under=90
 ```
 
 - `ruff check` / `ruff format --check` — lint and formatting.
-- `mypy src tests` — type checking. `src/nextcloud_task_mcp/personal_auth.py` is
+- `mypy src tests` — type checking. `src/nextcloud_organizer_mcp/personal_auth.py` is
   excluded (see "Vendored files" below).
-- The coverage gate (`--cov-fail-under=90`) applies to `src/nextcloud_task_mcp` as
+- The coverage gate (`--cov-fail-under=90`) applies to `src/nextcloud_organizer_mcp` as
   a whole, with `personal_auth.py` omitted from the measured set for the same
   reason it's excluded from mypy/ruff — see below. If a change drops coverage
   below 90%, add tests rather than lowering the gate.
@@ -47,7 +47,7 @@ pre-commit run --all-files   # optional: run against the whole tree now
 
 ## Vendored files
 
-`src/nextcloud_task_mcp/personal_auth.py` is vendored verbatim from
+`src/nextcloud_organizer_mcp/personal_auth.py` is vendored verbatim from
 [fastmcp-personal-auth](https://github.com/crumrine/fastmcp-personal-auth) (it
 ships as a single file to copy in, not an installable package), plus a small
 number of documented local security patches — see the "LOCAL PATCHES" header

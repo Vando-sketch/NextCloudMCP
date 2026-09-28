@@ -1884,7 +1884,7 @@ class CalDavService:
             mapping.apply_task_fields(todo, fields)
 
             vcal = Calendar()
-            vcal.add("prodid", "-//nextcloud-task-mcp//EN")
+            vcal.add("prodid", "-//nextcloud-organizer-mcp//EN")
             vcal.add("version", "2.0")
             _sync_vtimezones(vcal, todo)
             vcal.add_component(todo)
@@ -2713,7 +2713,7 @@ class CalDavService:
             event_mapping.apply_event_fields(event, fields, own_organizer=own_organizer)
 
             vcal = Calendar()
-            vcal.add("prodid", "-//nextcloud-task-mcp//EN")
+            vcal.add("prodid", "-//nextcloud-organizer-mcp//EN")
             vcal.add("version", "2.0")
             _sync_vtimezones(vcal, event)
             vcal.add_component(event)
@@ -4186,7 +4186,7 @@ class CalDavService:
                 raise _translate(exc) from exc
 
             merged = Calendar()
-            merged.add("prodid", "-//nextcloud-task-mcp//EN")
+            merged.add("prodid", "-//nextcloud-organizer-mcp//EN")
             merged.add("version", "2.0")
             seen_tzids: set[str] = set()
             for obj in list(events) + list(todos):
@@ -4246,7 +4246,7 @@ class CalDavService:
                     continue
 
                 sub_calendar = Calendar()
-                sub_calendar.add("prodid", "-//nextcloud-task-mcp//EN")
+                sub_calendar.add("prodid", "-//nextcloud-organizer-mcp//EN")
                 sub_calendar.add("version", "2.0")
                 for tz in timezones:
                     sub_calendar.add_component(tz)
