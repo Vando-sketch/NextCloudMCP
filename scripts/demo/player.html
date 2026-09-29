@@ -1,0 +1,65 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>nextcloud-organizer-mcp demo</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1117; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #win { width: 1180px; height: 660px; background: #161b22; border-radius: 12px; overflow: hidden;
+         box-shadow: 0 20px 60px #000a; display: flex; flex-direction: column;
+         font: 15px/1.5 "JetBrains Mono", "DejaVu Sans Mono", monospace; color: #c9d1d9; }
+  #bar { height: 38px; background: #21262d; display: flex; align-items: center; padding: 0 14px; gap: 8px; flex: none; }
+  #bar i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  #bar span { margin-left: 12px; color: #8b949e; font-size: 13px; }
+  #out { padding: 16px 22px; overflow: hidden; flex: 1; display: flex; flex-direction: column; justify-content: flex-end; white-space: pre-wrap; }
+  .you { color: #f0f6fc; margin-top: 14px; } .you b { color: #58a6ff; }
+  .call { color: #d2a8ff; margin-top: 6px; } .call em { color: #7ee787; font-style: normal; }
+  .res { color: #8b949e; margin-left: 18px; } .res .k { color: #79c0ff; } .res .s { color: #a5d6ff; }
+  .ok { color: #7ee787; } .cursor { display: inline-block; width: 9px; height: 17px; background: #c9d1d9; vertical-align: -3px; animation: b 1s steps(1) infinite; }
+  @keyframes b { 50% { opacity: 0 } }
+  #title { color: #f0f6fc; font-size: 22px; margin-bottom: 4px; }
+</style>
+<div id="win">
+  <div id="bar"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i>
+    <span>nextcloud-organizer-mcp — scripted client against a real Nextcloud</span></div>
+  <div id="out"></div>
+</div>
+<script>
+const out = document.getElementById('out');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+function line(cls, html) { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; out.appendChild(d); return d; }
+function pretty(v) {
+  const lines = JSON.stringify(v, null, 2).split('\n');
+  const cut = lines.length > 12 ? lines.slice(0, 11).concat(['  …']) : lines;
+  return cut.map(l => esc(l).replace(/^(\s*)"([^"]+)":/, '$1<span class="k">"$2"</span>:')
+                            .replace(/: "(.*)"(,?)$/, ': <span class="s">"$1"</span>$2')).join('\n');
+}
+function argstr(a) {
+  return Object.entries(a).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+}
+async function type(el, text, ms) { for (const ch of text) { el.insertAdjacentText('beforeend', ch); await sleep(ms); } }
+async function run() {
+  const t = await (await fetch('/assets/demo/transcript.json')).json();
+  await sleep(600);
+  for (const scene of t) {
+    out.replaceChildren();
+    const y = line('you', '<b>You ›</b> <span></span><span class="cursor"></span>');
+    await type(y.children[1], scene.prompt, 22);
+    y.querySelector('.cursor').remove();
+    await sleep(500);
+    for (const st of scene.steps) {
+      line('call', `▸ <em>${esc(st.tool)}</em>(${esc(argstr(st.args))})`);
+      await sleep(450);
+      line('res', pretty(st.result));
+      await sleep(1100);
+    }
+    line('ok', '✓ done');
+    await sleep(1600);
+  }
+  out.replaceChildren();
+  line('', '<div id="title">nextcloud-organizer-mcp</div>51 tools · tasks · calendars · notes · OAuth 2.1');
+  await sleep(2500);
+  document.title = 'done';
+}
+run();
+</script>
