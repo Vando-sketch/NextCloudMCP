@@ -1,0 +1,205 @@
+[
+  {
+    "prompt": "Set up a Work list and calendar, then add a high-priority task: finish the Q4 report by Thursday 5pm, remind me 2 hours before.",
+    "steps": [
+      {
+        "tool": "create_task_list",
+        "args": {
+          "display_name": "Work"
+        },
+        "result": {
+          "name": "Work"
+        }
+      },
+      {
+        "tool": "create_calendar",
+        "args": {
+          "display_name": "Work",
+          "color": "#0082c9"
+        },
+        "result": {
+          "name": "Work",
+          "color": "#0082c9"
+        }
+      },
+      {
+        "tool": "create_task",
+        "args": {
+          "list_name": "Work",
+          "title": "Finish Q4 report",
+          "due_date": "2026-10-01T17:00:00",
+          "priority": "high",
+          "tags": [
+            "report"
+          ],
+          "reminders": [
+            "-PT2H"
+          ]
+        },
+        "result": {
+          "uid": "ede57667…"
+        }
+      }
+    ]
+  },
+  {
+    "prompt": "Add a weekly team sync, Mondays 10:00 for 30 minutes.",
+    "steps": [
+      {
+        "tool": "create_event",
+        "args": {
+          "calendar_name": "Work",
+          "title": "Team sync",
+          "start": "2026-10-05T10:00:00",
+          "end": "2026-10-05T10:30:00",
+          "recurrence": "FREQ=WEEKLY;BYDAY=MO",
+          "location": "Room 4"
+        },
+        "result": {
+          "uid": "ce21f27a…",
+          "title": "Team sync",
+          "start": "2026-10-05T10:00:00+02:00",
+          "end": "2026-10-05T10:30:00+02:00",
+          "all_day": false,
+          "location": "Room 4",
+          "recurrence": "FREQ=WEEKLY;BYDAY=MO",
+          "calendar": "Work"
+        }
+      }
+    ]
+  },
+  {
+    "prompt": "Block Thursday 9-11 to work on the report.",
+    "steps": [
+      {
+        "tool": "list_tasks",
+        "args": {
+          "list_names": [
+            "Work"
+          ],
+          "search_text": "Q4",
+          "compact": true
+        },
+        "result": [
+          {
+            "uid": "ede57667…",
+            "title": "Finish Q4 report",
+            "due_date": "2026-10-01T17:00:00+02:00",
+            "priority": "high",
+            "progress_percent": 0,
+            "status": "open",
+            "tags": [
+              "report"
+            ],
+            "reminders": [
+              "-PT2H"
+            ],
+            "list": "Work"
+          }
+        ]
+      },
+      {
+        "tool": "create_event_from_task",
+        "args": {
+          "list_name": "Work",
+          "calendar_name": "Work",
+          "start": "2026-10-01T09:00:00",
+          "duration_minutes": 120,
+          "task_uid": "…"
+        },
+        "result": {
+          "uid": "36caaa5e…",
+          "task_uid": "ede57667…"
+        }
+      }
+    ]
+  },
+  {
+    "prompt": "What does my Thursday look like?",
+    "steps": [
+      {
+        "tool": "get_agenda",
+        "args": {
+          "date": "2026-10-01"
+        },
+        "result": {
+          "date": "2026-10-01",
+          "events": [
+            {
+              "uid": "36caaa5e…",
+              "title": "Finish Q4 report",
+              "start": "2026-10-01T09:00:00+02:00",
+              "end": "2026-10-01T11:00:00+02:00",
+              "all_day": false,
+              "tags": [
+                "report"
+              ],
+              "linked_tasks": [
+                {
+                  "uid": "ede57667…",
+                  "relation": "time_block"
+                }
+              ],
+              "calendar": "Work"
+            }
+          ],
+          "tasks": [
+            {
+              "uid": "ede57667…",
+              "title": "Finish Q4 report",
+              "due_date": "2026-10-01T17:00:00+02:00",
+              "priority": "high",
+              "progress_percent": 0,
+              "status": "open",
+              "tags": [
+                "report"
+              ],
+              "reminders": [
+                "-PT2H"
+              ],
+              "list": "Work"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "prompt": "Start a note for the Q4 report with an outline.",
+    "steps": [
+      {
+        "tool": "create_note",
+        "args": {
+          "title": "Q4 report",
+          "category": "Work",
+          "content": "# Q4 report\n\n## Status\nDraft not started.\n\n## Open questions\n- Which revenue figures are final?\n"
+        },
+        "result": {
+          "id": 80,
+          "title": "Q4 report",
+          "category": "Work",
+          "favorite": false,
+          "modified": "2026-09-29T15:43:45+02:00",
+          "content": "# Q4 report\n\n## Status\nDraft not started.\n\n## Open questions\n- Which revenue figures are final?\n",
+          "read_only": false
+        }
+      },
+      {
+        "tool": "update_note_section",
+        "args": {
+          "section": "## Status",
+          "content": "## Status\nOutline done, writing Thursday."
+        },
+        "result": {
+          "id": 80,
+          "title": "Q4 report",
+          "category": "Work",
+          "favorite": false,
+          "modified": "2026-09-29T15:43:46+02:00",
+          "content": "# Q4 report\n\n## Status\nOutline done, writing Thursday.\n\n## Open questions\n- Which revenue figures are final?\n",
+          "read_only": false
+        }
+      }
+    ]
+  }
+]

@@ -1,6 +1,6 @@
 """Integration tests against a real Nextcloud CalDAV instance.
 
-Skipped by default - see README.md for how to enable these locally.
+Skipped by default - see CONTRIBUTING.md for how to enable these locally.
 """
 
 from __future__ import annotations
