@@ -7,6 +7,38 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires FastMCP 4** (`fastmcp>=4,<5`, MCP Python SDK 2.x). The previous
+  range was `fastmcp>=2.9,<3`. Tool behaviour, the OAuth 2.1 flow (Dynamic
+  Client Registration, PKCE, the password-gated `/consent` page) and all
+  environment variables are unchanged. **No configuration or deployment change
+  is needed:** update as usual (`git pull`, `uv sync --locked --no-dev`,
+  restart), and connectors that are already connected in Claude stay connected -
+  the persisted `oauth_tokens.json` from 0.1.x keeps working. To stay on
+  FastMCP 2.x, pin `nextcloud-organizer-mcp<0.2`.
+- OAuth token errors for an invalid, expired or replayed grant (`invalid_grant`)
+  now return HTTP `401` instead of `400`, as the MCP specification requires
+  (behaviour of FastMCP 4).
+- Tool annotations are declared with the MCP SDK 2 keyword names
+  (`read_only_hint`, ...); what clients receive on the wire is unchanged.
+
+### Security
+
+- Clears the FastMCP advisories that affect `fastmcp < 3.2.0` (OpenAPI provider
+  SSRF, OAuth proxy confused-deputy, Gemini CLI command injection) from this
+  package's dependency range. The affected features are not used by this
+  server, but installs no longer resolve a vulnerable version.
+- `diskcache` (unfixed pickle-deserialization advisory) is no longer installed;
+  it was pulled in by `fastmcp[disk]` on FastMCP 2.x.
+
+### Added
+
+- Real-HTTP OAuth end-to-end tests (`tests/test_oauth_e2e.py`) covering
+  discovery, registration, PKCE, the consent page, token exchange and refresh,
+  an authenticated MCP session on both the current and the previous (2025-06-18)
+  protocol version, restart persistence, and a state file written by 0.1.1.
+
 ## [0.1.1] - 2026-09-29
 
 ### Security

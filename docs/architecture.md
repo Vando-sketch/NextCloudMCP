@@ -147,9 +147,11 @@ and docs stay English.
   real server, no real network). They assert `/mcp` rejects missing/invalid tokens, the
   OAuth discovery and DCR endpoints Claude's connector flow depends on are exposed, and
   the redirect-domain gate in `/authorize` actually blocks a disallowed redirect URI.
-  Driving the full interactive OAuth+PKCE flow end-to-end isn't practical in an
-  automated test (it requires a browser redirect round-trip), so these tests target the
-  middleware boundary instead - see the module docstring for the full rationale.
+  The full flow is covered separately by `tests/test_oauth_e2e.py`, which serves the
+  real app with uvicorn on an ephemeral port and drives discovery, DCR, `/authorize` with
+  PKCE, the `/consent` page, `/token`, refresh rotation and an authenticated `/mcp`
+  session (current and 2025-06-18 protocol), plus restart persistence and a state file
+  in the 0.1.1 format.
 - **Integration tests** (`tests/test_integration.py`): full create→list→update→complete→
   delete lifecycle against a real Nextcloud instance; skipped unless
   `RUN_INTEGRATION_TESTS=1`. See the README for how to run them.
