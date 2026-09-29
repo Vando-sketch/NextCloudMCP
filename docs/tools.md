@@ -1733,6 +1733,20 @@ already has content). Implemented as a read-then-write — the Notes API has
 no atomic append — so a concurrent edit to the same note between the two may
 be lost. Returns the updated note, same shape as `get_note`.
 
+### `replace_in_note(note_id, old_text, new_text)`
+
+Patches one passage of a note's content. `old_text` must match the content
+**exactly once** — zero matches or more than one is an error and writes
+nothing — and is then replaced by `new_text`. Returns the updated note, same
+shape as `get_note`.
+
+### `update_note_section(note_id, section, content)`
+
+Replaces one Markdown section: an ATX heading plus its body, up to the next
+heading of the same or higher level. `section` selects it by a heading
+prefix such as `"## 7."`; `content` is the replacement and includes the
+heading line itself. Returns the updated note, same shape as `get_note`.
+
 ### `search_notes(search_text, category=None)`
 
 Case-insensitive substring search over title and content. The Notes API has
@@ -1898,4 +1912,4 @@ All failures come back as short, single-line MCP tool errors, for example:
 - `Could not parse ics: ...` — malformed ICS text; the message includes the parser's detail.
 
 Requests without a valid OAuth access token are rejected earlier, at the HTTP level
-(`401`), before reaching tool logic — see [Authentication](../README.md#authentication).
+(`401`), before reaching tool logic — see [Authentication](authentication.md).

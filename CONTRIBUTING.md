@@ -1,5 +1,11 @@
 # Contributing
 
+## Branches
+
+- `main` is the released state and the default branch. Do not commit to it directly.
+- `dev` is where work happens. Branch from `dev`, open PRs against `dev`.
+- Releases are cut by merging `dev` into `main` and tagging `main`.
+
 ## Setup
 
 Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
@@ -29,10 +35,26 @@ uv run pytest -q --cov=src/nextcloud_organizer_mcp --cov-report=term-missing --c
   reason it's excluded from mypy/ruff — see below. If a change drops coverage
   below 90%, add tests rather than lowering the gate.
 
-Integration tests against a real Nextcloud instance are skipped by default and
-not part of the above; see the "Testing" section of [README.md](README.md) for
-how to run them locally, and `.github/workflows/integration.yml` for how CI runs
-them on a schedule.
+## Integration tests
+
+Unit tests mock the `caldav` library and the Notes REST API (via
+`httpx.MockTransport`) entirely - no network access, no real Nextcloud instance
+required. Integration tests exercise the full flow against a real Nextcloud
+instance (create, list, update, complete, delete a task in a disposable test
+list) and are skipped by default. To run them:
+
+```bash
+export RUN_INTEGRATION_TESTS=1
+export NEXTCLOUD_CALDAV_URL=... NEXTCLOUD_USERNAME=... NEXTCLOUD_APP_PASSWORD=...
+export NEXTCLOUD_BASE_URL=https://cloud.example.com  # required by the Notes tests
+export INTEGRATION_TEST_LIST="Test"   # an existing task list; tasks are created/deleted in it
+uv run pytest -q
+```
+
+`.github/workflows/integration.yml` runs these on a weekly schedule (and on manual
+dispatch) against a disposable `nextcloud` Docker container, so this path is
+exercised against a real server periodically even though it's excluded from
+per-PR CI.
 
 ## pre-commit
 
