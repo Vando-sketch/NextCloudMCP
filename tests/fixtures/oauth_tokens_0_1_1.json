@@ -1,0 +1,44 @@
+{
+  "clients": {
+    "legacy-client": {
+      "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+      "token_endpoint_auth_method": "none",
+      "grant_types": ["authorization_code", "refresh_token"],
+      "response_types": ["code"],
+      "scope": null,
+      "client_name": "Claude",
+      "client_uri": null,
+      "logo_uri": null,
+      "contacts": null,
+      "tos_uri": null,
+      "policy_uri": null,
+      "jwks_uri": null,
+      "jwks": null,
+      "software_id": null,
+      "software_version": null,
+      "client_id": "legacy-client",
+      "client_secret": null,
+      "client_id_issued_at": null,
+      "client_secret_expires_at": null
+    }
+  },
+  "access_tokens": {
+    "pat_legacy_access_token": {
+      "token": "pat_legacy_access_token",
+      "client_id": "legacy-client",
+      "scopes": [],
+      "expires_at": 4102444800,
+      "resource": null
+    }
+  },
+  "refresh_tokens": {
+    "prt_legacy_refresh_token": {
+      "token": "prt_legacy_refresh_token",
+      "client_id": "legacy-client",
+      "scopes": [],
+      "expires_at": 4102444800
+    }
+  },
+  "a2r": {"pat_legacy_access_token": "prt_legacy_refresh_token"},
+  "r2a": {"prt_legacy_refresh_token": "pat_legacy_access_token"}
+}
