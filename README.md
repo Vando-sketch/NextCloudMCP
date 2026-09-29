@@ -43,11 +43,13 @@ to it over standard CalDAV and the Notes REST API.
 What Claude wrote shows up in the normal Nextcloud apps, immediately:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/calendar.png" alt="Nextcloud Calendar showing the 9-11 time block and the task deadline" width="49%">
-  <img src="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/tasks.png" alt="Nextcloud Tasks showing the high-priority task with its tag and due date" width="49%">
+  <img src="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/calendar.png" alt="Nextcloud Calendar showing the 9-11 time block and the task deadline" width="820">
 </p>
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/notes.png" alt="Nextcloud Notes showing the note after a single-section update" width="49%">
+  <img src="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/tasks.png" alt="Nextcloud Tasks showing the high-priority task with its tag and due date" width="820">
+</p>
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/notes.png" alt="Nextcloud Notes showing the note after a single-section update" width="820">
 </p>
 
 <!-- Slot for real Claude chat recordings (web + mobile): see assets/demo/README.md for the shot list. -->
@@ -66,8 +68,9 @@ What Claude wrote shows up in the normal Nextcloud apps, immediately:
 
 | Client | Status |
 |---|---|
-| Claude (claude.ai web, mobile, Cowork) as a custom connector | Supported and tested |
-| Claude Desktop via [`mcp-remote`](https://github.com/geelen/mcp-remote) | Supported, see the [deployment guide](docs/deployment.md#5-connect-claude) |
+| Claude (claude.ai web) as a custom connector | Supported, connector and consent flow tested against claude.ai |
+| Claude mobile and Cowork | Use the same connector as web; not tested separately |
+| Claude Desktop via [`mcp-remote`](https://github.com/geelen/mcp-remote) | Documented in the [deployment guide](docs/deployment.md#5-connect-claude) |
 | Other MCP clients and model providers | Not tested yet, planned |
 
 The server speaks standard Streamable HTTP MCP with OAuth 2.1 (Dynamic Client
@@ -90,8 +93,8 @@ your account password), then set:
 NEXTCLOUD_BASE_URL=https://cloud.example.com
 NEXTCLOUD_USERNAME=your-username
 NEXTCLOUD_APP_PASSWORD=your-app-password
-PUBLIC_BASE_URL=https://your-host.your-tailnet.ts.net   # exactly what clients will use
-MCP_OAUTH_PASSWORD=a-long-random-password               # required for any non-local PUBLIC_BASE_URL
+PUBLIC_BASE_URL=https://your-host.ts.net   # the URL clients use
+MCP_OAUTH_PASSWORD=a-long-random-password  # required unless local
 ```
 
 ```bash

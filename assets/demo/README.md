@@ -34,10 +34,14 @@ python3 -m http.server 8099 &
 uv run --with playwright python scripts/demo/record.py /tmp/demo-out
 
 # 4. Convert (H.264 needs an ffmpeg build with libx264 or libopenh264)
-ffmpeg -ss 0.4 -i /tmp/demo-out/demo.webm -c:v libopenh264 -b:v 900k -pix_fmt yuv420p -movflags +faststart assets/demo/demo.mp4
-ffmpeg -ss 0.4 -i /tmp/demo-out/demo.webm \
+ffmpeg -i /tmp/demo-out/demo.webm -c:v libopenh264 -b:v 900k -pix_fmt yuv420p -movflags +faststart assets/demo/demo.mp4
+ffmpeg -i /tmp/demo-out/demo.webm \
   -vf "fps=8,scale=880:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=64[p];[b][p]paletteuse=dither=none" assets/demo/demo.gif
 ```
+
+The screenshots are cropped after capture (calendar `crop=1280:700:0:0`, tasks
+`crop=1280:230:0:0`, notes `crop=1280:340:0:0`). The replay itself only reads
+`transcript.json`, so `record.py --video-only` re-records it without a Nextcloud.
 
 Run the demo once per fresh Nextcloud: the scenes create a `Work` list and
 calendar, so a second run fails on the name.

@@ -4,7 +4,9 @@
     uv run --with playwright python scripts/demo/record.py /tmp/demo-out
 
 Needs the demo Nextcloud from run_demo.py on localhost:8088 (login demo /
-demo-pass-2026). Writes demo.webm plus PNG screenshots into the output dir.
+demo-pass-2026). Writes demo.webm plus PNG screenshots into the output dir. Pass
+--video-only to skip the screenshots (and the Nextcloud requirement): the replay
+only reads transcript.json.
 """
 
 from __future__ import annotations
@@ -71,10 +73,11 @@ def main(out_dir: str) -> None:
     out.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch()
-        screenshots(browser, out)
+        if "--video-only" not in sys.argv:
+            screenshots(browser, out)
         record(browser, out)
         browser.close()
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "demo-out")
+    main(next((a for a in sys.argv[1:] if not a.startswith("--")), "demo-out"))
