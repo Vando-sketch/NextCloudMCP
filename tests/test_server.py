@@ -489,12 +489,11 @@ def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
 def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
     """A parameter with a Python default must be optional in the client schema.
 
-    fastmcp (<3) rebuilds tool functions whose annotations are PEP 563 strings
-    (`from __future__ import annotations`) and loses `__kwdefaults__` doing it,
-    so every keyword-only parameter turns required-but-nullable - and clients
-    that then pass an explicit null can trip over it. server.py therefore must
-    not use the future import; this test fails on every affected tool at once
-    if it comes back.
+    FastMCP 2.x rebuilt tool functions whose annotations are PEP 563 strings
+    (`from __future__ import annotations`) and lost `__kwdefaults__` doing it,
+    so every keyword-only parameter turned required-but-nullable - and clients
+    that then passed an explicit null could trip over it. FastMCP 4 fixed this;
+    this test fails on every affected tool at once if it ever comes back.
     """
     offenders = []
     for tool_name, tool in tools.items():

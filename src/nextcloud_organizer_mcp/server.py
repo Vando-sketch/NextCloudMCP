@@ -1,9 +1,9 @@
 """FastMCP server exposing Nextcloud tasks, calendars and notes as MCP tools."""
 
-# No `from __future__ import annotations` here: with PEP 563 string annotations,
-# fastmcp (<3) rebuilds each tool function to resolve them and drops
-# `__kwdefaults__` in the process, so every keyword-only parameter loses its
-# default and is marked required in the MCP schema clients see.
+# FastMCP 2.x dropped `__kwdefaults__` when it rebuilt tool functions to resolve
+# PEP 563 string annotations (`from __future__ import annotations`), marking
+# every keyword-only parameter required in the MCP schema clients see. FastMCP 4
+# no longer does; the schema test in tests/test_server.py still guards it.
 
 import functools
 import logging
