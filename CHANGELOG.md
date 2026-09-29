@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- `server.json` and an `mcp-name` marker in the README, so the package can be
+  listed in the official MCP Registry.
+- Code of conduct, issue forms (bug, feature, client compatibility report) and
+  a pull request template.
+
 ## [0.2.0] - 2026-09-29
 
 ### Changed

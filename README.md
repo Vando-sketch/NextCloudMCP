@@ -23,6 +23,8 @@
   <a href="https://raw.githubusercontent.com/Vando-sketch/Nextcloud-Organizer-MCP/main/assets/demo/demo.mp4">watch as video</a></sub>
 </p>
 
+<!-- mcp-name: io.github.Vando-sketch/nextcloud-organizer-mcp -->
+
 Ask in plain language, and your own Nextcloud changes. No copy-paste, no
 third-party calendar service: the data stays on your server and the tools talk
 to it over standard CalDAV and the Notes REST API.

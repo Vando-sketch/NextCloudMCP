@@ -1,0 +1,26 @@
+name: Client compatibility report
+description: Tell us how the server works with an MCP client other than Claude
+labels: [compatibility]
+body:
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      placeholder: "e.g. ChatGPT connectors, Cursor, Open WebUI, MCP Inspector"
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works
+        - Works with changes (describe below)
+        - Does not work
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Which settings you needed (e.g. MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS) and any errors.
