@@ -105,7 +105,7 @@
 #        password). Failed attempts do NOT consume the pending key below the
 #        limit. Form data is never logged and never echoed into responses
 #        (this deployment already disables Uvicorn's access log - see
-#        README > Authentication - and the consent handlers keep that
+#        docs/authentication.md - and the consent handlers keep that
 #        guarantee: nothing the user types leaves the comparison).
 #      - The routes are contributed by overriding FastMCP's
 #        OAuthProvider.get_routes() hook, which the framework calls to
@@ -491,7 +491,7 @@ password (<code>MCP_OAUTH_PASSWORD</code>) to approve it.</p>
 
         Never log or echo the submitted form data anywhere in here: the whole
         point of this deployment's logging setup (access log disabled, see
-        README > Authentication) is that MCP_OAUTH_PASSWORD ends up in no log
+        docs/authentication.md) is that MCP_OAUTH_PASSWORD ends up in no log
         file.
         """
         self._prune_pending()

@@ -19,7 +19,7 @@ src/nextcloud_organizer_mcp/
    `build_server`) requires a valid OAuth `Authorization: Bearer <access-token>` header,
    issued through the provider's `/register` → `/authorize` → `/token` flow. On a
    missing/invalid/expired token it returns `401` before tool logic or CalDAV is ever
-   reached. See the [README](../README.md#authentication) for the full auth model.
+   reached. See the [Authentication](authentication.md) for the full auth model.
 3. The (async) tool function in `server.py` forwards to `CalDavService` through `_call()`,
    which runs the blocking CalDAV call in a worker thread (`anyio.to_thread.run_sync`) so
    it never stalls the asyncio event loop for other clients, and translates any
@@ -72,7 +72,7 @@ patches in total (dead-code password bypass, `scope` password channel, state-fil
 permissions, bounded refresh-token expiry, the consent page replacing the
 never-satisfiable `state`-carries-the-password check) - see the "LOCAL PATCHES" note at
 the top of `personal_auth.py`, and
-[README > Authentication](../README.md#authentication) for the full writeup (all
+[Authentication](authentication.md) for the full writeup (all
 confirmed by live reproduction, not just code review). `server.py` also disables
 Uvicorn's default HTTP access log: the password itself only travels in the `/consent`
 POST body, but the default log format would still record the single-use pending keys
@@ -154,4 +154,4 @@ and docs stay English.
   in the 0.1.1 format.
 - **Integration tests** (`tests/test_integration.py`): full create→list→update→complete→
   delete lifecycle against a real Nextcloud instance; skipped unless
-  `RUN_INTEGRATION_TESTS=1`. See the README for how to run them.
+  `RUN_INTEGRATION_TESTS=1`. See [CONTRIBUTING](../CONTRIBUTING.md#integration-tests) for how to run them.
