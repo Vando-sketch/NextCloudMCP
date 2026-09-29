@@ -2075,3 +2075,44 @@ def test_annotations_survive_the_mcp_wire_format(tools):
     mcp_tool = tools["list_events"].to_mcp_tool(name="list_events")
     assert mcp_tool.annotations is not None
     assert mcp_tool.annotations.read_only_hint is True
+
+
+def test_annotation_hints_use_camelcase_keys_on_the_wire_for_every_tool(tools):
+    # Claude decides approval prompts from these keys. The Python attributes are
+    # snake_case (MCP SDK 2), so check what a client actually receives: the
+    # camelCase JSON aliases, all four hints for a writer, two for a reader.
+    for name, tool in tools.items():
+        wire = tool.to_mcp_tool(name=name).model_dump(by_alias=True, exclude_none=True)
+        hints = wire["annotations"]
+        assert set(hints) <= {
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        }, f"{name}: {sorted(hints)}"
+        assert hints["openWorldHint"] is True, name
+        if hints["readOnlyHint"]:
+            assert set(hints) == {"readOnlyHint", "openWorldHint"}, name
+        else:
+            assert set(hints) == {
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            }, name
+
+
+def test_tool_descriptions_are_the_full_docstring(tools):
+    """Clients must receive each tool's whole docstring as its description.
+
+    FastMCP 4 parses Google-style docstrings and, left alone, keeps only the
+    summary line as the description (the Args entries become schema property
+    descriptions, everything else - Returns:, notes after Args - is dropped).
+    These docstrings document result keys and date/timezone semantics that a
+    model needs, so build_server passes the full text explicitly.
+    """
+    truncated = [
+        name for name, tool in tools.items() if tool.description != inspect.getdoc(tool.fn)
+    ]
+    assert not truncated, truncated
+    assert "Returns:" in (tools["list_events"].description or "")

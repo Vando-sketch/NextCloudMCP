@@ -6,7 +6,9 @@
 # no longer does; the schema test in tests/test_server.py still guards it.
 
 import functools
+import inspect
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -263,6 +265,21 @@ def build_server(
     )
     mcp = FastMCP(name="nextcloud-organizer-mcp", auth=auth)
 
+    def tool(*, annotations: ToolAnnotations) -> Callable[[Callable[..., Any]], Any]:
+        """`mcp.tool` with the full docstring as the tool description.
+
+        FastMCP 4 parses Google-style docstrings and keeps only the summary line
+        as the description, turning the Args entries into schema property
+        descriptions and dropping Returns: and everything after Args:. Those
+        sections tell a model what a result contains and how dates and
+        timezones are read, so pass the whole docstring, as FastMCP 2 did.
+        """
+
+        def register(fn: Callable[..., Any]) -> Any:
+            return mcp.tool(annotations=annotations, description=inspect.getdoc(fn))(fn)
+
+        return register
+
     caldav_service = service or CalDavService(
         url=settings.caldav_url,
         username=settings.caldav_username,
@@ -278,7 +295,7 @@ def build_server(
         timeout=settings.caldav_timeout_seconds,
     )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_task_lists() -> list[dict[str, str]]:
         """List all available Nextcloud task lists.
 
@@ -287,7 +304,7 @@ def build_server(
         """
         return await _call(caldav_service.list_task_lists)
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_task_list(display_name: str) -> dict[str, str]:
         """Create a new Nextcloud task list (a CalDAV calendar collection supporting VTODO).
 
@@ -304,7 +321,7 @@ def build_server(
         """
         return await _call(caldav_service.create_task_list, display_name)
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_task_list(list_name: str) -> dict[str, str]:
         """Permanently delete a Nextcloud task list and every task inside it.
 
@@ -321,7 +338,7 @@ def build_server(
         await _call(caldav_service.delete_task_list, list_name)
         return {"list_name": list_name}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def rename_task_list(list_name: str, new_display_name: str) -> dict[str, str]:
         """Rename a Nextcloud task list. Only its display name changes, not its URL/id.
 
@@ -337,7 +354,7 @@ def build_server(
         """
         return await _call(caldav_service.rename_task_list, list_name, new_display_name)
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_tasks(
         list_names: list[str] | None = None,
         only_open: bool = True,
@@ -502,7 +519,7 @@ def build_server(
             compact_drop=frozenset({"list_url"}),
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def get_task(list_name: str, task_uid: str) -> dict[str, Any]:
         """Fetch a single task by UID, without listing the whole task list.
 
@@ -519,7 +536,7 @@ def build_server(
         """
         return await _call(caldav_service.get_task, list_name, task_uid)
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_task(
         list_name: str,
         title: str,
@@ -619,7 +636,7 @@ def build_server(
         new_uid = await _call(caldav_service.create_task, list_name, fields)
         return {"uid": new_uid}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_task(
         list_name: str,
         task_uid: str,
@@ -701,7 +718,7 @@ def build_server(
         await _call(caldav_service.update_task, list_name, task_uid, fields)
         return {"uid": task_uid}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def complete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Mark a task as completed (sets STATUS, PERCENT-COMPLETE and COMPLETED timestamp).
 
@@ -725,7 +742,7 @@ def build_server(
         await _call(caldav_service.complete_task, list_name, task_uid)
         return {"uid": task_uid}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_task(list_name: str, task_uid: str) -> dict[str, str]:
         """Permanently delete a task.
 
@@ -739,7 +756,7 @@ def build_server(
         await _call(caldav_service.delete_task, list_name, task_uid)
         return {"uid": task_uid}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def move_task(
         list_name: str,
         task_uid: str,
@@ -801,7 +818,7 @@ def build_server(
         )
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_tasks(
         list_name: str,
         task_uids: list[str],
@@ -869,7 +886,7 @@ def build_server(
         res: dict[str, Any] = await _call(caldav_service.update_tasks, list_name, task_uids, fields)
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_tasks(list_name: str, task_uids: list[str]) -> dict[str, Any]:
         """Permanently delete multiple tasks from a task list.
 
@@ -893,7 +910,7 @@ def build_server(
         res: dict[str, Any] = await _call(caldav_service.delete_tasks, list_name, task_uids)
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def move_tasks(list_name: str, task_uids: list[str], target_list: str) -> dict[str, Any]:
         """Move several tasks to a different task list.
 
@@ -926,7 +943,7 @@ def build_server(
         )
         return res
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_calendars() -> list[dict[str, Any]]:
         """List all Nextcloud event calendars (VEVENT); task-only lists are excluded.
 
@@ -937,7 +954,7 @@ def build_server(
         """
         return await _call(caldav_service.list_calendars)
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_calendar(display_name: str, color: str | None = None) -> dict[str, Any]:
         """Create a new Nextcloud event calendar (a CalDAV collection supporting VEVENT).
 
@@ -953,7 +970,7 @@ def build_server(
         """
         return await _call(caldav_service.create_calendar, display_name, color)
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_calendar(calendar_name: str) -> dict[str, str]:
         """Permanently delete an event calendar and every event inside it.
 
@@ -970,7 +987,7 @@ def build_server(
         await _call(caldav_service.delete_calendar, calendar_name)
         return {"calendar_name": calendar_name}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_calendar(
         calendar_name: str,
         new_display_name: str | None = None,
@@ -991,7 +1008,7 @@ def build_server(
         """
         return await _call(caldav_service.update_calendar, calendar_name, new_display_name, color)
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_events(
         calendar_names: list[str] | None = None,
         start: str | None = None,
@@ -1125,7 +1142,7 @@ def build_server(
             detail_tool="get_event",
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def get_event(calendar_name: str, event_uid: str) -> dict[str, Any]:
         """Fetch a single event by UID.
 
@@ -1138,7 +1155,7 @@ def build_server(
         """
         return await _call(caldav_service.get_event, calendar_name, event_uid)
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_event(
         calendar_name: str,
         title: str,
@@ -1228,7 +1245,7 @@ def build_server(
         event: dict[str, Any] = await _call(caldav_service.get_event, calendar_name, new_uid)
         return event
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_birthday(
         name: str,
         date: str,
@@ -1303,7 +1320,7 @@ def build_server(
         event: dict[str, Any] = await _call(caldav_service.get_event, target, new_uid)
         return event
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_event(
         calendar_name: str,
         event_uid: str,
@@ -1375,7 +1392,7 @@ def build_server(
         event: dict[str, Any] = await _call(caldav_service.get_event, calendar_name, event_uid)
         return event
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_event(calendar_name: str, event_uid: str) -> dict[str, str]:
         """Permanently delete an event.
 
@@ -1389,7 +1406,7 @@ def build_server(
         await _call(caldav_service.delete_event, calendar_name, event_uid)
         return {"uid": event_uid}
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_events(
         calendar_name: str,
         event_uids: list[str],
@@ -1449,7 +1466,7 @@ def build_server(
         )
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_exdates(
         calendar_name: str,
         event_uids: list[str],
@@ -1512,7 +1529,7 @@ def build_server(
         # they come, so there is nothing to translate here.
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_events(calendar_name: str, event_uids: list[str]) -> dict[str, Any]:
         """Permanently delete multiple events from a calendar.
 
@@ -1536,7 +1553,7 @@ def build_server(
         res: dict[str, Any] = await _call(caldav_service.delete_events, calendar_name, event_uids)
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def move_event(
         calendar_name: str,
         event_uid: str,
@@ -1578,7 +1595,7 @@ def build_server(
         )
         return res
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def respond_to_event(
         calendar_name: str,
         event_uid: str,
@@ -1608,7 +1625,7 @@ def build_server(
         await _call(caldav_service.respond_to_event, calendar_name, event_uid, response, comment)
         return {"uid": event_uid, "response": response}
 
-    @mcp.tool(annotations=_ADD)
+    @tool(annotations=_ADD)
     async def link_task_to_event(
         list_name: str,
         task_uid: str,
@@ -1648,7 +1665,7 @@ def build_server(
         )
         return {"task_uid": task_uid, "event_uid": event_uid, "relation": relation}
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_events_for_task(
         list_name: str,
         task_uid: str,
@@ -1679,7 +1696,7 @@ def build_server(
             calendar_names=calendar_names,
         )
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_event_from_task(
         list_name: str,
         task_uid: str,
@@ -1740,7 +1757,7 @@ def build_server(
         )
         return {"uid": new_uid, "task_uid": task_uid}
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def get_agenda(
         date: str,
         calendar_names: list[str] | None = None,
@@ -1779,7 +1796,7 @@ def build_server(
             list_names=list_names,
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_tags(
         calendar_names: list[str] | None = None,
         list_names: list[str] | None = None,
@@ -1810,7 +1827,7 @@ def build_server(
             list_names=list_names,
         )
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def get_free_busy(
         start: str,
         end: str,
@@ -1844,7 +1861,7 @@ def build_server(
         """
         return await _call(caldav_service.get_free_busy, start, end, user)
 
-    @mcp.tool(annotations=_ADD)
+    @tool(annotations=_ADD)
     async def share_calendar(
         calendar_name: str,
         recipient: str,
@@ -1875,7 +1892,7 @@ def build_server(
             caldav_service.share_calendar, calendar_name, recipient, group, write_access
         )
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def unshare_calendar(
         calendar_name: str,
         recipient: str,
@@ -1898,7 +1915,7 @@ def build_server(
         await _call(caldav_service.unshare_calendar, calendar_name, recipient, group)
         return {"calendar_name": calendar_name, "recipient": recipient}
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_calendar_shares(calendar_name: str) -> list[dict[str, Any]]:
         """List everyone a task list or event calendar is currently shared with.
 
@@ -1914,7 +1931,7 @@ def build_server(
         """
         return await _call(caldav_service.list_calendar_shares, calendar_name)
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_trash() -> list[dict[str, Any]]:
         """List deleted tasks/events in Nextcloud's calendar trash bin.
 
@@ -1931,7 +1948,7 @@ def build_server(
         """
         return await _call(caldav_service.list_trash)
 
-    @mcp.tool(annotations=_ADD)
+    @tool(annotations=_ADD)
     async def restore_from_trash(id: str) -> dict[str, str]:
         """Restore a deleted task/event from the trash bin to its original calendar.
 
@@ -1944,7 +1961,7 @@ def build_server(
         await _call(caldav_service.restore_from_trash, id)
         return {"id": id}
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def export_calendar(calendar_name: str) -> dict[str, str]:
         """Export a task list or event calendar as a single ICS (VCALENDAR) text.
 
@@ -1958,7 +1975,7 @@ def build_server(
         """
         return await _call(caldav_service.export_calendar, calendar_name)
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def import_ics(calendar_name: str, ics: str) -> dict[str, Any]:
         """Import ICS (VCALENDAR) text into an existing task list or event calendar.
 
@@ -1985,7 +2002,7 @@ def build_server(
     # Notes (Nextcloud Notes app's JSON REST API - see notes_client.py)
     # ------------------------------------------------------------------
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def list_notes(category: str | None = None) -> list[dict[str, Any]]:
         """List all Nextcloud notes (title/category/favorite only, not content).
 
@@ -2000,7 +2017,7 @@ def build_server(
         """
         return await _call_notes(notes_svc.list_notes(category))
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def get_note(note_id: int) -> dict[str, Any]:
         """Fetch a single note by id, including its full content.
 
@@ -2014,7 +2031,7 @@ def build_server(
         """
         return await _call_notes(notes_svc.get_note(note_id))
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def create_note(
         title: str,
         category: str | None = None,
@@ -2037,7 +2054,7 @@ def build_server(
         )
         return await _call_notes(notes_svc.create_note(fields))
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_note(
         note_id: int,
         title: str | None = None,
@@ -2067,7 +2084,7 @@ def build_server(
         )
         return await _call_notes(notes_svc.update_note(note_id, fields))
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def replace_in_note(note_id: int, old_text: str, new_text: str) -> dict[str, Any]:
         """Replace exactly one occurrence of a text passage in a note's content.
 
@@ -2093,7 +2110,7 @@ def build_server(
         """
         return await _call_notes(notes_svc.replace_in_note(note_id, old_text, new_text))
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def update_note_section(note_id: int, section: str, content: str) -> dict[str, Any]:
         """Replace one Markdown section of a note - heading line plus body.
 
@@ -2125,7 +2142,7 @@ def build_server(
         """
         return await _call_notes(notes_svc.replace_note_section(note_id, section, content))
 
-    @mcp.tool(annotations=_CREATE)
+    @tool(annotations=_CREATE)
     async def append_to_note(note_id: int, text: str) -> dict[str, Any]:
         """Append text to an existing note's content, keeping what's already there.
 
@@ -2144,7 +2161,7 @@ def build_server(
         """
         return await _call_notes(notes_svc.append_note(note_id, text))
 
-    @mcp.tool(annotations=_READ_ONLY)
+    @tool(annotations=_READ_ONLY)
     async def search_notes(search_text: str, category: str | None = None) -> list[dict[str, Any]]:
         """Search notes by a case-insensitive substring match over title and content.
 
@@ -2160,7 +2177,7 @@ def build_server(
         """
         return await _call_notes(notes_svc.search_notes(search_text, category))
 
-    @mcp.tool(annotations=_MODIFY)
+    @tool(annotations=_MODIFY)
     async def delete_note(note_id: int) -> dict[str, int]:
         """Permanently delete a Nextcloud note.
 

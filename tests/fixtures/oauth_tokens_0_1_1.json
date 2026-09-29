@@ -28,7 +28,9 @@
       "client_id": "legacy-client",
       "scopes": [],
       "expires_at": 4102444800,
-      "resource": null
+      "resource": null,
+      "subject": null,
+      "claims": null
     }
   },
   "refresh_tokens": {
@@ -36,7 +38,8 @@
       "token": "prt_legacy_refresh_token",
       "client_id": "legacy-client",
       "scopes": [],
-      "expires_at": 4102444800
+      "expires_at": 4102444800,
+      "subject": null
     }
   },
   "a2r": {"pat_legacy_access_token": "prt_legacy_refresh_token"},
