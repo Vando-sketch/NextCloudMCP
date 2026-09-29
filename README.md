@@ -90,11 +90,11 @@ Create an app password under **Settings → Security → Devices & sessions** (n
 your account password), then set:
 
 ```bash
-NEXTCLOUD_BASE_URL=https://cloud.example.com
-NEXTCLOUD_USERNAME=your-username
-NEXTCLOUD_APP_PASSWORD=your-app-password
-PUBLIC_BASE_URL=https://your-host.ts.net   # the URL clients use
-MCP_OAUTH_PASSWORD=a-long-random-password  # required unless local
+export NEXTCLOUD_BASE_URL=https://cloud.example.com
+export NEXTCLOUD_USERNAME=your-username
+export NEXTCLOUD_APP_PASSWORD=your-app-password
+export PUBLIC_BASE_URL=https://your-host.ts.net   # the URL clients use
+export MCP_OAUTH_PASSWORD=a-long-random-password  # required unless local
 ```
 
 ```bash

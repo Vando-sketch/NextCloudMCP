@@ -46,6 +46,7 @@ list) and are skipped by default. To run them:
 ```bash
 export RUN_INTEGRATION_TESTS=1
 export NEXTCLOUD_CALDAV_URL=... NEXTCLOUD_USERNAME=... NEXTCLOUD_APP_PASSWORD=...
+export NEXTCLOUD_BASE_URL=https://cloud.example.com  # required by the Notes tests
 export INTEGRATION_TEST_LIST="Test"   # an existing task list; tasks are created/deleted in it
 uv run pytest -q
 ```
