@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
 from nextcloud_organizer_mcp import event_mapping, mapping
@@ -44,7 +45,7 @@ def fake_notes_service() -> MagicMock:
 @pytest.fixture
 def tools(settings, fake_service, fake_notes_service):
     mcp = build_server(settings, service=fake_service, notes_service=fake_notes_service)
-    return asyncio.run(mcp.get_tools())
+    return {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
 
 def test_all_tools_registered(tools):
@@ -488,12 +489,11 @@ def test_list_tasks_tool_still_exposes_every_filter_to_clients(tools):
 def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
     """A parameter with a Python default must be optional in the client schema.
 
-    fastmcp (<3) rebuilds tool functions whose annotations are PEP 563 strings
-    (`from __future__ import annotations`) and loses `__kwdefaults__` doing it,
-    so every keyword-only parameter turns required-but-nullable - and clients
-    that then pass an explicit null can trip over it. server.py therefore must
-    not use the future import; this test fails on every affected tool at once
-    if it comes back.
+    FastMCP 2.x rebuilt tool functions whose annotations are PEP 563 strings
+    (`from __future__ import annotations`) and lost `__kwdefaults__` doing it,
+    so every keyword-only parameter turned required-but-nullable - and clients
+    that then passed an explicit null could trip over it. FastMCP 4 fixed this;
+    this test fails on every affected tool at once if it ever comes back.
     """
     offenders = []
     for tool_name, tool in tools.items():
@@ -1957,6 +1957,19 @@ def test_main_disables_uvicorn_access_log_and_passes_host_port(settings):
     )
 
 
+def test_main_kwargs_are_accepted_by_run_http_async(settings):
+    with (
+        patch("nextcloud_organizer_mcp.server.Settings.from_env", return_value=settings),
+        patch("nextcloud_organizer_mcp.server.FastMCP.run") as fastmcp_run,
+    ):
+        main()
+
+    # The test above mocks run() away, so it can't notice FastMCP renaming or
+    # dropping one of these parameters (uvicorn_config keeps the access log off).
+    # Binding raises TypeError if run_http_async no longer accepts them.
+    inspect.signature(FastMCP.run_http_async).bind(None, **fastmcp_run.call_args.kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Tool annotations
 #
@@ -2022,20 +2035,20 @@ def test_every_tool_carries_annotations(tools):
 
 def test_read_only_tools_are_marked_read_only(tools):
     wrong = sorted(
-        name for name in READ_ONLY_TOOLS if tools[name].annotations.readOnlyHint is not True
+        name for name in READ_ONLY_TOOLS if tools[name].annotations.read_only_hint is not True
     )
     assert wrong == [], f"read-only tools missing readOnlyHint=True: {wrong}"
 
 
 def test_writing_tools_are_not_marked_read_only(tools):
     writers = set(tools) - READ_ONLY_TOOLS
-    wrong = sorted(name for name in writers if tools[name].annotations.readOnlyHint is not False)
+    wrong = sorted(name for name in writers if tools[name].annotations.read_only_hint is not False)
     assert wrong == [], f"writing tools not marked readOnlyHint=False: {wrong}"
 
 
 def test_destructive_tools_are_marked_destructive(tools):
     wrong = sorted(
-        name for name in DESTRUCTIVE_TOOLS if tools[name].annotations.destructiveHint is not True
+        name for name in DESTRUCTIVE_TOOLS if tools[name].annotations.destructive_hint is not True
     )
     assert wrong == [], f"destructive tools missing destructiveHint=True: {wrong}"
 
@@ -2043,7 +2056,7 @@ def test_destructive_tools_are_marked_destructive(tools):
 def test_additive_writers_are_not_marked_destructive(tools):
     additive = set(tools) - READ_ONLY_TOOLS - DESTRUCTIVE_TOOLS
     wrong = sorted(
-        name for name in additive if tools[name].annotations.destructiveHint is not False
+        name for name in additive if tools[name].annotations.destructive_hint is not False
     )
     assert wrong == [], f"additive tools wrongly marked destructive: {wrong}"
 
@@ -2051,7 +2064,7 @@ def test_additive_writers_are_not_marked_destructive(tools):
 def test_all_tools_are_open_world(tools):
     # Every tool ultimately talks to a remote Nextcloud instance.
     wrong = sorted(
-        name for name, tool in tools.items() if tool.annotations.openWorldHint is not True
+        name for name, tool in tools.items() if tool.annotations.open_world_hint is not True
     )
     assert wrong == [], f"tools missing openWorldHint=True: {wrong}"
 
@@ -2061,4 +2074,45 @@ def test_annotations_survive_the_mcp_wire_format(tools):
     # object carrying them is not enough.
     mcp_tool = tools["list_events"].to_mcp_tool(name="list_events")
     assert mcp_tool.annotations is not None
-    assert mcp_tool.annotations.readOnlyHint is True
+    assert mcp_tool.annotations.read_only_hint is True
+
+
+def test_annotation_hints_use_camelcase_keys_on_the_wire_for_every_tool(tools):
+    # Claude decides approval prompts from these keys. The Python attributes are
+    # snake_case (MCP SDK 2), so check what a client actually receives: the
+    # camelCase JSON aliases, all four hints for a writer, two for a reader.
+    for name, tool in tools.items():
+        wire = tool.to_mcp_tool(name=name).model_dump(by_alias=True, exclude_none=True)
+        hints = wire["annotations"]
+        assert set(hints) <= {
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        }, f"{name}: {sorted(hints)}"
+        assert hints["openWorldHint"] is True, name
+        if hints["readOnlyHint"]:
+            assert set(hints) == {"readOnlyHint", "openWorldHint"}, name
+        else:
+            assert set(hints) == {
+                "readOnlyHint",
+                "destructiveHint",
+                "idempotentHint",
+                "openWorldHint",
+            }, name
+
+
+def test_tool_descriptions_are_the_full_docstring(tools):
+    """Clients must receive each tool's whole docstring as its description.
+
+    FastMCP 4 parses Google-style docstrings and, left alone, keeps only the
+    summary line as the description (the Args entries become schema property
+    descriptions, everything else - Returns:, notes after Args - is dropped).
+    These docstrings document result keys and date/timezone semantics that a
+    model needs, so build_server passes the full text explicitly.
+    """
+    truncated = [
+        name for name, tool in tools.items() if tool.description != inspect.getdoc(tool.fn)
+    ]
+    assert not truncated, truncated
+    assert "Returns:" in (tools["list_events"].description or "")
