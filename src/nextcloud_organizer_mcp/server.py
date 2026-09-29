@@ -161,33 +161,33 @@ def _slim_rows(
 # Nextcloud instance over CalDAV or the Notes REST API.
 
 #: Reads only. Safe for a client to run without asking.
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+_READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=True)
 
 #: Creates something new. Additive, so re-running adds another copy rather than
 #: clobbering anything - hence not destructive, but not idempotent either.
 _CREATE = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=False,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
 )
 
 #: Overwrites or removes existing state. Re-running with the same arguments
 #: lands on the same end state, so idempotent, but the original is gone.
 _MODIFY = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=True,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 #: Adds to existing state without discarding any of it (a share, a link, a
 #: restore), and converges on the same end state when repeated.
 _ADD = ToolAnnotations(
-    readOnlyHint=False,
-    destructiveHint=False,
-    idempotentHint=True,
-    openWorldHint=True,
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=True,
 )
 
 
