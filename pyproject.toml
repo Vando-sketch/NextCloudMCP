@@ -1,6 +1,6 @@
 [project]
 name = "nextcloud-organizer-mcp"
-version = "0.1.0"
+version = "0.1.1"
 description = "MCP server for managing Nextcloud tasks, calendars and notes via natural language"
 readme = "README.md"
 license = "MIT"
@@ -34,6 +34,12 @@ dependencies = [
     # of silently stored. icalendar parses recurrence rules but never evaluates
     # them.
     "python-dateutil>=2.8",
+    # Security floors for indirect dependencies (via fastmcp), so a fresh
+    # install can never resolve a version with a known advisory:
+    # anyio < 4.14.2 (TLS host name spoofing, process group handling) and
+    # cryptography < 50 (PKCS#7 Bleichenbacher oracle).
+    "anyio>=4.14.2",
+    "cryptography>=50.0.0",
 ]
 
 [project.urls]
