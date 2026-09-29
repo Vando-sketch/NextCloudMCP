@@ -54,10 +54,28 @@ Copy of the repo with `fastmcp==4.0.10` (pulls `mcp` 2.2.0, was 1.28.1):
   Funnel/Tailscale host names are not rejected.
 - 4.x `TokenHandler` now turns `400 invalid_grant` into `401`.
 
-Not verified: primary FastMCP 4.0.0 release notes were not obtained (the
-GitHub releases page only returned 4.0.1-4.0.10 and the upgrade guide came
-through a summarizer). An independent review via `agy` failed twice (no output
-beyond a preamble) and was skipped at the maintainer's direction.
+Release notes: the FastMCP v4.0.0 and v3.0.0 GitHub release bodies were read
+after the spike (`gh release view v4.0.0 -R PrefectHQ/fastmcp`). Relevant
+findings:
+
+- 4.0 is built on MCP protocol revision `2026-07-28` and MCP SDK 2.x. A server
+  negotiates the best protocol per connection; older clients keep working. The
+  end-to-end tests therefore include a raw `2025-06-18` session handshake, since
+  `fastmcp.Client` always negotiates the newest protocol.
+- "MCP model fields are snake_case (with a warning compatibility bridge for the
+  old names)": explains the `ToolAnnotations` change; the JSON on the wire keeps
+  camelCase, which the end-to-end tests assert.
+- "Honor OAuth application_type in DCR (SEP-837)": covered by a DCR test that
+  registers with `application_type` `web` and `native`.
+- Server-initiated sampling/roots and 3.x deprecated APIs are removed; none are
+  used here. OAuth hardening in the notes concerns `OAuthProxy`, which this
+  project does not use.
+- FastMCP performs an update check against pypi.org at startup in both 2.14 and
+  4.x (`FASTMCP_CHECK_FOR_UPDATES` controls it); not a change, so not documented
+  as one.
+
+An independent review via `agy` failed twice (no output beyond a preamble) and
+was skipped at the maintainer's direction.
 
 ## Design
 
@@ -133,9 +151,9 @@ real claude.ai behaviour, including the `invalid_grant` -> `401` change.
 
 - `invalid_grant` 400 -> 401: covered by the E2E test and the manual smoke
   test.
-- Unread primary 4.0 changelog: implementation begins with a task to scan the
-  4.0.x release notes for behaviour changes the tests cannot see (OAuth
-  handlers, CORS, well-known paths, `run()` defaults).
+- Protocol-era negotiation (see Release notes above): a connector that speaks the
+  previous protocol version must keep working; covered by a raw `2025-06-18`
+  handshake test.
 - Python 3.10 resolution of `mcp` 2.x is unverified locally (Dependabot's CI
   did reach mypy on 3.10, so installs work).
 - Optional hardening (`host_origin_protection`) is out of scope; may be noted
