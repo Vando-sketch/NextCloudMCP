@@ -1436,10 +1436,12 @@ wheels = [
 
 [[package]]
 name = "nextcloud-organizer-mcp"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "caldav" },
+    { name = "cryptography" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "icalendar" },
@@ -1458,7 +1460,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "caldav", specifier = ">=3.0,<4" },
+    { name = "cryptography", specifier = ">=50.0.0" },
     { name = "fastmcp", specifier = ">=2.9,<3" },
     { name = "httpx", specifier = ">=0.27,<1" },
     { name = "icalendar", specifier = ">=6.0,<8" },

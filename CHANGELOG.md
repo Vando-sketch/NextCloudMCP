@@ -7,6 +7,23 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-29
+
+### Security
+
+- Require `anyio>=4.14.2` and `cryptography>=50.0.0`. Both are indirect
+  dependencies (via FastMCP); the new minimums exclude versions affected by
+  published advisories (AnyIO TLS host name encoding and process-group
+  handling; a PKCS#7 decryption oracle in cryptography). The code paths
+  affected are not used by this server, but a fresh install can no longer
+  resolve a vulnerable version.
+
+### Changed
+
+- Dependency updates: `caldav` 3.3.1, `icalendar` 7.3.0, `lxml` 6.1.3, and
+  newer GitHub Actions (`actions/checkout` v7, `astral-sh/setup-uv` v7,
+  artifact actions) in CI and the release workflow.
+
 ## [0.1.0] - 2026-09-28
 
 First public release.
@@ -660,5 +677,6 @@ High-level summary of the work packages from the initial code review:
   read-only `RRULE` surfacing; CalDAV rate-limit backoff; scheduled
   integration-test workflow.
 
-[Unreleased]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/releases/tag/v0.1.0
