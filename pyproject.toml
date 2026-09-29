@@ -1,6 +1,6 @@
 [project]
 name = "nextcloud-organizer-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP server for managing Nextcloud tasks, calendars and notes via natural language"
 readme = "README.md"
 license = "MIT"

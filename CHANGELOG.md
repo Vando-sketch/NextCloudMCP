@@ -7,6 +7,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-29
+
 ### Added
 
 - `server.json` and an `mcp-name` marker in the README, so the package can be
@@ -718,7 +720,8 @@ High-level summary of the work packages from the initial code review:
   read-only `RRULE` surfacing; CalDAV rate-limit backoff; scheduled
   integration-test workflow.
 
-[Unreleased]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/Vando-sketch/nextcloud-organizer-mcp/releases/tag/v0.1.0
