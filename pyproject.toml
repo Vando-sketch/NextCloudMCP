@@ -1,6 +1,6 @@
 [project]
 name = "nextcloud-organizer-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "MCP server for managing Nextcloud tasks, calendars and notes via natural language"
 readme = "README.md"
 license = "MIT"
@@ -16,7 +16,7 @@ classifiers = [
     "Topic :: Office/Business :: Scheduling",
 ]
 dependencies = [
-    "fastmcp>=2.9,<3",
+    "fastmcp>=4,<5",
     "caldav>=3.0,<4",
     "icalendar>=6.0,<8",
     # Already an indirect dependency via caldav (which uses it for its own
@@ -24,9 +24,10 @@ dependencies = [
     # Nextcloud-specific raw DAV requests (sharing, trashbin) that have no
     # caldav library API of their own - see caldav_client.py.
     "lxml>=4.9",
-    # Already an indirect dependency via fastmcp/mcp; imported directly here
-    # too for the Notes app's plain JSON REST API (notes_client.py), which has
-    # nothing to do with CalDAV/the caldav library.
+    # Imported directly for the Notes app's plain JSON REST API
+    # (notes_client.py), which has nothing to do with CalDAV/the caldav
+    # library. FastMCP 4 and the MCP SDK 2 moved to httpx2, so it is no longer
+    # pulled in by them.
     "httpx>=0.27,<1",
     # Already an indirect dependency via both icalendar and caldav; imported
     # directly here too to expand an event's RRULE (event_mapping.py), which is

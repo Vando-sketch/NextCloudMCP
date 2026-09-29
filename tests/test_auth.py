@@ -2,15 +2,10 @@
 
 PersonalAuthProvider implements a full OAuth 2.1 + PKCE + Dynamic Client
 Registration flow (see nextcloud_organizer_mcp.personal_auth, vendored from
-crumrine/fastmcp-personal-auth). Driving that flow end-to-end - a real
-client registering, opening a browser at /authorize, completing a redirect,
-exchanging a code with a PKCE verifier - has no stable, automatable surface
-in a unit test; it's normally exercised by an interactive OAuth client (e.g.
-Claude.ai) or FastMCP's own upstream test suite for the underlying
-InMemoryOAuthProvider machinery.
-
-What we test instead, at the ASGI/middleware level via the real app FastMCP
-builds from `auth=...`:
+crumrine/fastmcp-personal-auth). The complete flow over real HTTP (register,
+authorize, consent, token, refresh, an authenticated /mcp session) lives in
+tests/test_oauth_e2e.py; this module checks the layer piecewise at the
+ASGI/middleware level via the real app FastMCP builds from `auth=...`:
 - unauthenticated and invalid-token requests to /mcp are rejected before any
   tool logic runs;
 - the OAuth discovery and Dynamic Client Registration endpoints Claude's
