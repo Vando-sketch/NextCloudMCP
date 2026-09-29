@@ -285,7 +285,7 @@ def test_consent_wrong_password_rerenders_form_and_keeps_key_valid(app, settings
     # A failed attempt must not consume the pending key (below the limit) ...
     assert retry.status_code == 302
     assert "code=" in retry.headers["location"]
-    # ... and nothing the user typed may reach any log (README > Authentication).
+    # ... and nothing the user typed may reach any log (docs/authentication.md).
     assert "wrong-password" not in caplog.text
     assert TEST_OAUTH_PASSWORD not in caplog.text
 

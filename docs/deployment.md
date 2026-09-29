@@ -19,7 +19,7 @@ exposes the server to the entire internet**, not just your tailnet - this is req
 because Claude's connector performs the OAuth flow (and later, tool calls) from
 Anthropic's servers, which cannot reach into a private tailnet. The server's own
 authentication (OAuth 2.1 via `PersonalAuthProvider`, see the
-[README](../README.md#authentication)) is what protects it now that network-level
+[Authentication](authentication.md)) is what protects it now that network-level
 isolation from Tailscale is gone for this service.
 
 ## 1. Install on the container
@@ -55,7 +55,7 @@ PUBLIC_BASE_URL=https://<hostname>.<tailnet>.ts.net
 # either case. This is the actual security gate on the OAuth /authorize step
 # now that the server is reachable from the public internet; the
 # redirect-domain allow-list alone does not stop a scripted client from
-# self-issuing a token. See README > Authentication.
+# self-issuing a token. See docs/authentication.md.
 MCP_OAUTH_PASSWORD=<long random value>
 
 # OAuth client/token state persists here across restarts - must be writable
@@ -98,7 +98,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 > restarted from Claude), max 10 failures per client IP per 15 minutes (then a hard
 > `429`, even with the correct password). Submitted form data is never logged and never
 > echoed into responses, and the server keeps Uvicorn's HTTP access log disabled (see
-> [README > Authentication](../README.md#authentication)) - that now guards the pending
+> [Authentication](authentication.md)) - that now guards the pending
 > keys in `/consent` query strings rather than the password itself.
 
 ## 3. systemd service
@@ -171,7 +171,7 @@ sudo systemctl restart nextcloud-organizer-mcp
 **Settings → Connectors → Add custom connector**, URL:
 `https://<hostname>.<tailnet>.ts.net/mcp`. Leave any Client ID/Secret fields blank -
 Dynamic Client Registration handles that. Approve the OAuth prompt that opens in your
-browser. See the [README](../README.md#registering-the-connector-in-claude) for details.
+browser. See the [Authentication](authentication.md#registering-the-connector-in-claude) for details.
 
 ### Claude Desktop
 
@@ -278,7 +278,7 @@ old one).
 | Symptom | Likely cause |
 |---|---|
 | Claude.ai says "error connecting" while adding the connector | `PUBLIC_BASE_URL` doesn't exactly match the Funnel URL (scheme/host mismatch breaks OAuth discovery); or the server isn't reachable from the internet yet (check `tailscale funnel status`) |
-| OAuth prompt appears but authorization fails | `MCP_OAUTH_PASSWORD` wasn't satisfied - it's checked against the `state` OAuth parameter, which Claude's client generates and this project cannot verify it can supply. The server deliberately does **not** log request query strings (that would log the password itself - see README > Authentication), so debug this by inspecting the actual `/authorize` request Claude's browser flow makes (e.g. browser dev tools network tab) rather than server logs. Or: the redirect domain isn't in `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (only relevant if you changed the default) |
+| OAuth prompt appears but authorization fails | `MCP_OAUTH_PASSWORD` wasn't satisfied - it's checked against the `state` OAuth parameter, which Claude's client generates and this project cannot verify it can supply. The server deliberately does **not** log request query strings (that would log the password itself - see [Authentication](authentication.md)), so debug this by inspecting the actual `/authorize` request Claude's browser flow makes (e.g. browser dev tools network tab) rather than server logs. Or: the redirect domain isn't in `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (only relevant if you changed the default) |
 | Service fails to start: `MCP_OAUTH_PASSWORD is required...` | `PUBLIC_BASE_URL` isn't localhost and `MCP_OAUTH_PASSWORD` is unset - this is enforced deliberately, set the password (step 2) |
 | `401` calling `/mcp` after Claude was previously connected | Access token expired or was revoked; disconnect and reconnect the connector in Claude to re-run the OAuth flow |
 | OAuth state lost after a restart | `MCP_OAUTH_STATE_DIR` isn't pointing at a persistent, writable path - confirm the systemd `StateDirectory` is set and matches |
