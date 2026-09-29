@@ -1,0 +1,20 @@
+name: Feature request
+description: A tool, parameter or workflow you would like to have
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What do you want to be able to say or do?
+      description: Describe it as you would ask Claude, e.g. "move all tasks tagged X to list Y".
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: What happens today?
+      description: What do you do now instead, or why does the current tool set not cover it?
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else

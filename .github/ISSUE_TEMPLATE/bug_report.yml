@@ -1,0 +1,42 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you ask for, what did you expect, what happened instead? Include the exact error text if there is one.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: nextcloud-organizer-mcp version
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: input
+    id: nextcloud
+    attributes:
+      label: Nextcloud version and apps
+      description: Nextcloud server version, plus Calendar / Tasks / Notes app versions if you know them.
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: MCP client
+      options:
+        - Claude (claude.ai web)
+        - Claude mobile
+        - Claude Desktop (mcp-remote)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server log output
+      description: Redact passwords, tokens and private URLs.
+      render: text
