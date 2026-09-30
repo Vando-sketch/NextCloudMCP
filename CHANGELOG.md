@@ -7,6 +7,14 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Caddy deployment recipe for a dedicated MCP hostname alongside an existing
+  Nextcloud proxy, with forwarded-header trust, streaming, logging guidance,
+  and a shared deployment verification checklist. The Caddy recipe filters
+  request URIs and Referer headers from runtime error logs to protect OAuth
+  query parameters even when an upstream request fails.
+
 ## [0.2.1] - 2026-09-29
 
 ### Added

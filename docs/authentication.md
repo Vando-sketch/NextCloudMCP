@@ -47,6 +47,11 @@ registration endpoints once the server is public:
   full request paths *including query strings*, which for `/consent` carry the
   single-use pending keys that gate authorization, so the access log stays off. The
   consent handlers themselves never log or echo submitted form data anywhere either.
+- Behind a reverse proxy, the consent rate limit relies on a trusted client address.
+  Configure the proxy to discard spoofed forwarding headers and Uvicorn to trust
+  only the proxy peer. Audit the proxy's own logging for OAuth query parameters;
+  disabling Uvicorn access logs does not disable proxy logs. See the
+  [Caddy deployment recipe](deployment.md#4a-expose-via-caddy-or-an-existing-proxy).
 
 **Local security patches.** The vendored `PersonalAuthProvider` carries five fixes for
 upstream issues found while building this integration, all confirmed by live
@@ -71,7 +76,7 @@ OAuth flow, which is what upstream's `state` trick was trying to approximate.
 ## Registering the connector in Claude
 
 Once the server is running and reachable at `PUBLIC_BASE_URL` (see the
-[deployment guide](deployment.md) for exposing it via Tailscale Funnel):
+[deployment guide](deployment.md) for Caddy, an existing proxy, or Tailscale Funnel):
 
 1. In Claude.ai (or Cowork/Desktop): **Settings → Connectors → Add custom connector**.
 2. **URL:** `<PUBLIC_BASE_URL>/mcp`, e.g. `https://your-host.your-tailnet.ts.net/mcp`.

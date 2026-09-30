@@ -108,9 +108,10 @@ From a checkout instead: `uv sync && cp .env.example .env`, edit `.env`, then
 [`.env.example`](.env.example). `NEXTCLOUD_BASE_URL` must be `https://` unless it
 points at a local address.
 
-Then expose the server (the [deployment guide](docs/deployment.md) uses Tailscale
-Funnel for TLS) and add it in Claude under **Settings → Connectors → Add custom
-connector** with the URL `<PUBLIC_BASE_URL>/mcp`. Leave Client ID and Secret blank
+Then expose the server (the [deployment guide](docs/deployment.md) covers Caddy,
+an existing Nextcloud reverse proxy, and Tailscale Funnel for TLS) and add it in
+Claude under **Settings → Connectors → Add custom connector** with the URL
+`<PUBLIC_BASE_URL>/mcp`. Leave Client ID and Secret blank
 and enter your `MCP_OAUTH_PASSWORD` on the consent page that opens. Details:
 [Authentication](docs/authentication.md#registering-the-connector-in-claude).
 
@@ -127,7 +128,7 @@ Claude ── HTTPS + OAuth 2.1 ──► your server (this project) ── CalD
 
 ## Documentation
 
-- [Deployment guide](docs/deployment.md) &mdash; Ubuntu LXC + Tailscale + systemd + Claude connector setup
+- [Deployment guide](docs/deployment.md) &mdash; systemd, Caddy/existing Nextcloud proxy or Tailscale Funnel, and Claude connector setup
 - [Authentication](docs/authentication.md) &mdash; OAuth model, consent page, local security patches
 - [Tool reference](docs/tools.md) &mdash; all tools with parameters, examples and error messages
 - [Architecture](docs/architecture.md) &mdash; module layout, request flow, design decisions
