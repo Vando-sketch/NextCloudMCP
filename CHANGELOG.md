@@ -34,6 +34,16 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `vX.Y.Z`, `X.Y`, `latest`), plus a `compose.yaml`. Runs as a non-root user and
   keeps the OAuth state in a `/data` volume. See [Running in Docker](docs/docker.md).
 
+### Fixed
+
+- `create_birthday` again keeps filing birthdays in an existing legacy
+  `Geburtstage` calendar (tagged `Geburtstag`) when no `Birthdays` calendar
+  exists. The German-to-English rename had overwritten both legacy names with
+  the English ones, so the fallback never triggered and a new `Birthdays`
+  calendar was created next to the old one.
+- `nextcloud-organizer-mcp-admin revoke ""` is now refused. An empty prefix
+  matched every token and revoked all of them.
+
 ### Documentation
 
 - Deployment guide: local-only use without a public URL (loopback

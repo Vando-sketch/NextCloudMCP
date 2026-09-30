@@ -186,6 +186,19 @@ def test_revoke_unknown_prefix_returns_error_and_leaves_state_untouched(tmp_path
     assert (state_dir / "oauth_tokens.json").read_text() == before
 
 
+def test_revoke_empty_prefix_is_refused_and_leaves_state_untouched(tmp_path, capsys):
+    # Every token starts with "", so this would otherwise revoke all of them.
+    state_dir, _access_token, _refresh_token = _seed_one_token(tmp_path)
+    before = (state_dir / "oauth_tokens.json").read_text()
+
+    exit_code = admin.main(["--state-dir", str(state_dir), "revoke", ""])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "empty token prefix" in err
+    assert (state_dir / "oauth_tokens.json").read_text() == before
+
+
 def test_revoke_full_token_value_also_matches(tmp_path, capsys):
     # A prefix search naturally also matches the complete token string.
     state_dir, access_token, _refresh_token = _seed_one_token(tmp_path)

@@ -1033,7 +1033,7 @@ calendar looks like:
 | `title` | `"🎂 <name> (<birth year>)"` — without the parentheses if no birth year is known |
 | `start` / `end` | The **birth** date, all-day, one day (`end` = `start`) |
 | `recurrence` | `"FREQ=YEARLY"` |
-| `tags` | `["Birthday"]` — `["Birthday"]` for entries written to the legacy `"Birthdays"` calendar, so one tag still covers all of it |
+| `tags` | `["Birthday"]` — `["Geburtstag"]` for entries written to the legacy `"Geburtstage"` calendar, so one tag still covers all of it |
 | `visibility` | `"private"` |
 | `reminders` | `["-PT0M", "-P1D"]` — on the day itself and one day before |
 
@@ -1076,11 +1076,11 @@ actually has, rather than assuming a fixed name:
 | Calendars present | Target | Tag written |
 |---|---|---|
 | `Birthdays` | `Birthdays` | `Birthday` |
-| `Birthdays` only | `Birthdays` | `Birthday` |
+| `Geburtstage` only | `Geburtstage` | `Geburtstag` |
 | both | `Birthdays` | `Birthday` |
 | neither | `Birthdays` | `Birthday` |
 
-`Birthdays` is what this calendar was called before the tool vocabulary was
+`Geburtstage` is what this calendar was called before the tool vocabulary was
 translated to English. A server that already files birthdays there keeps
 filing them there, so the rename does not split one person's birthdays across
 two calendars. Display names are compared **exactly** — a calendar named

@@ -2069,47 +2069,28 @@ def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
 # --- Birthday convention (birthday_fields) ---
 
 
-@pytest.fixture
-def legacy_birthday_names(monkeypatch):
-    """Give the legacy birthday names the distinct values they exist to have.
-
-    The shipped `LEGACY_BIRTHDAY_*` constants currently equal the English
-    ones (see the xfail below), which makes every legacy branch unreachable
-    and a test of it tautological - so the logic is exercised with the
-    original German spellings patched in.
-    """
-    monkeypatch.setattr(event_mapping, "LEGACY_BIRTHDAY_CALENDAR", "Geburtstage")
-    monkeypatch.setattr(event_mapping, "LEGACY_BIRTHDAY_TAG", "Geburtstag")
+def test_legacy_birthday_names_are_the_pre_rename_german_ones():
+    """Regression: the German-to-English rename once overwrote the legacy
+    names with the English ones, which silently disabled every legacy branch."""
+    assert event_mapping.LEGACY_BIRTHDAY_CALENDAR == "Geburtstage"
+    assert event_mapping.LEGACY_BIRTHDAY_TAG == "Geburtstag"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "src bug: event_mapping.LEGACY_BIRTHDAY_CALENDAR/_TAG (event_mapping.py:207, 217) "
-        "equal BIRTHDAY_CALENDAR/_TAG, so resolve_birthday_calendar's legacy branch "
-        "(line 341) and birthday_tag_for's legacy tag can never differ from the default"
-    ),
-)
-def test_legacy_birthday_names_differ_from_the_current_ones():
-    assert event_mapping.LEGACY_BIRTHDAY_CALENDAR != event_mapping.BIRTHDAY_CALENDAR
-    assert event_mapping.LEGACY_BIRTHDAY_TAG != event_mapping.BIRTHDAY_TAG
-
-
-def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account(legacy_birthday_names):
+def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account():
     assert event_mapping.resolve_birthday_calendar([]) == "Birthdays"
     assert event_mapping.resolve_birthday_calendar(["Work", "Personal"]) == "Birthdays"
 
 
-def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar(legacy_birthday_names):
+def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar():
     """A server set up before the rename already files birthdays in "Geburtstage"."""
     assert event_mapping.resolve_birthday_calendar(["Work", "Geburtstage"]) == "Geburtstage"
 
 
-def test_resolve_birthday_calendar_prefers_english_when_both_exist(legacy_birthday_names):
+def test_resolve_birthday_calendar_prefers_english_when_both_exist():
     assert event_mapping.resolve_birthday_calendar(["Geburtstage", "Birthdays"]) == "Birthdays"
 
 
-def test_resolve_birthday_calendar_matches_the_name_exactly(legacy_birthday_names):
+def test_resolve_birthday_calendar_matches_the_name_exactly():
     """Resolution elsewhere compares display names exactly, so a differently
     cased calendar is not this calendar - claiming it would only turn a clean
     "not found" into a confusing one."""
@@ -2117,7 +2098,7 @@ def test_resolve_birthday_calendar_matches_the_name_exactly(legacy_birthday_name
     assert event_mapping.resolve_birthday_calendar(["geburtstage"]) == "Birthdays"
 
 
-def test_birthday_tag_follows_the_calendar(legacy_birthday_names):
+def test_birthday_tag_follows_the_calendar():
     assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
     assert event_mapping.birthday_tag_for("Geburtstage") == "Geburtstag"
     assert event_mapping.birthday_tag_for("Family") == "Birthday"

@@ -1275,8 +1275,8 @@ def build_server(
           Without a birth year it starts on the next upcoming occurrence.
         - recurrence "FREQ=YEARLY", tags ["Birthday"], visibility
           "private", reminders ["-PT0M", "-P1D"] (on the day itself and the
-          day before). Entries written to the legacy "Birthdays" calendar
-          are tagged "Birthday" instead, matching the entries already in
+          day before). Entries written to the legacy "Geburtstage" calendar
+          are tagged "Geburtstag" instead, matching the entries already in
           it, so one tag still covers the whole calendar.
 
         Args:
@@ -1301,7 +1301,7 @@ def build_server(
                 carries no year. A birth date that is still ahead is rejected.
             calendar: Display name of the target calendar. Left out, it is
                 "Birthdays", except on a server that still has the
-                "Birthdays" calendar an earlier version of this tool wrote
+                "Geburtstage" calendar an earlier version of this tool wrote
                 to and no "Birthdays" - there the existing calendar is used,
                 so birthdays stay in one place instead of being split across
                 two. Naming a calendar explicitly always uses that one.
