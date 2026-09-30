@@ -120,7 +120,8 @@ works, see [Local-only use](docs/deployment.md#local-only-use-no-public-url).
 Otherwise expose the server (the [deployment guide](docs/deployment.md) covers Caddy
 and an existing Nextcloud reverse proxy, Tailscale Funnel for TLS, and a
 [Cloudflare Tunnel](docs/deployment.md#4c-alternative-cloudflare-tunnel) alternative;
-the Caddy and Cloudflare recipes are only partly tested) and add it in Claude under
+the Caddy and Cloudflare recipes should work but were never tested end to end)
+and add it in Claude under
 **Settings → Connectors → Add custom connector** with the URL `<PUBLIC_BASE_URL>/mcp`.
 Leave Client ID and Secret blank
 and enter your `MCP_OAUTH_PASSWORD` on the consent page that opens. Details:
