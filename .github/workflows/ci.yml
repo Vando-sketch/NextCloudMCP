@@ -35,3 +35,23 @@ jobs:
         run: |
           uv run pytest -q --cov=src/nextcloud_organizer_mcp --cov-report=term-missing \
             --cov-fail-under=90
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: nextcloud-organizer-mcp:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test image
+        run: scripts/docker-smoke-test.sh nextcloud-organizer-mcp:ci

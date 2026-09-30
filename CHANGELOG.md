@@ -7,6 +7,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- Docker image for `linux/amd64` and `linux/arm64`, published to
+  `ghcr.io/vando-sketch/nextcloud-organizer-mcp` with each release (tags
+  `vX.Y.Z`, `X.Y`, `latest`), plus a `compose.yaml`. Runs as a non-root user and
+  keeps the OAuth state in a `/data` volume. See [Running in Docker](docs/docker.md).
+
 ### Documentation
 
 - Deployment guide: local-only use without a public URL (loopback

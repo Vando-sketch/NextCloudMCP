@@ -14,6 +14,10 @@ tailscale funnel  ──►  nextcloud-organizer-mcp (127.0.0.1:8000, plain HTTP
                       Nextcloud (CalDAV)
 ```
 
+> Prefer containers? See [Running in Docker](docker.md) for the published image and a
+> compose file; the rest of this guide (Funnel, connecting Claude, token management)
+> applies to it as well.
+
 The server itself never handles TLS. Unlike a plain `tailscale serve` setup, **Funnel
 exposes the server to the entire internet**, not just your tailnet - this is required
 because Claude's connector performs the OAuth flow (and later, tool calls) from

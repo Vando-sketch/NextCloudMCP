@@ -103,6 +103,9 @@ export MCP_OAUTH_PASSWORD=a-long-random-password  # required unless local
 nextcloud-organizer-mcp     # listens on 127.0.0.1:8000, path /mcp
 ```
 
+Prefer containers? A multi-arch image is on GHCR and needs no Python or uv; see
+[Running in Docker](docs/docker.md) for a compose file and a `docker run` one-liner.
+
 From a checkout instead: `uv sync && cp .env.example .env`, edit `.env`, then
 `set -a; . ./.env; set +a; uv run nextcloud-organizer-mcp` (the server does not read
 `.env` itself, so the variables must be exported first). Every setting is documented in
@@ -133,6 +136,7 @@ Claude ── HTTPS + OAuth 2.1 ──► your server (this project) ── CalD
 ## Documentation
 
 - [Deployment guide](docs/deployment.md) &mdash; Ubuntu LXC + Tailscale + systemd + Claude connector setup
+- [Running in Docker](docs/docker.md) &mdash; container image, compose file, persistence, TLS
 - [Authentication](docs/authentication.md) &mdash; OAuth model, consent page, local security patches
 - [Tool reference](docs/tools.md) &mdash; all tools with parameters, examples and error messages
 - [Architecture](docs/architecture.md) &mdash; module layout, request flow, design decisions
