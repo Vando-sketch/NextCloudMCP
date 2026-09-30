@@ -1,6 +1,6 @@
 # Ship a Docker image (issue #64)
 
-Status: design approved 2026-09-30, spec awaiting review.
+Status: design approved 2026-09-30, implemented.
 
 ## Goal
 
@@ -71,13 +71,18 @@ Excludes `.git`, `.env*`, `.oauth-state`, `.venv`, caches, `tests`, `docs`,
 
 ### `compose.yaml`
 
-- Service using the GHCR image, `restart: unless-stopped`, `env_file: .env`
-  (optional), named volume on `/data`.
+- Service using the GHCR image, `restart: unless-stopped`, optional
+  `env_file: .env` (so every documented setting works), named volume on `/data`.
+  `MCP_HOST`, `MCP_PORT` and `MCP_OAUTH_STATE_DIR` are pinned in `environment:`
+  so a `.env` copied from `.env.example` (`MCP_HOST=127.0.0.1`) cannot make the
+  container unreachable. Optional settings are not forwarded as empty strings:
+  `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS=""` parses to an empty allow-list.
 - Required values via `${VAR:?message}`: `NEXTCLOUD_BASE_URL`,
   `NEXTCLOUD_USERNAME`, `NEXTCLOUD_APP_PASSWORD`, `PUBLIC_BASE_URL`,
   `MCP_OAUTH_PASSWORD`. Compose fails fast with a clear message rather than the
   container crash-looping.
-- Port published as `127.0.0.1:${MCP_PORT:-8000}:8000`. The reverse proxy or
+- Port published as `127.0.0.1:${HOST_PORT:-8000}:8000` (`MCP_PORT` is the
+  container-internal port and stays 8000). The reverse proxy or
   tunnel runs on the host and terminates TLS. Docs explain how to widen it.
 
 ### Release workflow (`.github/workflows/release.yml`)
@@ -104,8 +109,11 @@ New `docker` job, independent of the PyPI `build`/`publish` jobs, on
   uid 0, assert the container refuses to start without `MCP_OAUTH_PASSWORD`
   (documents the `0.0.0.0` bind gotcha), and assert the secrets are absent from
   `docker history` and from the container logs.
-- `integration.yml`: Docker variant that runs the freshly built image against
-  the existing Nextcloud service container and calls a real tool. This
+- `integration.yml`: Docker job that runs the freshly built image against the
+  existing kind of Nextcloud service container. `scripts/docker-e2e.py` acts as
+  an MCP client: Dynamic Client Registration, PKCE, the consent page (wrong then
+  right password), token exchange, then real tool calls (list, create, read,
+  delete a task). The smoke test lives in `scripts/docker-smoke-test.sh`. This
   reuses the existing service-container pattern. It is manual/scheduled like
   the current job, not per-PR.
 

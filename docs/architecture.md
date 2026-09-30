@@ -10,6 +10,10 @@ src/nextcloud_organizer_mcp/
 ├── mapping.py        Task field vocabulary <-> iCalendar VTODO properties
 ├── config.py         Settings.from_env(): all configuration from environment variables
 └── errors.py         User-facing exception hierarchy (TaskMcpError + subclasses)
+
+Dockerfile            Two-stage image build (uv sync from uv.lock, non-root runtime); see docker.md
+compose.yaml          Compose service with the OAuth state volume; see docker.md
+scripts/docker-*      Image smoke test (CI) and OAuth end-to-end check (integration workflow)
 ```
 
 ## Request flow
