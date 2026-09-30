@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Documentation
+
+- Deployment guide: local-only use without a public URL (loopback
+  `PUBLIC_BASE_URL`, no consent password, `mcp-remote` and Claude Code setup,
+  redirect-domain notes), and the decision on a native stdio transport.
+
 ## [0.2.1] - 2026-09-29
 
 ### Added
