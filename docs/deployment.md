@@ -1,11 +1,55 @@
 # Deployment guide
 
-Run the server on a Linux host with systemd, then choose a public HTTPS entry
-point: [Caddy or your existing Nextcloud proxy](#4a-expose-via-caddy-or-an-existing-proxy),
-[Tailscale Funnel](#4b-expose-via-tailscale-funnel), or
-[Cloudflare Tunnel](#4c-alternative-cloudflare-tunnel) (not tested end to end). Each
-provides TLS and forwards requests to the server's local HTTP port. For a client on the
-same machine, see [Local-only use](#local-only-use-no-public-url).
+Run the server on a Linux host with systemd, then choose how clients reach it. Steps 1-3
+(install, configure, systemd) are common to every host-based setup. Step 4 is the only
+part that depends on your environment: it gives the server a public HTTPS URL that
+forwards to its local HTTP port. Clients on the same machine can skip step 4, see
+[Local-only use](#local-only-use-no-public-url) and
+[Native stdio](#native-stdio-transport).
+
+## Choose a deployment
+
+Where does your Claude client run?
+
+- **Claude.ai (web), Claude mobile and Cowork** are cloud-hosted. Anthropic's servers
+  make the OAuth calls and every tool call, so `127.0.0.1` on your machine is
+  unreachable for them. They need a **public HTTPS URL** and `MCP_OAUTH_PASSWORD`.
+- **Claude Desktop and Claude Code on the same machine** can reach `localhost`, so they
+  need no public URL and no password. See
+  [why a cloud connector cannot use local mode](#why-a-cloud-hosted-connector-cannot-use-it).
+
+| Option | Prerequisites | Exposure and authentication | Status |
+|---|---|---|---|
+| [Existing reverse proxy or shared Nextcloud host](#reuse-another-existing-nextcloud-proxy) | A proxy you already run with TLS on the same host, a new subdomain such as `organizer.example.com` | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Not tested (nginx, Traefik) |
+| [New public server with Caddy](#caddy-on-the-same-host) | A host with a public IP, inbound ports 80 and 443, a DNS name | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Partially tested (local Caddy only, no public run) |
+| [Cloudflare Tunnel](#4c-alternative-cloudflare-tunnel) | A domain on Cloudflare. No inbound ports, works behind CGNAT | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Partially tested (quick tunnel and scripted client; standalone `GET /mcp` stream failed on the quick tunnel) |
+| [Tailscale Funnel](#4b-expose-via-tailscale-funnel) | A Tailscale account with Funnel enabled for the node | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Supported, tested with claude.ai |
+| [Local HTTP](#local-only-use-no-public-url) | Client on the same machine, Node.js for `mcp-remote` | `http://127.0.0.1:8000` only, no password. Any local process can obtain a token | Supported, tested with `mcp-remote` |
+| [Native stdio](#native-stdio-transport) | Client on the same machine that can start a process | No port, no OAuth. The client starts the server | Supported, automated tests; client configs not run by the maintainers |
+
+"Supported" means the setup has been verified end to end. "Partially tested" and "Not
+tested" recipes should work but are not confirmed, and each says so in its own section.
+The [evidence matrix](deployment-verification.md#evidence-matrix) records what was
+checked per recipe.
+
+### Example names in this guide
+
+These names are used consistently. Replace them with your own.
+
+| Name | Meaning |
+|---|---|
+| `cloud.example.com` | Your Nextcloud, used for `NEXTCLOUD_BASE_URL` |
+| `organizer.example.com` | This server's public hostname, used for `PUBLIC_BASE_URL` |
+| `<hostname>.<tailnet>.ts.net` | Your Funnel hostname, which Tailscale assigns |
+
+### `PUBLIC_BASE_URL` versus the connector URL
+
+`PUBLIC_BASE_URL` is the bare origin clients use: scheme and host, **without** `/mcp`,
+for example `https://organizer.example.com`. The server builds its OAuth discovery
+URLs from it, so a mismatch breaks the OAuth flow. The **connector URL** you enter in
+Claude is `PUBLIC_BASE_URL` plus the MCP path: `https://organizer.example.com/mcp`.
+Local HTTP uses `PUBLIC_BASE_URL=http://127.0.0.1:8000` and the endpoint
+`http://127.0.0.1:8000/mcp`. Native stdio needs neither.
 
 ```text
 Clients ── HTTPS ──► existing reverse proxy
@@ -15,20 +59,21 @@ Clients ── HTTPS ──► existing reverse proxy
                                   Nextcloud ◄── HTTPS + app password
 ```
 
-A cloud-hosted MCP client needs an endpoint reachable from the public internet.
-The server's [OAuth authentication](authentication.md) protects that endpoint.
+The server's [OAuth authentication](authentication.md) protects the public endpoint.
 Plain `tailscale serve` only reaches your tailnet; Funnel makes it public.
 
 > Prefer containers? See [Running in Docker](docker.md) for the published image and a
-> compose file; the rest of this guide (proxy setup, connecting Claude, token management)
-> applies to it as well.
+> compose file. It replaces steps 1-3 (install, env file, service): set the same variables
+> from step 2 in its `.env` file instead of `/etc/nextcloud-organizer-mcp.env`. Exposure,
+> connecting Claude and token management in this guide still apply.
 
 Every recipe is verified with the same [checklist](deployment-verification.md), which
 separates local automated proxy checks from a real public client/Nextcloud
-deployment and lists what has not been tested. Its evidence matrix shows the
-status per recipe.
+deployment and lists what has not been tested.
 
 ## 1. Install on the host
+
+*Common to every host-based setup.*
 
 ```bash
 # as a dedicated user, e.g. "mcp"
@@ -42,6 +87,8 @@ uv sync --locked --no-dev
 
 ## 2. Configure
 
+*Common to every host-based setup. Local HTTP and stdio need fewer settings, see their sections.*
+
 Create `/etc/nextcloud-organizer-mcp.env` (root-owned, mode `600` — it contains secrets):
 
 ```bash
@@ -53,8 +100,8 @@ NEXTCLOUD_APP_PASSWORD=<app password from Settings -> Security>
 # (both URLs must point at the same Nextcloud instance).
 # NEXTCLOUD_CALDAV_URL=https://cloud.example.com/remote.php/dav/
 
-# Must match the public HTTPS origin exactly (scheme + host), set up in step 4a, 4b or 4c.
-# For Funnel use https://<hostname>.<tailnet>.ts.net instead.
+# Must match the public HTTPS origin exactly (scheme + host, no /mcp), set up in step 4a,
+# 4b or 4c. For Funnel use https://<hostname>.<tailnet>.ts.net instead.
 PUBLIC_BASE_URL=https://organizer.example.com
 
 # Required for any non-localhost PUBLIC_BASE_URL, or if MCP_HOST below is
@@ -114,6 +161,8 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 
 ## 3. systemd service
 
+*Common to every host-based setup. The service also holds OAuth state under its state directory, so tokens survive restarts.*
+
 `/etc/systemd/system/nextcloud-organizer-mcp.service`:
 
 ```ini
@@ -150,6 +199,11 @@ sudo systemctl enable --now nextcloud-organizer-mcp
 sudo systemctl status nextcloud-organizer-mcp
 ```
 
+## 4. Expose the server
+
+Steps 4a, 4b and 4c are alternatives: pick one. Each provides public TLS and forwards to
+`127.0.0.1:8000`. Skip step 4 for a client on the same machine.
+
 ## 4a. Expose via Caddy or an existing proxy
 
 > **Verification status: partially tested - feedback wanted.** This recipe should
@@ -161,7 +215,7 @@ sudo systemctl status nextcloud-organizer-mcp
 > client versions - in a
 > [client compatibility report](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/new/choose)
 > or on issue [#70](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/70).
-> The [public deployment checklist](deployment-verification.md#public-deployment-checklist)
+> The [public deployment checklist](deployment-verification.md#shared-checklist)
 > lists what to check.
 
 ### Caddy on the same host

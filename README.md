@@ -95,7 +95,7 @@ your account password), then set:
 export NEXTCLOUD_BASE_URL=https://cloud.example.com
 export NEXTCLOUD_USERNAME=your-username
 export NEXTCLOUD_APP_PASSWORD=your-app-password
-export PUBLIC_BASE_URL=https://your-host.ts.net   # the URL clients use
+export PUBLIC_BASE_URL=https://organizer.example.com   # the URL clients use, no /mcp
 export MCP_OAUTH_PASSWORD=a-long-random-password  # required unless local
 ```
 
@@ -112,18 +112,37 @@ From a checkout instead: `uv sync && cp .env.example .env`, edit `.env`, then
 [`.env.example`](.env.example). `NEXTCLOUD_BASE_URL` must be `https://` unless it
 points at a local address.
 
-Client on the same machine? No public URL or password needed. The simplest setup is the
-[native stdio transport](docs/deployment.md#native-stdio-transport)
-(`MCP_TRANSPORT=stdio`, the client starts the server itself); a loopback HTTP server also
-works, see [Local-only use](docs/deployment.md#local-only-use-no-public-url).
+## Choose a deployment
 
-Otherwise expose the server (the [deployment guide](docs/deployment.md) covers Caddy
-and an existing Nextcloud reverse proxy, Tailscale Funnel for TLS, and a
-[Cloudflare Tunnel](docs/deployment.md#4c-alternative-cloudflare-tunnel) alternative;
-the Caddy and Cloudflare recipes should work but were never tested end to end)
-and add it in Claude under
+Pick the row that matches your environment. The first question is where your Claude
+client runs:
+
+- **Claude.ai (web), Claude mobile and Cowork** are cloud-hosted. Anthropic's servers
+  call your server, so it needs a **public HTTPS URL** and `MCP_OAUTH_PASSWORD`. Use one
+  of the first four rows.
+- **Claude Desktop and Claude Code on the same machine** can reach `localhost`. They need
+  no public URL and no password. Use one of the last two rows.
+
+| Option | Prerequisites | Exposure and authentication | Status |
+|---|---|---|---|
+| [Existing reverse proxy or shared Nextcloud host](docs/deployment.md#reuse-another-existing-nextcloud-proxy) | A proxy you already run with TLS on the same host, a new subdomain | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Not tested (nginx, Traefik) |
+| [New public server with Caddy](docs/deployment.md#caddy-on-the-same-host) | A host with a public IP, ports 80 and 443 open, a DNS name | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Partially tested (local Caddy only, no public run) |
+| [Cloudflare Tunnel](docs/deployment.md#4c-alternative-cloudflare-tunnel) | A domain on Cloudflare; no open ports, works behind CGNAT | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Partially tested (quick tunnel and scripted client; standalone `GET /mcp` stream failed on the quick tunnel) |
+| [Tailscale Funnel](docs/deployment.md#4b-expose-via-tailscale-funnel) | A Tailscale account with Funnel enabled | Public HTTPS. `MCP_OAUTH_PASSWORD` required | Supported, tested with claude.ai |
+| [Local HTTP](docs/deployment.md#local-only-use-no-public-url) | Client on the same machine, Node.js for `mcp-remote` | `http://127.0.0.1:8000` only, no password. Any local process can get a token | Supported, tested with `mcp-remote` |
+| [Native stdio](docs/deployment.md#native-stdio-transport) | Client on the same machine that can start a process | No port, no OAuth. Client starts the server | Supported, automated tests; client configs not run by the maintainers |
+
+Prefer containers? [Running in Docker](docs/docker.md) is an alternative to installing
+from PyPI. It only replaces the install; the public rows above still apply for exposure.
+"Supported" means the recipe has been verified end to end; the
+[verification checklist](docs/deployment-verification.md) records what was tested for
+each row and what is still pending. Everything else should work but is
+not confirmed, so reports are welcome.
+
+Once you have a public URL, add it in Claude under
 **Settings → Connectors → Add custom connector** with the URL `<PUBLIC_BASE_URL>/mcp`.
-Leave Client ID and Secret blank
+`PUBLIC_BASE_URL` is the bare origin (for example `https://organizer.example.com`, no
+`/mcp`); the connector URL adds the `/mcp` path. Leave Client ID and Secret blank
 and enter your `MCP_OAUTH_PASSWORD` on the consent page that opens. Details:
 [Authentication](docs/authentication.md#registering-the-connector-in-claude).
 
@@ -140,7 +159,7 @@ Claude ── HTTPS + OAuth 2.1 ──► your server (this project) ── CalD
 
 ## Documentation
 
-- [Deployment guide](docs/deployment.md) &mdash; systemd, Caddy/existing Nextcloud proxy, Tailscale Funnel or Cloudflare Tunnel, local-only use, and Claude connector setup
+- [Deployment guide](docs/deployment.md) &mdash; deployment chooser, systemd, Caddy/existing Nextcloud proxy, Tailscale Funnel or Cloudflare Tunnel, local-only use, and Claude connector setup
 - [Running in Docker](docs/docker.md) &mdash; container image, compose file, persistence, TLS
 - [Authentication](docs/authentication.md) &mdash; OAuth model, consent page, local security patches
 - [Tool reference](docs/tools.md) &mdash; all tools with parameters, examples and error messages
