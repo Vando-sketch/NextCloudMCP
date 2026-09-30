@@ -3,9 +3,9 @@
 Run the server on a Linux host with systemd, then choose a public HTTPS entry
 point: [Caddy or your existing Nextcloud proxy](#4a-expose-via-caddy-or-an-existing-proxy),
 [Tailscale Funnel](#4b-expose-via-tailscale-funnel), or
-[Cloudflare Tunnel](#4c-alternative-cloudflare-tunnel). Each provides TLS and
-forwards requests to the server's local HTTP port. For a client on the same
-machine, see [Local-only use](#local-only-use-no-public-url).
+[Cloudflare Tunnel](#4c-alternative-cloudflare-tunnel) (not tested end to end). Each
+provides TLS and forwards requests to the server's local HTTP port. For a client on the
+same machine, see [Local-only use](#local-only-use-no-public-url).
 
 ```text
 Clients ── HTTPS ──► existing reverse proxy
@@ -312,9 +312,11 @@ sudo systemctl restart nextcloud-organizer-mcp
 
 ## 4c. Alternative: Cloudflare Tunnel
 
-> **Verification status: partially tested - feedback wanted.** A *named* tunnel with a
-> stable hostname has **not** been tested end to end by the maintainers: no domain on
-> Cloudflare was available. What *was* tested is listed under
+> **Verification status: partially tested - feedback wanted.** This recipe should
+> work, but it has **not** been tested end to end: the maintainers had no domain on
+> Cloudflare, so a *named* tunnel with a stable hostname and a real Claude client were
+> never tried together. What *was* tested (a quick tunnel and a scripted OAuth client)
+> is listed under
 > [What has and has not been tested](#what-has-and-has-not-been-tested). If you run
 > this recipe, please report back (what worked, what did not, `cloudflared` version,
 > Cloudflare plan and security settings) in a
