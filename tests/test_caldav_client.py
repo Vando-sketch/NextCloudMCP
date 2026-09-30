@@ -1950,9 +1950,13 @@ def test_create_calendar_sets_color(service, principal):
     new_cal = _make_calendar("Events", components=["VEVENT"])
     principal.make_calendar.return_value = new_cal
 
-    service.create_calendar("Events", color="#FF7A66")
+    result = service.create_calendar("Events", color="#FF7A66")
 
-    new_cal.set_properties.assert_called_once()
+    (props,), _ = new_cal.set_properties.call_args
+    assert [(prop.tag, prop.value) for prop in props] == [
+        (caldav_client_module.ical_elements.CalendarColor.tag, "#FF7A66")
+    ]
+    assert result["color"] == "#FF7A66"
 
 
 def test_create_calendar_rejects_invalid_color(service):
@@ -3410,17 +3414,30 @@ def test_get_free_busy_own_availability_aggregates_and_merges(service, principal
     busy_event.add("dtend", datetime(2026, 7, 20, 15, 0, tzinfo=timezone.utc))
     cancelled_event = _make_vevent("event-2")
     cancelled_event.add("status", "CANCELLED")
+    overlapping_event = _make_vevent("event-3")
+    del overlapping_event["dtstart"]
+    overlapping_event.add("dtstart", datetime(2026, 7, 20, 14, 30, tzinfo=timezone.utc))
+    overlapping_event.add("dtend", datetime(2026, 7, 20, 15, 30, tzinfo=timezone.utc))
+    transparent_event = _make_vevent("event-4")
+    del transparent_event["dtstart"]
+    transparent_event.add("dtstart", datetime(2026, 7, 20, 18, 0, tzinfo=timezone.utc))
+    transparent_event.add("dtend", datetime(2026, 7, 20, 19, 0, tzinfo=timezone.utc))
+    transparent_event.add("transp", "TRANSPARENT")
     event_cal.search.return_value = [
         _make_event_obj(busy_event),
         _make_event_obj(cancelled_event),
+        _make_event_obj(overlapping_event),
+        _make_event_obj(transparent_event),
     ]
     principal.calendars.return_value = [event_cal]
 
     result = service.get_free_busy("2026-07-20", "2026-07-21")
 
     assert result["user"] is None
+    # Cancelled and transparent events do not block time; the two overlapping
+    # ones merge into a single interval.
     assert result["busy"] == [
-        {"start": "2026-07-20T16:00:00+02:00", "end": "2026-07-20T17:00:00+02:00"}
+        {"start": "2026-07-20T16:00:00+02:00", "end": "2026-07-20T17:30:00+02:00"}
     ]
 
 
@@ -3563,7 +3580,7 @@ def test_get_free_busy_for_other_user_error_response_raises_clean_error(service,
 def test_get_free_busy_for_other_user_empty_response_raises(service, principal):
     principal.freebusy_request.return_value = {}
 
-    with pytest.raises(TaskMcpError):
+    with pytest.raises(TaskMcpError, match="could not provide free/busy"):
         service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
 
 
@@ -5284,26 +5301,10 @@ def test_move_target_does_not_support_component(service, principal, mock_dav_cli
         service.move_event("Personal", "event1", "SourceList")
 
 
-def _move_pair(principal, mock_dav_client):
-    """Source + target task list wired for a successful server-side MOVE."""
-    source = _make_calendar(
-        "SourceList", url="https://cloud.example.com/dav/source/", components=["VTODO"]
-    )
-    target = _make_calendar(
-        "TargetList", url="https://cloud.example.com/dav/target/", components=["VTODO"]
-    )
-    principal.calendars.return_value = [source, target]
-    todo_obj = MagicMock()
-    todo_obj.url = "https://cloud.example.com/dav/source/task1.ics"
-    source.get_todo_by_uid.return_value = todo_obj
-    mock_dav_client.return_value.request.return_value = SimpleNamespace(status=201)
-    return source, target
-
-
 def test_move_task_reports_moved_subtask_left_without_its_parent(
     service, principal, mock_dav_client
 ):
-    source, target = _move_pair(principal, mock_dav_client)
+    source, target = _move_task_calendars(principal, mock_dav_client)
     # The parent stays behind; only the subtask moves.
     source.todos.return_value = [_hierarchy_todo("parent1", "Projekt")]
     target.todos.return_value = [_hierarchy_todo("task1", "Subtask", parent="parent1")]
@@ -5323,7 +5324,7 @@ def test_move_task_reports_moved_subtask_left_without_its_parent(
 def test_move_task_reports_subtasks_left_behind_by_their_parent(
     service, principal, mock_dav_client
 ):
-    source, target = _move_pair(principal, mock_dav_client)
+    source, target = _move_task_calendars(principal, mock_dav_client)
     # Two subtasks stay behind, pointing at the parent that just left. The
     # unrelated task in the same list is not reported.
     source.todos.return_value = [
@@ -5354,7 +5355,7 @@ def test_move_task_reports_subtasks_left_behind_by_their_parent(
 def test_move_task_reports_nothing_when_the_parent_is_already_in_the_target(
     service, principal, mock_dav_client
 ):
-    source, target = _move_pair(principal, mock_dav_client)
+    source, target = _move_task_calendars(principal, mock_dav_client)
     # The parent was moved first, so the subtask arrives next to it: the
     # RELATED-TO resolves in its new list and nothing is orphaned.
     source.todos.return_value = []
@@ -5369,7 +5370,7 @@ def test_move_task_reports_nothing_when_the_parent_is_already_in_the_target(
 
 
 def test_move_task_orphan_check_ignores_a_task_it_cannot_read(service, principal, mock_dav_client):
-    source, target = _move_pair(principal, mock_dav_client)
+    source, target = _move_task_calendars(principal, mock_dav_client)
     broken = MagicMock()
     type(broken).icalendar_component = PropertyMock(side_effect=ValueError("garbage"))
     no_uid = MagicMock()
@@ -5390,7 +5391,7 @@ def test_move_task_orphan_check_ignores_a_task_it_cannot_read(service, principal
 def test_move_task_reports_none_when_the_orphan_check_fails(
     service, principal, mock_dav_client, caplog
 ):
-    source, target = _move_pair(principal, mock_dav_client)
+    source, target = _move_task_calendars(principal, mock_dav_client)
     source.todos.side_effect = caldav_error.DAVError("listing failed")
 
     with caplog.at_level(logging.WARNING):
@@ -7142,7 +7143,7 @@ def _move_responder(*move_statuses: int):
     return respond
 
 
-def _batch_move_pair(principal) -> tuple[MagicMock, MagicMock]:
+def _batch_move_task_calendars(principal) -> tuple[MagicMock, MagicMock]:
     source = _make_calendar(
         "MCP-World", url="https://cloud.example.com/dav/source/", components=["VTODO"]
     )
@@ -7160,7 +7161,7 @@ def _movable(uid: str) -> MagicMock:
 
 
 def test_move_tasks_all_succeed(service, principal, mock_dav_client):
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     mock_dav_client.return_value.request.side_effect = _move_responder(201, 201, 201)
@@ -7179,7 +7180,7 @@ def test_move_tasks_all_succeed(service, principal, mock_dav_client):
 
 
 def test_move_tasks_resolves_each_list_once(service, principal, mock_dav_client):
-    source, _ = _batch_move_pair(principal)
+    source, _ = _batch_move_task_calendars(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     mock_dav_client.return_value.request.side_effect = _move_responder()
@@ -7192,7 +7193,7 @@ def test_move_tasks_resolves_each_list_once(service, principal, mock_dav_client)
 
 
 def test_move_tasks_reports_one_failure_and_moves_the_rest(service, principal, mock_dav_client):
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     objs = {"t1": _movable("t1"), "t3": _movable("t3")}
 
     def source_lookup(uid):
@@ -7217,7 +7218,7 @@ def test_move_tasks_reports_one_failure_and_moves_the_rest(service, principal, m
 
 def test_move_tasks_reports_a_uid_already_in_the_target(service, principal, mock_dav_client):
     """Re-running a half-failed migration must converge, not report the done half as gone."""
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     source.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
     target.get_todo_by_uid.return_value = _task_obj("t1")
     mock_dav_client.return_value.request.side_effect = _move_responder()
@@ -7239,7 +7240,7 @@ def test_move_tasks_retries_a_gateway_status_instead_of_copying(
     service, principal, mock_dav_client, retry_sleep
 ):
     """A 502 is no answer at all - copying on it is what stranded the MCP-World migration."""
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     source.get_todo_by_uid.return_value = _movable("t1")
     mock_dav_client.return_value.request.side_effect = _move_responder(502, 201)
 
@@ -7254,7 +7255,7 @@ def test_move_tasks_retry_finds_a_move_whose_answer_was_lost(
     service, principal, mock_dav_client, retry_sleep
 ):
     """The 502 came back *after* Nextcloud had already carried the MOVE out."""
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     source.get_todo_by_uid.side_effect = [_movable("t1"), caldav_error.NotFoundError()]
     target.get_todo_by_uid.return_value = _task_obj("t1")
     mock_dav_client.return_value.request.side_effect = _move_responder(502)
@@ -7268,7 +7269,7 @@ def test_move_tasks_retry_finds_a_move_whose_answer_was_lost(
 def test_move_tasks_stops_when_a_gateway_failure_outlives_its_retries(
     service, principal, mock_dav_client, retry_sleep
 ):
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
@@ -7285,7 +7286,7 @@ def test_move_tasks_stops_when_a_gateway_failure_outlives_its_retries(
 
 
 def test_move_tasks_records_a_target_clash_and_carries_on(service, principal, mock_dav_client):
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     mock_dav_client.return_value.request.side_effect = _move_responder(412, 201)
@@ -7300,7 +7301,7 @@ def test_move_tasks_records_a_target_clash_and_carries_on(service, principal, mo
 def test_move_tasks_falls_back_to_copying_when_the_server_refuses_move(
     service, principal, mock_dav_client
 ):
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     obj = _movable("t1")
     source.get_todo_by_uid.return_value = obj
     target.get_todo_by_uid.side_effect = [
@@ -7317,7 +7318,7 @@ def test_move_tasks_falls_back_to_copying_when_the_server_refuses_move(
 
 
 def test_move_tasks_auth_failure_aborts_the_batch(service, principal, mock_dav_client):
-    source, _ = _batch_move_pair(principal)
+    source, _ = _batch_move_task_calendars(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
 
@@ -7335,7 +7336,7 @@ def test_move_tasks_auth_failure_aborts_the_batch(service, principal, mock_dav_c
 
 
 def test_move_tasks_into_the_same_list_is_a_no_op(service, principal, mock_dav_client):
-    source, _ = _batch_move_pair(principal)
+    source, _ = _batch_move_task_calendars(principal)
     mock_dav_client.return_value.request.side_effect = _move_responder()
 
     res = service.move_tasks("MCP-World", ["t1"], "MCP-World")
@@ -7345,21 +7346,21 @@ def test_move_tasks_into_the_same_list_is_a_no_op(service, principal, mock_dav_c
 
 
 def test_move_tasks_unknown_target_list_rejected(service, principal):
-    _batch_move_pair(principal)
+    _batch_move_task_calendars(principal)
 
     with pytest.raises(TaskListNotFoundError):
         service.move_tasks("MCP-World", ["t1"], "GibtEsNicht")
 
 
 def test_move_tasks_empty_uids_rejected(service, principal):
-    _batch_move_pair(principal)
+    _batch_move_task_calendars(principal)
 
     with pytest.raises(InvalidTaskDataError, match="task_uids must not be empty"):
         service.move_tasks("MCP-World", [], "Archiv")
 
 
 def test_move_tasks_occurrence_uid_fails_only_its_own_entry(service, principal, mock_dav_client):
-    source, _ = _batch_move_pair(principal)
+    source, _ = _batch_move_task_calendars(principal)
     source.get_todo_by_uid.side_effect = lambda uid: _movable(uid)
     mock_dav_client.return_value.request.side_effect = _move_responder()
 
@@ -7404,7 +7405,7 @@ def test_a_url_beginning_with_digits_is_not_read_as_a_status():
 def test_move_tasks_retries_a_timeout_while_reading_the_source(
     service, principal, mock_dav_client, retry_sleep
 ):
-    source, _ = _batch_move_pair(principal)
+    source, _ = _batch_move_task_calendars(principal)
     source.get_todo_by_uid.side_effect = [
         caldav_client_module._http_errors.Timeout(),
         _movable("t1"),
@@ -7427,7 +7428,7 @@ def test_a_copy_that_got_no_answer_is_not_retried_and_says_so(
     nobody checked. So the source is kept and the message says the target is
     unknown, rather than claiming nothing was written.
     """
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     obj = _movable("t1")
     source.get_todo_by_uid.return_value = obj
     target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
@@ -7447,7 +7448,7 @@ def test_a_copy_that_got_no_answer_is_not_retried_and_says_so(
 def test_a_copy_the_server_plainly_refused_still_says_the_original_is_safe(
     service, principal, mock_dav_client
 ):
-    source, target = _batch_move_pair(principal)
+    source, target = _batch_move_task_calendars(principal)
     obj = _movable("t1")
     source.get_todo_by_uid.return_value = obj
     target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
@@ -7464,7 +7465,7 @@ def test_move_tasks_stops_on_a_call_scoped_failure_instead_of_repeating_it(
     service, principal, mock_dav_client
 ):
     """Rate limiting is the server asking for less, not one task's problem."""
-    source, _ = _batch_move_pair(principal)
+    source, _ = _batch_move_task_calendars(principal)
     objs = {uid: _movable(uid) for uid in ("t1", "t2", "t3")}
     source.get_todo_by_uid.side_effect = lambda uid: objs[uid]
     calls = []
@@ -7484,3 +7485,901 @@ def test_move_tasks_stops_on_a_call_scoped_failure_instead_of_repeating_it(
 
     # Asked once more after the first success, then stopped - not once per UID.
     assert len(calls) == 2
+
+
+# ======================================================================
+# Error paths and module helpers not reached by the tests above
+# ======================================================================
+
+#: `_sleep` as shipped - the autouse `retry_sleep` fixture replaces the module
+#: attribute for every test, so the original is captured at import time.
+_REAL_SLEEP = caldav_client_module._sleep
+
+
+def test_sleep_delegates_to_time_sleep():
+    with patch("nextcloud_organizer_mcp.caldav_client.sleep") as mock_time_sleep:
+        _REAL_SLEEP(1.5)
+
+    mock_time_sleep.assert_called_once_with(1.5)
+
+
+@pytest.mark.parametrize(
+    ("url", "reason", "expected"),
+    [
+        (None, "502 Bad Gateway", 502),  # a non-string url is skipped, reason still read
+        (None, None, None),
+        (None, "Bad Gateway", None),  # no leading status code anywhere
+    ],
+)
+def test_dav_error_status_skips_non_string_fields(url, reason, expected):
+    exc: Any = SimpleNamespace(url=url, reason=reason)
+
+    assert caldav_client_module._dav_error_status(exc) == expected
+
+
+# --- share/trash parsing helpers ---
+
+
+@pytest.mark.parametrize(
+    ("href", "expected"),
+    [
+        ("principal:principals/users/bob", ("bob", "user")),
+        ("principal:principals/groups/team", ("team", "group")),
+        ("principal:principals/users/j%C3%BCrgen", ("jürgen", "user")),
+        ("", (None, "user")),  # nothing left after stripping
+        ("principal:/", (None, "user")),
+        ("bob", ("bob", "user")),  # a single segment: kind can't be told, assume user
+        ("/some/odd/path/carol", ("carol", "user")),  # no users/groups segment before the id
+    ],
+)
+def test_parse_principal_href(href, expected):
+    assert caldav_client_module._parse_principal_href(href) == expected
+
+
+@pytest.mark.parametrize(
+    ("href", "expected"),
+    [
+        (
+            "https://cloud.example.com/remote.php/dav/calendars/u/a",
+            "/remote.php/dav/calendars/u/a/",
+        ),
+        ("/remote.php/dav/calendars/u/a/", "/remote.php/dav/calendars/u/a/"),
+        ("/remote.php/dav/calendars/u/M%C3%BCll/", "/remote.php/dav/calendars/u/Müll/"),
+    ],
+)
+def test_normalize_collection_href(href, expected):
+    assert caldav_client_module._normalize_collection_href(href) == expected
+
+
+def _multistatus(*responses: str) -> Any:
+    return etree.fromstring(
+        (
+            '<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">'
+            + "".join(responses)
+            + "</d:multistatus>"
+        ).encode("utf-8")
+    )
+
+
+def test_iter_multistatus_responses_skips_entries_without_usable_properties():
+    tree = _multistatus(
+        "<d:response><d:propstat><d:prop><oc:a/></d:prop>"
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",  # no href
+        "<d:response><d:href></d:href></d:response>",  # empty href
+        "<d:response><d:href>/x/</d:href><d:propstat>"
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",  # no prop element
+        "<d:response><d:href>/y/</d:href><d:propstat><d:prop><oc:a/></d:prop>"
+        "<d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>",
+        "<d:response><d:href>/z/</d:href><d:propstat><d:prop><oc:b/></d:prop>"
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
+    )
+
+    result = list(caldav_client_module._iter_multistatus_responses(tree))
+
+    # "/x/" and "/y/" are still reported, just with no properties.
+    assert [(href, sorted(props)) for href, props in result] == [
+        ("/x/", []),
+        ("/y/", []),
+        ("/z/", ["{http://owncloud.org/ns}b"]),
+    ]
+
+
+def test_iter_multistatus_responses_accepts_no_tree():
+    assert list(caldav_client_module._iter_multistatus_responses(None)) == []
+
+
+def test_parse_invite_response_skips_unusable_entries():
+    tree = _multistatus(
+        # No {oc}invite property at all.
+        "<d:response><d:href>/a/</d:href><d:propstat><d:prop><oc:other/></d:prop>"
+        "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
+        "<d:response><d:href>/b/</d:href><d:propstat><d:prop><oc:invite>"
+        "<oc:user><oc:invite-accepted/></oc:user>"  # no href
+        "<oc:user><d:href></d:href></oc:user>"  # empty href
+        "<oc:user><d:href>principal:/</d:href></oc:user>"  # href without a recipient
+        "<oc:user><d:href>principal:principals/users/bob</d:href>"
+        "<oc:invite-declined/></oc:user>"
+        "</oc:invite></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
+    )
+
+    assert caldav_client_module._parse_invite_response(tree) == [
+        {"recipient": "bob", "type": "user", "write_access": False, "status": "declined"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("not a timestamp", None),
+        ("1785000000", "2026-07-25T19:20:00+02:00"),
+        ("2026-07-25T17:20:00Z", "2026-07-25T19:20:00+02:00"),
+        # A server-side timestamp without an offset is UTC, not local wall clock.
+        ("2026-07-25T17:20:00", "2026-07-25T19:20:00+02:00"),
+        # Out of range for an epoch, and not an ISO date either.
+        ("99999999999999999999", None),
+    ],
+)
+def test_parse_deleted_at(raw, expected):
+    assert caldav_client_module._parse_deleted_at(raw) == expected
+
+
+_VEVENT_ICS = (
+    "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:e\n{summary}END:VEVENT\nEND:VCALENDAR\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("ics", "expected"),
+    [
+        (None, (None, None)),
+        ("", (None, None)),
+        ("  \n ", (None, None)),
+        ("garbage {{{", (None, None)),
+        ("BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n", (None, None)),  # nothing to name
+        (_VEVENT_ICS.format(summary="SUMMARY:Dentist\n"), ("Dentist", "event")),
+        (_VEVENT_ICS.format(summary=""), (None, "event")),  # untitled event keeps its type
+        (_TRASHED_TODO_ICS, ("Shopping", "task")),
+    ],
+)
+def test_derive_title_and_type(ics, expected):
+    assert caldav_client_module._derive_title_and_type(ics) == expected
+
+
+@pytest.mark.parametrize(
+    ("dt", "expected"),
+    [
+        # Floating: no instant to convert to, so compared as written.
+        (datetime(2026, 7, 20, 10, 0), "20260720T100000"),
+        (datetime(2026, 7, 20, 10, 0, tzinfo=BERLIN), "20260720T080000Z"),
+        (date(2026, 7, 20), "20260720T000000Z"),
+    ],
+)
+def test_recurrence_marker_collapses_datelike_values_to_utc(dt, expected):
+    assert caldav_client_module._recurrence_marker(SimpleNamespace(dt=dt)) == expected
+
+
+def test_recurrence_marker_falls_back_to_the_raw_property_text():
+    prop = MagicMock(spec=["dt", "to_ical"])
+    prop.dt = "not a datetime"
+    prop.to_ical.return_value = b"RAW-VALUE"
+    assert caldav_client_module._recurrence_marker(prop) == "RAW-VALUE"
+
+    prop.to_ical.side_effect = ValueError("cannot serialize")
+    assert caldav_client_module._recurrence_marker(prop) == str(prop)
+
+
+# --- own calendar-user addresses (respond_to_event) ---
+
+
+def test_own_calendar_user_addresses_are_stripped_and_cached(service, principal):
+    principal.calendar_user_address_set.return_value = [" mailto:me@example.com ", "", "/p/me/"]
+
+    first = service._get_own_calendar_user_addresses()
+    second = service._get_own_calendar_user_addresses()
+
+    assert first == ["mailto:me@example.com", "/p/me/"]
+    assert second is first
+    principal.calendar_user_address_set.assert_called_once_with()
+
+
+@pytest.mark.parametrize("failure", [{"return_value": []}, {"side_effect": RuntimeError("nope")}])
+def test_own_calendar_user_addresses_fall_back_to_the_organizer_address(
+    service, principal, failure
+):
+    principal.calendar_user_address_set.configure_mock(**failure)
+    principal.get_vcal_address.return_value = "mailto:vcal@example.com"
+
+    assert service._get_own_calendar_user_addresses() == ["mailto:vcal@example.com"]
+
+
+def test_supported_components_of_an_unreadable_calendar_mean_no_restriction(service, principal):
+    calendar = _make_calendar("Odd", "https://other.example.com/dav/odd/")
+    calendar.get_supported_components.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [calendar]
+
+    # An empty set reads as "supports everything", so the list is still usable
+    # for both kinds instead of erroring out.
+    assert [entry["name"] for entry in service.list_task_lists()] == ["Odd"]
+    assert [entry["name"] for entry in service.list_calendars()] == ["Odd"]
+
+
+# --- calendars: validation and failure paths ---
+
+
+def test_list_calendars_same_named_calendars_are_never_served_from_the_cache(service, principal):
+    first = _make_calendar("Events", "https://cloud.example.com/dav/e1/", components=["VEVENT"])
+    second = _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"])
+    first.get_properties.return_value = {}
+    second.get_properties.return_value = {}
+    principal.calendars.return_value = [first, second]
+
+    result = service.list_calendars()
+
+    assert [entry["url"] for entry in result] == [
+        "https://cloud.example.com/dav/e1/",
+        "https://cloud.example.com/dav/e2/",
+    ]
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.get_event("Events", "event-1")
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_create_calendar_requires_a_display_name(service, name):
+    with pytest.raises(InvalidEventDataError, match="display_name is required"):
+        service.create_calendar(name)
+
+
+def test_create_calendar_translates_a_failing_color_write(service, principal):
+    principal.calendars.return_value = []
+    new_cal = _make_calendar("Events", components=["VEVENT"])
+    new_cal.set_properties.side_effect = RuntimeError("boom")
+    principal.make_calendar.return_value = new_cal
+
+    with pytest.raises(TaskMcpError):
+        service.create_calendar("Events", color="#FF7A66")
+
+
+def test_delete_calendar_not_found_while_deleting(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.delete.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.delete_calendar("Events")
+
+
+def test_delete_calendar_translates_generic_exception(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.delete.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError):
+        service.delete_calendar("Events")
+
+
+def test_delete_calendar_ambiguous_name_deletes_nothing(service, principal):
+    cal1 = _make_calendar("Events", "https://cloud.example.com/dav/e1/", components=["VEVENT"])
+    cal2 = _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"])
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.delete_calendar("Events")
+
+    cal1.delete.assert_not_called()
+    cal2.delete.assert_not_called()
+
+
+def test_update_calendar_rejects_an_empty_new_name(service):
+    with pytest.raises(InvalidEventDataError, match="must not be empty"):
+        service.update_calendar("Events", new_display_name="  ")
+
+
+def test_update_calendar_rejects_an_invalid_color(service):
+    with pytest.raises(InvalidEventDataError, match="color"):
+        service.update_calendar("Events", color="red")
+
+
+def test_update_calendar_unknown_calendar_raises(service, principal):
+    principal.calendars.return_value = [_make_calendar("Tasks", components=["VTODO"])]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.update_calendar("Events", color="#00679e")
+
+
+def test_update_calendar_ambiguous_name_changes_nothing(service, principal):
+    cal1 = _make_calendar("Events", "https://cloud.example.com/dav/e1/", components=["VEVENT"])
+    cal2 = _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"])
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.update_calendar("Events", color="#00679e")
+
+    cal1.set_properties.assert_not_called()
+    cal2.set_properties.assert_not_called()
+
+
+def test_update_calendar_translates_a_failing_write(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.set_properties.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError):
+        service.update_calendar("Events", new_display_name="Work")
+
+
+# --- list_events with a one-sided range ---
+
+
+@pytest.mark.parametrize(
+    ("bounds", "expected_start", "expected_end"),
+    [
+        (
+            {"start": "2026-07-01"},
+            datetime(2026, 7, 1, tzinfo=BERLIN),
+            caldav_client_module._RANGE_MAX,
+        ),
+        (
+            {"end": "2026-07-31"},
+            caldav_client_module._RANGE_MIN,
+            datetime(2026, 8, 1, tzinfo=BERLIN),
+        ),
+    ],
+    ids=["start-only", "end-only"],
+)
+def test_list_events_widens_the_omitted_side_of_the_range(
+    service, principal, bounds, expected_start, expected_end
+):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    service.list_events(**bounds)
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"] == expected_start
+    assert kwargs["end"] == expected_end
+    event_cal.events.assert_not_called()
+
+
+# --- event methods: failure translation and ambiguity ---
+
+
+def _hello_event_fields() -> event_mapping.EventFields:
+    return event_mapping.EventFields(title="Hello", start="2026-07-20T10:00:00")
+
+
+#: (name, call, calendar attribute the operation goes through)
+_EVENT_OPERATIONS = [
+    pytest.param(lambda s: s.get_event("Events", "e1"), "event_by_uid", id="get_event"),
+    pytest.param(
+        lambda s: s.create_event("Events", _hello_event_fields()), "save_event", id="create_event"
+    ),
+    pytest.param(
+        lambda s: s.update_event("Events", "e1", event_mapping.EventFields(title="New")),
+        "event_by_uid",
+        id="update_event",
+    ),
+    pytest.param(
+        lambda s: s.respond_to_event("Events", "e1", "accepted"),
+        "event_by_uid",
+        id="respond_to_event",
+    ),
+    pytest.param(lambda s: s.delete_event("Events", "e1"), "event_by_uid", id="delete_event"),
+]
+
+
+@pytest.mark.parametrize(("call", "attr"), _EVENT_OPERATIONS)
+def test_event_operation_translates_generic_exception(service, principal, call, attr):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    getattr(event_cal, attr).side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        call(service)
+
+    assert "boom" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(("call", "attr"), _EVENT_OPERATIONS)
+def test_event_operation_on_an_ambiguous_calendar_name_is_rejected(service, principal, call, attr):
+    cal1 = _make_calendar("Events", "https://cloud.example.com/dav/e1/", components=["VEVENT"])
+    cal2 = _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"])
+    principal.calendars.return_value = [cal1, cal2]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        call(service)
+
+    for calendar in (cal1, cal2):
+        getattr(calendar, attr).assert_not_called()
+
+
+def test_create_event_in_unknown_calendar_while_saving(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.save_event.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.create_event("Events", _hello_event_fields())
+
+
+def test_list_events_translates_generic_exception(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.events.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(TaskMcpError):
+        service.list_events()
+
+
+def test_list_events_not_found_while_querying_all_calendars(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.events.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.list_events()
+
+
+def test_list_events_reraises_ambiguity_of_a_named_calendar(service, principal):
+    principal.calendars.return_value = [
+        _make_calendar("Events", "https://cloud.example.com/dav/e1/", components=["VEVENT"]),
+        _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"]),
+    ]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.list_events(calendar_names=["Events"])
+
+
+# --- task <-> event linking: failure paths ---
+
+
+def _link_calendars(principal) -> tuple[MagicMock, MagicMock]:
+    task_list = _make_calendar("Tasks", "https://cloud.example.com/dav/t/", components=["VTODO"])
+    event_cal = _make_calendar("Events", "https://cloud.example.com/dav/e/", components=["VEVENT"])
+    task_list.get_todo_by_uid.return_value = MagicMock()
+    event_cal.event_by_uid.return_value = _make_event_obj()
+    event_cal.events.return_value = []
+    principal.calendars.return_value = [task_list, event_cal]
+    return task_list, event_cal
+
+
+_LINK_CALLS = [
+    pytest.param(lambda s: s.link_task_to_event("Tasks", "t1", "Events", "e1"), id="link"),
+    pytest.param(lambda s: s.list_events_for_task("Tasks", "t1"), id="list_for_task"),
+]
+
+
+@pytest.mark.parametrize("call", _LINK_CALLS)
+def test_linking_translates_generic_exception_from_the_task_check(service, principal, call):
+    task_list, _ = _link_calendars(principal)
+    task_list.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        call(service)
+
+
+@pytest.mark.parametrize("call", _LINK_CALLS)
+def test_linking_reraises_ambiguity_of_the_task_list(service, principal, call):
+    _link_calendars(principal)
+    principal.calendars.return_value.append(
+        _make_calendar("Tasks", "https://cloud.example.com/dav/t2/", components=["VTODO"])
+    )
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        call(service)
+
+
+def test_link_task_to_event_translates_generic_exception_from_the_event_write(service, principal):
+    _, event_cal = _link_calendars(principal)
+    event_cal.event_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.link_task_to_event("Tasks", "t1", "Events", "e1")
+
+
+def test_link_task_to_event_reraises_ambiguity_of_the_calendar(service, principal):
+    _link_calendars(principal)
+    principal.calendars.return_value.append(
+        _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"])
+    )
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.link_task_to_event("Tasks", "t1", "Events", "e1")
+
+
+def test_list_events_for_task_translates_generic_exception_from_a_calendar(service, principal):
+    _, event_cal = _link_calendars(principal)
+    event_cal.events.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.list_events_for_task("Tasks", "t1")
+
+
+def test_list_events_for_task_not_found_while_querying_all_calendars(service, principal):
+    _, event_cal = _link_calendars(principal)
+    event_cal.events.side_effect = caldav_error.NotFoundError("gone")
+
+    with pytest.raises(CalendarNotFoundError):
+        service.list_events_for_task("Tasks", "t1")
+
+
+def test_list_events_for_task_reraises_ambiguity_of_a_named_calendar(service, principal):
+    _link_calendars(principal)
+    principal.calendars.return_value.append(
+        _make_calendar("Events", "https://cloud.example.com/dav/e2/", components=["VEVENT"])
+    )
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.list_events_for_task("Tasks", "t1", calendar_names=["Events"])
+
+
+# --- get_agenda with named task lists ---
+
+
+def test_get_agenda_reads_only_the_named_task_lists(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.search.return_value = []
+    todo = Todo()
+    todo.add("uid", "task-1")
+    todo.add("summary", "Taxes")
+    todo.add("due", datetime(2026, 7, 20, 10, 0, tzinfo=BERLIN))
+    todo_obj = MagicMock()
+    todo_obj.icalendar_component = todo
+    wanted = _make_calendar("Private", "https://cloud.example.com/dav/p/", components=["VTODO"])
+    wanted.todos.return_value = [todo_obj]
+    other = _make_calendar("Work", "https://cloud.example.com/dav/w/", components=["VTODO"])
+    other.todos.return_value = [todo_obj]
+    principal.calendars.return_value = [event_cal, wanted, other]
+
+    result = service.get_agenda("2026-07-20", list_names=["Private"])
+
+    assert [(t["uid"], t["list"]) for t in result["tasks"]] == [("task-1", "Private")]
+    other.todos.assert_not_called()
+
+
+# --- get_free_busy: remaining failure paths ---
+
+
+def test_get_free_busy_requires_both_bounds(service):
+    with pytest.raises(InvalidEventDataError, match="start and end are required"):
+        service.get_free_busy(None, "2026-07-21")
+
+
+def test_get_free_busy_own_availability_not_found_while_searching(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.search.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(CalendarNotFoundError):
+        service.get_free_busy("2026-07-20", "2026-07-21")
+
+
+def test_get_free_busy_for_other_user_reraises_a_principal_failure(service, mock_dav_client):
+    mock_dav_client.return_value.principal.side_effect = caldav_error.AuthorizationError("bad")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_rejects_a_non_dict_response(service, principal):
+    principal.freebusy_request.return_value = "<html>login</html>"
+
+    with pytest.raises(TaskMcpError, match="unexpected free/busy response"):
+        service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_finds_a_differently_spelled_key(service, principal):
+    vfb = FreeBusy()
+    vfb.add(
+        "freebusy",
+        [
+            (
+                datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+                datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    # The server echoed the recipient back in another case.
+    principal.freebusy_request.return_value = {"mailto:Bob@Example.com": _make_freebusy_obj(vfb)}
+
+    result = service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
+
+    assert result["busy"] == [
+        {"start": "2026-07-20T11:00:00+02:00", "end": "2026-07-20T12:00:00+02:00"}
+    ]
+
+
+def test_get_free_busy_for_other_user_names_the_server_status_of_a_failed_request(
+    service, principal
+):
+    principal.freebusy_request.return_value = {"errors": {"mailto:bob@example.com": "3.7;Unknown"}}
+
+    with pytest.raises(TaskMcpError, match=r"Server status: 3\.7;Unknown"):
+        service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
+
+
+def test_get_free_busy_for_other_user_translates_an_unreadable_entry(service, principal):
+    entry = MagicMock()
+    type(entry).icalendar_component = PropertyMock(side_effect=RuntimeError("boom"))
+    principal.freebusy_request.return_value = {"mailto:bob@example.com": entry}
+
+    with pytest.raises(TaskMcpError):
+        service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
+
+
+# --- raw DAV requests (sharing, trashbin) ---
+
+
+def test_dav_request_passes_through_an_already_clean_error(service, principal, dav_client):
+    principal.calendars.return_value = [_make_calendar("Private", components=["VEVENT"])]
+    dav_client.request.side_effect = ConnectionFailedError("down")
+
+    with pytest.raises(ConnectionFailedError, match="down"):
+        service.share_calendar("Private", "bob")
+
+
+def test_dav_request_translates_unexpected_exceptions(service, principal, dav_client):
+    principal.calendars.return_value = [_make_calendar("Private", components=["VEVENT"])]
+    dav_client.request.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.share_calendar("Private", "bob")
+
+    assert "boom" not in str(exc_info.value)
+
+
+# --- export / import: failure paths ---
+
+
+def test_export_calendar_translates_an_unreadable_object(service, principal):
+    calendar = _make_calendar("Private", components=["VEVENT"])
+    broken = MagicMock()
+    type(broken).icalendar_instance = PropertyMock(side_effect=RuntimeError("boom"))
+    calendar.events.return_value = [broken]
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(TaskMcpError):
+        service.export_calendar("Private")
+
+
+def test_import_ics_translates_a_failing_save(service, principal):
+    calendar = _make_calendar("Events", components=["VEVENT"])
+    calendar.save_event.side_effect = RuntimeError("boom")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(TaskMcpError):
+        service.import_ics("Events", _ICS_WITH_TZ.format(uid="e1", summary="One"))
+
+
+# --- moving: failure paths ---
+
+
+def _move_requests(mock_dav_client) -> list[Any]:
+    """The MOVE requests sent so far (the client also sends metadata PROPFINDs)."""
+    return [c for c in mock_dav_client.return_value.request.call_args_list if c.args[1] == "MOVE"]
+
+
+def _copy_fallback_move(principal, mock_dav_client, *, status: int = 405, target_url=None):
+    """Task lists wired so 'task1' has to be moved by copying (server refuses MOVE)."""
+    source, target = _move_task_calendars(principal, mock_dav_client, status=status)
+    if target_url is not None:
+        target.url = target_url
+    todo_obj = source.get_todo_by_uid.return_value
+    todo_obj.icalendar_instance = Calendar()
+    return source, target, todo_obj
+
+
+def test_move_probes_the_target_before_calling_the_uid_missing(service, principal, mock_dav_client):
+    source, target = _move_task_calendars(principal, mock_dav_client)
+    source.get_todo_by_uid.side_effect = caldav_error.NotFoundError("gone")
+    target.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError) as exc_info:
+        service.move_task("SourceList", "task1", "TargetList")
+
+    # The probe's own failure is what gets reported, not "task not found".
+    assert not isinstance(exc_info.value, TaskNotFoundError)
+
+
+def test_move_reraises_a_clean_error_from_the_target_probe(service, principal, mock_dav_client):
+    source, target = _move_task_calendars(principal, mock_dav_client)
+    source.get_todo_by_uid.side_effect = caldav_error.NotFoundError("gone")
+    target.get_todo_by_uid.side_effect = AuthenticationFailedError("no")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+
+def test_move_reraises_a_clean_error_from_reading_the_source(service, principal, mock_dav_client):
+    source, _ = _move_task_calendars(principal, mock_dav_client)
+    source.get_todo_by_uid.side_effect = AuthenticationFailedError("no")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    assert _move_requests(mock_dav_client) == []
+
+
+def test_move_destination_gets_a_slash_when_the_target_url_lacks_one(
+    service, principal, mock_dav_client
+):
+    _move_task_calendars(principal, mock_dav_client)
+    principal.calendars.return_value[1].url = "https://cloud.example.com/dav/target"
+
+    service.move_task("SourceList", "task1", "TargetList")
+
+    (_, method, _, headers), _ = mock_dav_client.return_value.request.call_args
+    assert method == "MOVE"
+    assert headers["Destination"] == "https://cloud.example.com/dav/target/task1.ics"
+
+
+def test_move_reraises_a_clean_error_from_the_move_request(service, principal, mock_dav_client):
+    _, target = _move_task_calendars(principal, mock_dav_client)
+    mock_dav_client.return_value.request.side_effect = AuthenticationFailedError("no")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    target.save_todo.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [400, 404, 423, 500])
+def test_move_rejected_with_an_unexpected_status_does_not_fall_back_to_copying(
+    service, principal, mock_dav_client, status
+):
+    source, target = _move_task_calendars(principal, mock_dav_client, status=status)
+
+    with pytest.raises(TaskMcpError, match=f"HTTP {status}"):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    target.save_todo.assert_not_called()
+    source.get_todo_by_uid.return_value.delete.assert_not_called()
+
+
+def test_move_fallback_translates_a_failing_target_precheck(service, principal, mock_dav_client):
+    _, target, todo_obj = _copy_fallback_move(principal, mock_dav_client)
+    target.get_todo_by_uid.side_effect = RuntimeError("boom")
+
+    with pytest.raises(TaskMcpError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    target.save_todo.assert_not_called()
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_reraises_a_clean_error_from_the_target_precheck(
+    service, principal, mock_dav_client
+):
+    _, target, todo_obj = _copy_fallback_move(principal, mock_dav_client)
+    target.get_todo_by_uid.side_effect = AuthenticationFailedError("no")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    target.save_todo.assert_not_called()
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_reraises_a_clean_error_from_the_copy_write(
+    service, principal, mock_dav_client
+):
+    _, target, todo_obj = _copy_fallback_move(principal, mock_dav_client)
+    target.get_todo_by_uid.side_effect = caldav_error.NotFoundError()
+    target.save_todo.side_effect = AuthenticationFailedError("no")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_reraises_a_clean_error_from_the_read_back(
+    service, principal, mock_dav_client
+):
+    _, target, todo_obj = _copy_fallback_move(principal, mock_dav_client)
+    target.get_todo_by_uid.side_effect = [
+        caldav_error.NotFoundError(),
+        AuthenticationFailedError("no"),
+    ]
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    todo_obj.delete.assert_not_called()
+
+
+def test_move_fallback_reraises_a_clean_error_from_deleting_the_original(
+    service, principal, mock_dav_client
+):
+    _, target, todo_obj = _copy_fallback_move(principal, mock_dav_client)
+    target.get_todo_by_uid.side_effect = [caldav_error.NotFoundError(), MagicMock()]
+    todo_obj.delete.side_effect = AuthenticationFailedError("no")
+
+    with pytest.raises(AuthenticationFailedError):
+        service.move_task("SourceList", "task1", "TargetList")
+
+
+def test_move_into_an_ambiguous_target_name_moves_nothing(service, principal, mock_dav_client):
+    source, _ = _move_task_calendars(principal, mock_dav_client)
+    principal.calendars.return_value.append(
+        _make_calendar("TargetList", "https://cloud.example.com/dav/target2/", components=["VTODO"])
+    )
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        service.move_task("SourceList", "task1", "TargetList")
+
+    source.get_todo_by_uid.assert_not_called()
+    assert _move_requests(mock_dav_client) == []
+
+
+# --- remaining failure paths ---
+
+
+def test_list_events_accepts_a_timezone_aware_datetime_bound(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.search.return_value = []
+    principal.calendars.return_value = [event_cal]
+
+    service.list_events(start="2026-07-01T08:00:00+00:00", end="2026-07-01T09:00:00+00:00")
+
+    _, kwargs = event_cal.search.call_args
+    assert kwargs["start"] == datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc)
+    assert kwargs["end"] == datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda s: s.delete_tasks("Personal", ["t1"]),
+        lambda s: s.delete_events("Personal", ["e1"]),
+    ],
+    ids=["tasks", "events"],
+)
+def test_batch_on_an_ambiguous_collection_name_is_rejected_up_front(service, principal, call):
+    principal.calendars.return_value = [
+        _make_calendar(
+            "Personal", "https://cloud.example.com/dav/p1/", components=["VTODO", "VEVENT"]
+        ),
+        _make_calendar(
+            "Personal", "https://cloud.example.com/dav/p2/", components=["VTODO", "VEVENT"]
+        ),
+    ]
+
+    with pytest.raises(TaskMcpError, match="ambiguous"):
+        call(service)
+
+
+def test_delete_event_unknown_uid(service, principal):
+    event_cal = _make_calendar("Events", components=["VEVENT"])
+    event_cal.event_by_uid.side_effect = caldav_error.NotFoundError("gone")
+    principal.calendars.return_value = [event_cal]
+
+    with pytest.raises(EventNotFoundError, match="missing"):
+        service.delete_event("Events", "missing")
+
+
+def test_link_task_to_event_unknown_event_uid(service, principal):
+    _, event_cal = _link_calendars(principal)
+    event_cal.event_by_uid.side_effect = caldav_error.NotFoundError("gone")
+
+    with pytest.raises(EventNotFoundError, match="missing"):
+        service.link_task_to_event("Tasks", "t1", "Events", "missing")
+
+
+def test_get_free_busy_for_other_user_reraises_a_clean_scheduling_error(service, principal):
+    principal.freebusy_request.side_effect = ConnectionFailedError("down")
+
+    with pytest.raises(ConnectionFailedError):
+        service.get_free_busy("2026-07-20", "2026-07-21", user="bob@example.com")
+
+
+def test_import_ics_reraises_a_clean_error_from_a_save(service, principal):
+    calendar = _make_calendar("Events", components=["VEVENT"])
+    calendar.save_event.side_effect = ConnectionFailedError("down")
+    principal.calendars.return_value = [calendar]
+
+    with pytest.raises(ConnectionFailedError):
+        service.import_ics("Events", _ICS_WITH_TZ.format(uid="e1", summary="One"))

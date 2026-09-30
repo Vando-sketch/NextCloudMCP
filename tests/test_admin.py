@@ -11,7 +11,9 @@ PersonalAuthProvider writes.
 from __future__ import annotations
 
 import json
+import runpy
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,14 @@ from conftest import TEST_OAUTH_PASSWORD, issue_token, run_async
 
 from nextcloud_organizer_mcp import admin
 from nextcloud_organizer_mcp.personal_auth import PersonalAuthProvider
+
+
+@pytest.fixture(autouse=True)
+def _clean_admin_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLI reads these from the environment; a developer's real values must
+    not change what any test here observes."""
+    monkeypatch.delenv("MCP_DEFAULT_TIMEZONE", raising=False)
+    monkeypatch.delenv("MCP_OAUTH_STATE_DIR", raising=False)
 
 
 def _state_dir(tmp_path: Path) -> Path:
@@ -92,7 +102,6 @@ def test_list_prints_expiry_in_the_servers_default_timezone(tmp_path, capsys, mo
     admin comparing the two and concluding a token lives two hours longer than
     it does.
     """
-    monkeypatch.delenv("MCP_DEFAULT_TIMEZONE", raising=False)
     state_dir = _seed_expiring_token(tmp_path, 1735689600)  # 2025-01-01T00:00:00Z
 
     exit_code = admin.main(["--state-dir", str(state_dir), "list"])
@@ -100,6 +109,19 @@ def test_list_prints_expiry_in_the_servers_default_timezone(tmp_path, capsys, mo
 
     assert exit_code == 0
     assert "expires=2025-01-01T01:00:00+01:00" in out
+
+
+def test_list_shows_never_for_a_token_without_expiry(tmp_path, capsys):
+    state_dir = _state_dir(tmp_path)
+    state_dir.mkdir(parents=True)
+    (state_dir / "oauth_tokens.json").write_text(
+        json.dumps({"access_tokens": {"tok-abcdef": {"client_id": "c1"}}, "refresh_tokens": {}})
+    )
+
+    exit_code = admin.main(["--state-dir", str(state_dir), "list"])
+
+    assert exit_code == 0
+    assert "expires=never" in capsys.readouterr().out
 
 
 def test_list_expiry_follows_a_configured_mcp_default_timezone(tmp_path, capsys, monkeypatch):
@@ -164,6 +186,19 @@ def test_revoke_unknown_prefix_returns_error_and_leaves_state_untouched(tmp_path
     assert (state_dir / "oauth_tokens.json").read_text() == before
 
 
+def test_revoke_empty_prefix_is_refused_and_leaves_state_untouched(tmp_path, capsys):
+    # Every token starts with "", so this would otherwise revoke all of them.
+    state_dir, _access_token, _refresh_token = _seed_one_token(tmp_path)
+    before = (state_dir / "oauth_tokens.json").read_text()
+
+    exit_code = admin.main(["--state-dir", str(state_dir), "revoke", ""])
+    err = capsys.readouterr().err
+
+    assert exit_code == 1
+    assert "empty token prefix" in err
+    assert (state_dir / "oauth_tokens.json").read_text() == before
+
+
 def test_revoke_full_token_value_also_matches(tmp_path, capsys):
     # A prefix search naturally also matches the complete token string.
     state_dir, access_token, _refresh_token = _seed_one_token(tmp_path)
@@ -211,6 +246,32 @@ def test_revoke_does_not_disturb_other_clients_tokens(tmp_path, capsys):
     assert token_b.refresh_token in data["refresh_tokens"]
 
 
+def test_revoke_when_prefix_matches_both_halves_of_a_pair_reports_each_token_once(tmp_path, capsys):
+    # A prefix shared by an access token and its own paired refresh token
+    # matches both; the second match must be skipped, not double-deleted.
+    state_dir = _state_dir(tmp_path)
+    state_dir.mkdir(parents=True)
+    state_file = state_dir / "oauth_tokens.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "access_tokens": {"tok-access": {"client_id": "c1"}},
+                "refresh_tokens": {"tok-refresh": {"client_id": "c1"}},
+                "a2r": {"tok-access": "tok-refresh"},
+                "r2a": {"tok-refresh": "tok-access"},
+            }
+        )
+    )
+
+    exit_code = admin.main(["--state-dir", str(state_dir), "revoke", "tok-"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert out.count("Revoked") == 2
+    data = json.loads(state_file.read_text())
+    assert data["access_tokens"] == data["refresh_tokens"] == data["a2r"] == data["r2a"] == {}
+
+
 # --- state-dir resolution ---
 
 
@@ -237,9 +298,31 @@ def test_state_dir_defaults_to_env_var_when_flag_omitted(tmp_path, monkeypatch, 
     assert str(env_dir) in out
 
 
+def test_state_dir_defaults_to_dot_oauth_state_when_flag_and_env_omitted(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)  # the default is relative to the cwd
+
+    exit_code = admin.main(["list"])
+
+    assert exit_code == 0
+    assert ".oauth-state" in capsys.readouterr().out
+
+
 def test_no_command_is_a_usage_error(capsys):
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as excinfo:
         admin.main([])
+    assert excinfo.value.code == 2
+
+
+def test_running_the_module_as_a_script_exits_with_the_command_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["admin", "--state-dir", str(_state_dir(tmp_path)), "list"])
+
+    with pytest.warns(RuntimeWarning):  # already imported as a package module
+        with pytest.raises(SystemExit) as excinfo:
+            runpy.run_module("nextcloud_organizer_mcp.admin", run_name="__main__")
+
+    assert excinfo.value.code == 0
 
 
 # --- load_state / save_state helpers directly ---

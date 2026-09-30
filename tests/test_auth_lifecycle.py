@@ -217,7 +217,7 @@ def test_provider_starts_empty_when_state_file_absent(tmp_path):
 # --- Bounded refresh-token lifetime (D5, personal_auth.py LOCAL PATCH 4) ---
 
 
-def test_refresh_token_gets_bounded_expiry_by_default(tmp_path):
+def test_refresh_token_gets_bounded_expiry_from_the_configured_seconds(tmp_path):
     async def scenario():
         before = int(time.time())
         provider = _provider(tmp_path, refresh_token_expiry_seconds=1000)
@@ -277,12 +277,13 @@ def test_refresh_token_rotation_preserves_bounded_expiry(tmp_path):
 
         loaded_refresh = await provider.load_refresh_token(client, token.refresh_token)
         assert loaded_refresh is not None
+        before = int(time.time())
         new_token = await provider.exchange_refresh_token(client, loaded_refresh, scopes=[])
         assert new_token.refresh_token is not None
 
         rotated_refresh_obj = provider.refresh_tokens[new_token.refresh_token]
         assert rotated_refresh_obj.expires_at is not None
-        assert rotated_refresh_obj.expires_at <= int(time.time()) + 1000 + 2
+        assert before + 1000 <= rotated_refresh_obj.expires_at <= int(time.time()) + 1000 + 2
 
     run_async(scenario())
 
@@ -300,7 +301,11 @@ def test_default_refresh_token_expiry_is_180_days(tmp_path):
 
         refresh_obj = provider.refresh_tokens[token.refresh_token]
         assert refresh_obj.expires_at is not None
-        assert before + DEFAULT_REFRESH_TOKEN_EXPIRY <= refresh_obj.expires_at
+        assert (
+            before + DEFAULT_REFRESH_TOKEN_EXPIRY
+            <= refresh_obj.expires_at
+            <= int(time.time()) + DEFAULT_REFRESH_TOKEN_EXPIRY + 2
+        )
 
     run_async(scenario())
 

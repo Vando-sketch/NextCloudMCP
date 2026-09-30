@@ -556,3 +556,23 @@ def test_timeout_becomes_connection_failed_error():
     service = _service(handler)
     with pytest.raises(ConnectionFailedError):
         _run(service.list_notes())
+
+
+def test_unexpected_exception_becomes_generic_task_mcp_error_without_leaking_details():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("secret internal detail")
+
+    service = _service(handler)
+    with pytest.raises(TaskMcpError, match="unexpected error") as excinfo:
+        _run(service.list_notes())
+
+    assert "secret internal detail" not in str(excinfo.value)
+    assert not isinstance(excinfo.value, ConnectionFailedError)
+
+
+def test_aclose_closes_the_underlying_http_client():
+    service = _service(lambda request: _json_response(200, []))
+
+    _run(service.aclose())
+
+    assert service._client.is_closed

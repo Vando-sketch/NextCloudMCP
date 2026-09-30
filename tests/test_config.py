@@ -6,6 +6,37 @@ import pytest
 
 from nextcloud_organizer_mcp.config import ConfigError, Settings
 
+#: Every variable `Settings.from_env()` (and `default_timezone_from_env`) reads.
+_CONFIG_ENV_VARS = (
+    "NEXTCLOUD_USERNAME",
+    "NEXTCLOUD_APP_PASSWORD",
+    "NEXTCLOUD_BASE_URL",
+    "NEXTCLOUD_CALDAV_URL",
+    "NEXTCLOUD_ALLOW_INSECURE_HTTP",
+    "NEXTCLOUD_HTTP_TIMEOUT_SECONDS",
+    "PUBLIC_BASE_URL",
+    "MCP_HOST",
+    "MCP_PORT",
+    "MCP_DEFAULT_TIMEZONE",
+    "MCP_OAUTH_PASSWORD",
+    "MCP_OAUTH_STATE_DIR",
+    "MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS",
+    "MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS",
+    "MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test from an empty configuration environment.
+
+    Without this, a developer's real NEXTCLOUD_*/MCP_* variables (or a stray
+    .env exported into the shell) silently change what the tests that only
+    set *some* variables observe.
+    """
+    for var in _CONFIG_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
 
 def _settings(**overrides) -> Settings:
     defaults = dict(
@@ -168,30 +199,6 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NEXTCLOUD_APP_PASSWORD", "testpass")
     monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000")
-
-
-def test_from_env_default_caldav_timeout_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.delenv("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", raising=False)
-
-    settings = Settings.from_env()
-    assert settings.caldav_timeout_seconds == 30
-
-
-def test_from_env_reads_caldav_timeout_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", "45")
-
-    settings = Settings.from_env()
-    assert settings.caldav_timeout_seconds == 45
-
-
-def test_from_env_rejects_non_integer_caldav_timeout_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", "not-a-number")
-
-    with pytest.raises(ConfigError, match="NEXTCLOUD_HTTP_TIMEOUT_SECONDS"):
-        Settings.from_env()
 
 
 # --- Settings.from_env(): missing required vars (E1) ---
@@ -376,88 +383,53 @@ def test_from_env_raises_on_blank_required_var(monkeypatch: pytest.MonkeyPatch):
         Settings.from_env()
 
 
-# --- Settings.from_env(): MCP_PORT (E1) ---
+# --- Settings.from_env(): integer-valued variables (E1, D5, A2) ---
+
+_INT_ENV_VARS = [
+    # (env var, Settings attribute, default when unset, custom value)
+    ("NEXTCLOUD_HTTP_TIMEOUT_SECONDS", "caldav_timeout_seconds", 30, 45),
+    ("MCP_PORT", "port", 8000, 9090),
+    (
+        "MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS",
+        "oauth_access_token_expiry_seconds",
+        30 * 24 * 60 * 60,
+        3600,
+    ),
+    (
+        "MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS",
+        "oauth_refresh_token_expiry_seconds",
+        180 * 24 * 60 * 60,
+        3600,
+    ),
+]
 
 
-def test_from_env_default_port(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.delenv("MCP_PORT", raising=False)
-
-    settings = Settings.from_env()
-    assert settings.port == 8000
-
-
-def test_from_env_reads_custom_port(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_PORT", "9090")
-
-    settings = Settings.from_env()
-    assert settings.port == 9090
-
-
-def test_from_env_rejects_non_integer_port(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_PORT", "not-a-port")
-
-    with pytest.raises(ConfigError, match="MCP_PORT"):
-        Settings.from_env()
-
-
-# --- Settings.from_env(): MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS (E1) ---
-
-
-def test_from_env_default_oauth_access_token_expiry_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.delenv("MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS", raising=False)
-
-    settings = Settings.from_env()
-    assert settings.oauth_access_token_expiry_seconds == 30 * 24 * 60 * 60
-
-
-def test_from_env_reads_custom_oauth_access_token_expiry_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS", "3600")
-
-    settings = Settings.from_env()
-    assert settings.oauth_access_token_expiry_seconds == 3600
-
-
-def test_from_env_rejects_non_integer_oauth_access_token_expiry_seconds(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("var", "attr", "default", "_custom"), _INT_ENV_VARS)
+def test_from_env_integer_var_default_when_unset(
+    monkeypatch: pytest.MonkeyPatch, var: str, attr: str, default: int, _custom: int
 ):
     _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS", "forever")
+    monkeypatch.delenv(var, raising=False)
 
-    with pytest.raises(ConfigError, match="MCP_OAUTH_ACCESS_TOKEN_EXPIRY_SECONDS"):
-        Settings.from_env()
-
-
-# --- Settings.from_env(): MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS (D5) ---
+    assert getattr(Settings.from_env(), attr) == default
 
 
-def test_from_env_default_oauth_refresh_token_expiry_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.delenv("MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", raising=False)
-
-    settings = Settings.from_env()
-    assert settings.oauth_refresh_token_expiry_seconds == 180 * 24 * 60 * 60
-
-
-def test_from_env_reads_custom_oauth_refresh_token_expiry_seconds(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", "3600")
-
-    settings = Settings.from_env()
-    assert settings.oauth_refresh_token_expiry_seconds == 3600
-
-
-def test_from_env_rejects_non_integer_oauth_refresh_token_expiry_seconds(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("var", "attr", "_default", "custom"), _INT_ENV_VARS)
+def test_from_env_integer_var_reads_custom_value(
+    monkeypatch: pytest.MonkeyPatch, var: str, attr: str, _default: int, custom: int
 ):
     _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS", "forever")
+    monkeypatch.setenv(var, str(custom))
 
-    with pytest.raises(ConfigError, match="MCP_OAUTH_REFRESH_TOKEN_EXPIRY_SECONDS"):
+    assert getattr(Settings.from_env(), attr) == custom
+
+
+@pytest.mark.parametrize("var", [entry[0] for entry in _INT_ENV_VARS])
+def test_from_env_rejects_non_integer_value(monkeypatch: pytest.MonkeyPatch, var: str):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(var, "not-a-number")
+
+    with pytest.raises(ConfigError, match=var):
         Settings.from_env()
 
 
@@ -473,34 +445,28 @@ def test_default_oauth_refresh_token_expiry_seconds_on_settings_dataclass():
 
 def test_from_env_default_allowed_redirect_domains_is_none(monkeypatch: pytest.MonkeyPatch):
     _set_required_env(monkeypatch)
-    monkeypatch.delenv("MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS", raising=False)
 
     settings = Settings.from_env()
     assert settings.oauth_allowed_redirect_domains is None
 
 
-def test_from_env_parses_single_domain(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("claude.ai", ["claude.ai"]),
+        (" claude.ai , claude.com ,example.org", ["claude.ai", "claude.com", "example.org"]),
+        ("claude.ai,,  ,claude.com", ["claude.ai", "claude.com"]),
+    ],
+    ids=["single", "strips-whitespace", "drops-empty-entries"],
+)
+def test_from_env_parses_redirect_domain_csv(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: list[str]
+):
     _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS", "claude.ai")
+    monkeypatch.setenv("MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS", raw)
 
     settings = Settings.from_env()
-    assert settings.oauth_allowed_redirect_domains == ["claude.ai"]
-
-
-def test_from_env_parses_multiple_domains_and_strips_whitespace(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS", " claude.ai , claude.com ,example.org")
-
-    settings = Settings.from_env()
-    assert settings.oauth_allowed_redirect_domains == ["claude.ai", "claude.com", "example.org"]
-
-
-def test_from_env_drops_empty_entries_in_domain_csv(monkeypatch: pytest.MonkeyPatch):
-    _set_required_env(monkeypatch)
-    monkeypatch.setenv("MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS", "claude.ai,,  ,claude.com")
-
-    settings = Settings.from_env()
-    assert settings.oauth_allowed_redirect_domains == ["claude.ai", "claude.com"]
+    assert settings.oauth_allowed_redirect_domains == expected
 
 
 def test_from_env_empty_string_domain_csv_yields_empty_list_not_none(

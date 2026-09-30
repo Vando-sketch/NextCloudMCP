@@ -145,6 +145,11 @@ def cmd_revoke(args: argparse.Namespace) -> int:
     state_file = state_file_path(args.state_dir)
     data = load_state(state_file)
     prefix: str = args.token_prefix
+    if not prefix:
+        # Every token starts with "", so an empty prefix (e.g. an unset shell
+        # variable) would silently revoke all of them.
+        print("Refusing to revoke with an empty token prefix.", file=sys.stderr)
+        return 1
 
     access_tokens: dict[str, Any] = data["access_tokens"]
     refresh_tokens: dict[str, Any] = data["refresh_tokens"]

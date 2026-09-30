@@ -204,7 +204,7 @@ BIRTHDAY_CALENDAR = "Birthdays"
 #: A caller who names no calendar gets `BIRTHDAY_CALENDAR`, unless only this
 #: one exists - see `resolve_birthday_calendar`. Renaming the tool vocabulary
 #: must not strand the birthdays an earlier version already filed.
-LEGACY_BIRTHDAY_CALENDAR = "Birthdays"
+LEGACY_BIRTHDAY_CALENDAR = "Geburtstage"
 
 #: Title prefix; the birth year, when known, follows the name in parentheses.
 BIRTHDAY_TITLE_PREFIX = "🎂"
@@ -214,7 +214,7 @@ BIRTHDAY_TAG = "Birthday"
 #: The tag entries in `LEGACY_BIRTHDAY_CALENDAR` were written with. The tag
 #: follows the calendar (`birthday_tag_for`) so a legacy calendar keeps one
 #: tag across all its entries instead of ending up half-tagged either way.
-LEGACY_BIRTHDAY_TAG = "Birthday"
+LEGACY_BIRTHDAY_TAG = "Geburtstag"
 BIRTHDAY_RRULE = "FREQ=YEARLY"
 BIRTHDAY_VISIBILITY = "private"
 #: On the day itself (00:00 of the all-day event) and one day before.

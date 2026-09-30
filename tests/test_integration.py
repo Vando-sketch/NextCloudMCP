@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import sys
-import time
+import uuid
 
 import pytest
 from conftest import run_async
@@ -26,12 +26,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _env(name: str) -> str:
+    """A required setting, failing with the variable's name when it is missing.
+
+    The module is only collected-and-run with RUN_INTEGRATION_TESTS=1, so a
+    missing variable is an operator mistake worth a clear message, not a skip.
+    """
+    value = os.environ.get(name)
+    if not value:
+        pytest.fail(f"{name} must be set when RUN_INTEGRATION_TESTS=1 (see CONTRIBUTING.md).")
+    return value
+
+
 @pytest.fixture(scope="session")
 def live_service() -> CalDavService:
     return CalDavService(
-        url=os.environ["NEXTCLOUD_CALDAV_URL"],
-        username=os.environ["NEXTCLOUD_USERNAME"],
-        password=os.environ["NEXTCLOUD_APP_PASSWORD"],
+        url=_env("NEXTCLOUD_CALDAV_URL"),
+        username=_env("NEXTCLOUD_USERNAME"),
+        password=_env("NEXTCLOUD_APP_PASSWORD"),
     )
 
 
@@ -44,7 +56,7 @@ def test_list_name(live_service) -> str:
     collections in its trashbin, so re-creating this list on every run would
     trip the limit and pile up trashbin entries.
     """
-    return _reused_collection(live_service, os.environ["INTEGRATION_TEST_LIST"], kind="VTODO")
+    return _reused_collection(live_service, _env("INTEGRATION_TEST_LIST"), kind="VTODO")
 
 
 def test_list_task_lists_returns_at_least_the_test_list(live_service, test_list_name):
@@ -111,7 +123,7 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
     uid = live_service.create_task(
         test_list_name,
         mapping.TaskFields(
-            title="nextcloud-organizer-mcp integration test recurring task",
+            title=f"nextcloud-organizer-mcp integration test recurring task {_RUN_SUFFIX}",
             due_date="2026-07-20",
             recurrence="FREQ=DAILY",
             notes="Created by the automated integration test suite; safe to delete.",
@@ -140,7 +152,7 @@ def test_recurring_task_completion_behaviour_against_a_real_server(live_service,
 
 # Only for object names that must not collide between concurrent runs -
 # collections themselves are reused, see `_reused_collection`.
-_RUN_SUFFIX = f"{int(time.time())}"
+_RUN_SUFFIX = uuid.uuid4().hex[:10]
 _TEST_CALENDAR = "MCP-Event-Test"
 
 
@@ -171,6 +183,7 @@ def test_calendar_lifecycle(live_service):
     name_a = f"MCP-Cal-Lifecycle-{_RUN_SUFFIX}"
     name_b = f"MCP-Cal-Renamed-{_RUN_SUFFIX}"
     created = live_service.create_calendar(name_a, color="#FF7A66")
+    current_name = name_a  # what to delete if a step fails part-way
     try:
         assert created["name"] == name_a
 
@@ -180,12 +193,13 @@ def test_calendar_lifecycle(live_service):
         assert entry["color"].upper().startswith("#FF7A66")
 
         renamed = live_service.update_calendar(name_a, new_display_name=name_b, color="#00679e")
+        current_name = name_b
         assert renamed["name"] == name_b
         calendars = live_service.list_calendars()
         assert any(c["name"] == name_b for c in calendars)
         assert not any(c["name"] == name_a for c in calendars)
     finally:
-        live_service.delete_calendar(name_b)
+        live_service.delete_calendar(current_name)
 
     assert not any(c["name"] == name_b for c in live_service.list_calendars())
 
@@ -207,33 +221,43 @@ def test_event_lifecycle(live_service, test_calendar):
         ),
     )
 
-    fetched = live_service.get_event(test_calendar, uid)
-    assert fetched["title"] == "Integration-Test-Event"
-    assert fetched["start"] == "2026-09-01T14:00:00+02:00"
-    assert fetched["end"] == "2026-09-01T15:00:00+02:00"
-    assert fetched["status"] == "confirmed"
-    assert fetched["tags"] == ["MCP-Test"]
+    deleted = False
+    try:
+        fetched = live_service.get_event(test_calendar, uid)
+        assert fetched["title"] == "Integration-Test-Event"
+        assert fetched["start"] == "2026-09-01T14:00:00+02:00"
+        assert fetched["end"] == "2026-09-01T15:00:00+02:00"
+        assert fetched["status"] == "confirmed"
+        assert fetched["tags"] == ["MCP-Test"]
 
-    listed = live_service.list_events(
-        calendar_names=[test_calendar], start="2026-09-01", end="2026-09-01"
-    )
-    assert any(e["uid"] == uid for e in listed)
+        listed = live_service.list_events(
+            calendar_names=[test_calendar], start="2026-09-01", end="2026-09-01"
+        )
+        assert any(e["uid"] == uid for e in listed)
 
-    live_service.update_event(
-        test_calendar, uid, event_mapping.EventFields(location="New location", status="tentative")
-    )
-    updated = live_service.get_event(test_calendar, uid)
-    assert updated["location"] == "New location"
-    assert updated["status"] == "tentative"
+        live_service.update_event(
+            test_calendar,
+            uid,
+            event_mapping.EventFields(location="New location", status="tentative"),
+        )
+        updated = live_service.get_event(test_calendar, uid)
+        assert updated["location"] == "New location"
+        assert updated["status"] == "tentative"
 
-    live_service.update_event(test_calendar, uid, event_mapping.EventFields(clear=("location",)))
-    assert live_service.get_event(test_calendar, uid)["location"] is None
+        live_service.update_event(
+            test_calendar, uid, event_mapping.EventFields(clear=("location",))
+        )
+        assert live_service.get_event(test_calendar, uid)["location"] is None
 
-    live_service.delete_event(test_calendar, uid)
-    remaining = live_service.list_events(
-        calendar_names=[test_calendar], start="2026-09-01", end="2026-09-01"
-    )
-    assert not any(e["uid"] == uid for e in remaining)
+        live_service.delete_event(test_calendar, uid)
+        deleted = True
+        remaining = live_service.list_events(
+            calendar_names=[test_calendar], start="2026-09-01", end="2026-09-01"
+        )
+        assert not any(e["uid"] == uid for e in remaining)
+    finally:
+        if not deleted:
+            live_service.delete_event(test_calendar, uid)
 
 
 def test_all_day_event_round_trip(live_service, test_calendar):
@@ -266,19 +290,21 @@ def test_recurring_event_expansion_and_exdate(live_service, test_calendar):
         ),
     )
 
-    # Time-range query must match a later occurrence of the series.
-    hits = live_service.list_events(
-        calendar_names=[test_calendar], start="2026-09-20", end="2026-09-22"
-    )
-    assert any(e["title"] == "Weekly-Test" for e in hits)
-
-    # Expansion yields the individual occurrences, minus the EXDATE one.
-    expanded = live_service.list_events(
-        calendar_names=[test_calendar], start="2026-09-01", end="2026-09-30", expand=True
-    )
-    occurrences = [e for e in expanded if e["title"] == "Weekly-Test"]
-    starts = sorted(e["start"] for e in occurrences)
     try:
+        # Time-range query must match a later occurrence of the series.
+        hits = live_service.list_events(
+            calendar_names=[test_calendar], start="2026-09-20", end="2026-09-22"
+        )
+        assert any(e["uid"] == series_uid for e in hits)
+
+        # Expansion yields the individual occurrences, minus the EXDATE one.
+        # Matched on the series UID (shared by every occurrence), not the title,
+        # so leftovers or a concurrent run can't change the count.
+        expanded = live_service.list_events(
+            calendar_names=[test_calendar], start="2026-09-01", end="2026-09-30", expand=True
+        )
+        occurrences = [e for e in expanded if e["uid"] == series_uid]
+        starts = sorted(e["start"] for e in occurrences)
         assert len(occurrences) == 3  # 4 occurrences minus 1 exception
         assert "2026-09-14T10:00:00+02:00" not in starts
     finally:
@@ -555,11 +581,12 @@ def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_na
         test_calendar,
         event_mapping.EventFields(title="Tag-Test-Event", start="2026-09-12", tags=[tag]),
     )
-    task_uid = live_service.create_task(
-        test_list_name, mapping.TaskFields(title="Tag-Test-Task", tags=[tag])
-    )
+    task_uid: str | None = None
 
     try:
+        task_uid = live_service.create_task(
+            test_list_name, mapping.TaskFields(title="Tag-Test-Task", tags=[tag])
+        )
         tags = live_service.list_tags(calendar_names=[test_calendar], list_names=[test_list_name])
         entry = next(e for e in tags if e["tag"] == tag)
         assert entry["count"] == 2
@@ -575,29 +602,30 @@ def test_list_tags_counts_a_tag_written_to_both_kinds(live_service, test_list_na
             live_service.delete_event(test_calendar, event_uid)
         except Exception:
             pass
-        try:
-            live_service.delete_task(test_list_name, task_uid)
-        except Exception:
-            pass
+        if task_uid is not None:
+            try:
+                live_service.delete_task(test_list_name, task_uid)
+            except Exception:
+                pass
 
 
 def test_batch_update_and_delete_events_round_trip(live_service, test_calendar):
     """Patch three events at once, read each back, then delete them all at once."""
     from nextcloud_organizer_mcp import event_mapping
 
-    uids = [
-        live_service.create_event(
-            test_calendar,
-            event_mapping.EventFields(
-                title=f"Batch-Test {index}",
-                start=f"2026-09-1{index}T08:00:00",
-                end=f"2026-09-1{index}T09:00:00",
-            ),
-        )
-        for index in (3, 4, 5)
-    ]
-
+    uids: list[str] = []
     try:
+        for index in (3, 4, 5):
+            uids.append(
+                live_service.create_event(
+                    test_calendar,
+                    event_mapping.EventFields(
+                        title=f"Batch-Test {index}",
+                        start=f"2026-09-1{index}T08:00:00",
+                        end=f"2026-09-1{index}T09:00:00",
+                    ),
+                )
+            )
         result = live_service.update_events(
             test_calendar,
             [*uids, "does-not-exist-mcp-test"],
@@ -637,9 +665,9 @@ def _live_notes_service() -> NotesService:
     scenario.
     """
     return NotesService(
-        base_url=os.environ["NEXTCLOUD_BASE_URL"],
-        username=os.environ["NEXTCLOUD_USERNAME"],
-        password=os.environ["NEXTCLOUD_APP_PASSWORD"],
+        base_url=_env("NEXTCLOUD_BASE_URL"),
+        username=_env("NEXTCLOUD_USERNAME"),
+        password=_env("NEXTCLOUD_APP_PASSWORD"),
     )
 
 
@@ -654,7 +682,7 @@ def test_notes_full_lifecycle() -> None:
 
     async def scenario() -> None:
         service = _live_notes_service()
-        title = "mcp-notes-test"
+        title = f"mcp-notes-{_RUN_SUFFIX}-test"
         category = "mcp-test"
         initial_content = "Initial content for live notes integration test."
 
@@ -706,7 +734,7 @@ def test_notes_full_lifecycle() -> None:
             # 3. Renaming must not touch the content (the data-loss case).
             # Keeps the "-test" suffix: a stray leftover has to stay
             # identifiable as test data by its name alone.
-            renamed = "mcp-notes-renamed-test"
+            renamed = f"mcp-notes-renamed-{_RUN_SUFFIX}-test"
             await service.update_note(note_id, NoteFields(title=renamed))
             after_rename = await service.get_note(note_id)
             assert after_rename["title"] == renamed
@@ -736,7 +764,8 @@ def test_notes_full_lifecycle() -> None:
                 note["id"] == note_id for note in await service.search_notes("first attachment")
             )
             assert any(
-                note["id"] == note_id for note in await service.search_notes("MCP-NOTES-RENAMED")
+                note["id"] == note_id
+                for note in await service.search_notes(f"MCP-NOTES-RENAMED-{_RUN_SUFFIX.upper()}")
             )
             assert not any(
                 note["id"] == note_id

@@ -412,7 +412,7 @@ def test_oauth_state_dir_and_file_have_restrictive_permissions(app, settings):
     assert stat.S_IMODE(state_file.stat().st_mode) == 0o600
 
 
-def test_oauth_state_dir_permissions_enforced_even_if_dir_preexists(settings, tmp_path):
+def test_oauth_state_dir_permissions_enforced_even_if_dir_preexists(settings):
     # Path.mkdir(mode=...) is masked by the process umask and does not fix an
     # already-existing directory's permissions - PersonalAuthProvider must
     # chmod explicitly, not just pass mode= to mkdir.

@@ -72,6 +72,32 @@ def running_server(settings: Settings) -> Iterator[str]:
         sock.close()
 
 
+@pytest.fixture(scope="module")
+def shared_base(tmp_path_factory) -> Iterator[str]:
+    """One server for the tests that don't restart it or seed its state dir.
+
+    Starting and stopping uvicorn costs ~0.25 s, which dominated this module.
+    Every test sharing this server registers its own client and codes, so none
+    depends on another's leftovers; the two tests that need a fresh or
+    restarted server keep using `running_server(settings)` directly.
+    """
+    module_settings = Settings(
+        caldav_url="https://cloud.example.com/remote.php/dav/",
+        caldav_username="testuser",
+        caldav_password="testpass",
+        notes_base_url="https://cloud.example.com",
+        public_base_url="https://test.example.com",
+        oauth_password=TEST_OAUTH_PASSWORD,
+        oauth_state_dir=str(tmp_path_factory.mktemp("oauth-state")),
+        oauth_allowed_redirect_domains=None,
+        oauth_access_token_expiry_seconds=30 * 24 * 60 * 60,
+        host="127.0.0.1",
+        port=8000,
+    )
+    with running_server(module_settings) as base:
+        yield base
+
+
 def _pkce() -> tuple[str, str]:
     verifier = secrets.token_urlsafe(48)
     digest = hashlib.sha256(verifier.encode()).digest()
@@ -165,8 +191,8 @@ def _list_tool_names(base_url: str, access_token: str) -> set[str]:
     return asyncio.run(go())
 
 
-def test_discovery_advertises_the_flow_endpoints(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_discovery_advertises_the_flow_endpoints(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         meta = http.get("/.well-known/oauth-authorization-server").json()
         assert meta["registration_endpoint"].endswith("/register")
         assert meta["authorization_endpoint"].endswith("/authorize")
@@ -174,15 +200,15 @@ def test_discovery_advertises_the_flow_endpoints(settings):
         assert "S256" in meta["code_challenge_methods_supported"]
 
 
-def test_full_flow_ends_in_an_authenticated_mcp_session(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_full_flow_ends_in_an_authenticated_mcp_session(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         _, token = _full_flow(http)
         assert token["token_type"].lower() == "bearer"
-        assert "list_task_lists" in _list_tool_names(base, token["access_token"])
+        assert "list_task_lists" in _list_tool_names(shared_base, token["access_token"])
 
 
-def test_wrong_password_is_rejected_and_the_right_one_still_works(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_wrong_password_is_rejected_and_the_right_one_still_works(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         client_id = _register(http)
         _, challenge = _pkce()
         pending = _authorize(http, client_id, challenge)
@@ -192,8 +218,8 @@ def test_wrong_password_is_rejected_and_the_right_one_still_works(settings):
         assert _consent(http, pending, TEST_OAUTH_PASSWORD).status_code == 302
 
 
-def test_pending_key_is_single_use(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_pending_key_is_single_use(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         client_id = _register(http)
         _, challenge = _pkce()
         pending = _authorize(http, client_id, challenge)
@@ -201,8 +227,8 @@ def test_pending_key_is_single_use(settings):
         assert _consent(http, pending, TEST_OAUTH_PASSWORD).status_code == 400
 
 
-def test_wrong_pkce_verifier_is_rejected(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_wrong_pkce_verifier_is_rejected(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         client_id = _register(http)
         _, challenge = _pkce()
         pending = _authorize(http, client_id, challenge)
@@ -213,8 +239,8 @@ def test_wrong_pkce_verifier_is_rejected(settings):
         assert response.json()["error"] == "invalid_grant"
 
 
-def test_authorization_code_cannot_be_replayed(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_authorization_code_cannot_be_replayed(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         client_id = _register(http)
         verifier, challenge = _pkce()
         pending = _authorize(http, client_id, challenge)
@@ -224,22 +250,22 @@ def test_authorization_code_cannot_be_replayed(settings):
         assert _exchange_code(http, client_id, code, verifier).status_code == 401
 
 
-def test_refresh_rotates_the_refresh_token(settings):
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+def test_refresh_rotates_the_refresh_token(shared_base):
+    with httpx.Client(base_url=shared_base) as http:
         client_id, first = _full_flow(http)
         refreshed = _refresh(http, client_id, first["refresh_token"])
         assert refreshed.status_code == 200, refreshed.text
         second = refreshed.json()
         assert second["refresh_token"] != first["refresh_token"]
-        assert "list_task_lists" in _list_tool_names(base, second["access_token"])
+        assert "list_task_lists" in _list_tool_names(shared_base, second["access_token"])
         assert _refresh(http, client_id, first["refresh_token"]).status_code == 401
 
 
-def test_invalid_refresh_token_gets_401_invalid_grant(settings):
+def test_invalid_refresh_token_gets_401_invalid_grant(shared_base):
     # New with FastMCP 4: an invalid/expired grant is a 401 (MCP spec), not the
     # SDK's 400 that FastMCP 2.x answered - every invalid_grant assertion in this
     # module expects 401.
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+    with httpx.Client(base_url=shared_base) as http:
         client_id = _register(http)
         response = _refresh(http, client_id, "prt_does_not_exist")
         assert response.status_code == 401
@@ -287,10 +313,10 @@ def _rpc_result(response: httpx.Response) -> dict:
     return response.json()
 
 
-def test_previous_protocol_version_session_still_works(settings):
+def test_previous_protocol_version_session_still_works(shared_base):
     # FastMCP 4 negotiates the newest protocol per connection; Claude's connector
     # may still speak the 2025-06-18 session-based one. A raw handshake pins that.
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+    with httpx.Client(base_url=shared_base) as http:
         _, token = _full_flow(http)
         init = _mcp_post(
             http,
@@ -331,9 +357,9 @@ def test_previous_protocol_version_session_still_works(settings):
 
 
 @pytest.mark.parametrize("application_type", ["web", "native"])
-def test_dcr_accepts_an_application_type(settings, application_type):
+def test_dcr_accepts_an_application_type(shared_base, application_type):
     # SEP-837: FastMCP 4 honors OAuth application_type during registration.
-    with running_server(settings) as base, httpx.Client(base_url=base) as http:
+    with httpx.Client(base_url=shared_base) as http:
         response = http.post(
             "/register",
             json={
