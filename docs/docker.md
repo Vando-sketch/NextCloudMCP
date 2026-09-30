@@ -96,7 +96,7 @@ The server does not terminate TLS, and `PUBLIC_BASE_URL` must match the URL clie
 scheme included. Publish the port on the Docker host (loopback by default) and put one of
 these in front:
 
-- **Tailscale Funnel** on the host, as in the [deployment guide](deployment.md#4-expose-via-tailscale-funnel):
+- **Tailscale Funnel** on the host, as in the [deployment guide](deployment.md#4b-expose-via-tailscale-funnel):
   `tailscale funnel --bg 8000`.
 - **A reverse proxy** you already run (Caddy, nginx, Traefik) proxying your HTTPS host name
   to `127.0.0.1:8000`. Caddy needs one line: `mcp.example.com { reverse_proxy 127.0.0.1:8000 }`.

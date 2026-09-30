@@ -15,6 +15,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   and exits when the client closes stdin. The default stays `http`, so existing
   deployments are unchanged. See the
   [deployment guide](docs/deployment.md#native-stdio-transport).
+- Caddy deployment recipe for a dedicated MCP hostname alongside an existing
+  Nextcloud proxy, with forwarded-header trust, streaming, logging guidance,
+  and a shared deployment verification checklist. The Caddy recipe filters
+  request URIs and Referer headers from runtime error logs to protect OAuth
+  query parameters even when an upstream request fails. Tested only locally
+  (Caddy 2.11.4, mocked Nextcloud); a public end-to-end run is still pending and
+  feedback is welcome (#70).
 - Docker image for `linux/amd64` and `linux/arm64`, published to
   `ghcr.io/vando-sketch/nextcloud-organizer-mcp` with each release (tags
   `vX.Y.Z`, `X.Y`, `latest`), plus a `compose.yaml`. Runs as a non-root user and
