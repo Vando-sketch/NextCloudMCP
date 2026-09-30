@@ -112,8 +112,10 @@ From a checkout instead: `uv sync && cp .env.example .env`, edit `.env`, then
 [`.env.example`](.env.example). `NEXTCLOUD_BASE_URL` must be `https://` unless it
 points at a local address.
 
-Client on the same machine? No public URL or password needed, see
-[Local-only use](docs/deployment.md#local-only-use-no-public-url).
+Client on the same machine? No public URL or password needed. The simplest setup is the
+[native stdio transport](docs/deployment.md#native-stdio-transport)
+(`MCP_TRANSPORT=stdio`, the client starts the server itself); a loopback HTTP server also
+works, see [Local-only use](docs/deployment.md#local-only-use-no-public-url).
 
 Otherwise expose the server (the [deployment guide](docs/deployment.md) covers Caddy
 and an existing Nextcloud reverse proxy, Tailscale Funnel for TLS, and a

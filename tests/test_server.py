@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import threading
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -1968,6 +1969,64 @@ def test_main_kwargs_are_accepted_by_run_http_async(settings):
     # dropping one of these parameters (uvicorn_config keeps the access log off).
     # Binding raises TypeError if run_http_async no longer accepts them.
     inspect.signature(FastMCP.run_http_async).bind(None, **fastmcp_run.call_args.kwargs)
+
+
+# --- stdio transport ---
+
+
+@pytest.fixture
+def stdio_settings(settings, tmp_path) -> Settings:
+    return replace(
+        settings,
+        transport="stdio",
+        public_base_url="",
+        oauth_password=None,
+        oauth_state_dir=str(tmp_path / "stdio-oauth-state"),
+    )
+
+
+def test_build_server_stdio_has_no_auth_and_creates_no_oauth_state(
+    stdio_settings, fake_service, fake_notes_service
+):
+    mcp = build_server(stdio_settings, service=fake_service, notes_service=fake_notes_service)
+
+    assert mcp.auth is None
+    assert not Path(stdio_settings.oauth_state_dir).exists()
+
+
+def test_build_server_stdio_registers_the_same_tools_as_http(
+    settings, stdio_settings, fake_service, fake_notes_service
+):
+    def names(s):
+        mcp = build_server(s, service=fake_service, notes_service=fake_notes_service)
+        return {tool.name for tool in asyncio.run(mcp.list_tools())}
+
+    assert names(stdio_settings) == names(settings)
+
+
+def test_build_server_http_still_uses_personal_auth(settings, fake_service, fake_notes_service):
+    mcp = build_server(settings, service=fake_service, notes_service=fake_notes_service)
+    assert isinstance(mcp.auth, PersonalAuthProvider)
+
+
+def test_main_runs_stdio_transport_without_http_arguments(stdio_settings):
+    with (
+        patch("nextcloud_organizer_mcp.server.Settings.from_env", return_value=stdio_settings),
+        patch("nextcloud_organizer_mcp.server.FastMCP.run") as fastmcp_run,
+    ):
+        main()
+
+    fastmcp_run.assert_called_once_with(transport="stdio", show_banner=False)
+
+
+def test_main_stdio_kwargs_are_accepted_by_fastmcp_run(stdio_settings):
+    with (
+        patch("nextcloud_organizer_mcp.server.Settings.from_env", return_value=stdio_settings),
+        patch("nextcloud_organizer_mcp.server.FastMCP.run") as fastmcp_run,
+    ):
+        main()
+
+    inspect.signature(FastMCP.run).bind(None, **fastmcp_run.call_args.kwargs)
 
 
 # ---------------------------------------------------------------------------

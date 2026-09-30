@@ -589,3 +589,72 @@ def test_invalid_default_timezone_raises_config_error(monkeypatch: pytest.Monkey
     monkeypatch.setenv("MCP_DEFAULT_TIMEZONE", "Invalid/Timezone_Name")
     with pytest.raises(ConfigError, match="MCP_DEFAULT_TIMEZONE.*Invalid/Timezone_Name"):
         Settings.from_env()
+
+
+# --- MCP_TRANSPORT: http (default) vs stdio ---
+
+
+def test_transport_defaults_to_http():
+    assert _settings().transport == "http"
+
+
+def test_from_env_transport_defaults_to_http(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+    assert Settings.from_env().transport == "http"
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_from_env_empty_transport_means_http(monkeypatch: pytest.MonkeyPatch, value: str):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_TRANSPORT", value)
+    assert Settings.from_env().transport == "http"
+
+
+def test_from_env_reads_stdio_transport_case_insensitively(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_TRANSPORT", " STDIO ")
+    assert Settings.from_env().transport == "stdio"
+
+
+def test_from_env_rejects_unknown_transport(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_TRANSPORT", "sse")
+    with pytest.raises(ConfigError, match="MCP_TRANSPORT.*'sse'"):
+        Settings.from_env()
+
+
+def test_from_env_stdio_needs_only_the_nextcloud_variables(monkeypatch: pytest.MonkeyPatch):
+    for name in ("PUBLIC_BASE_URL", "MCP_OAUTH_PASSWORD", "MCP_OAUTH_STATE_DIR", "MCP_HOST"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
+    monkeypatch.setenv("NEXTCLOUD_USERNAME", "testuser")
+    monkeypatch.setenv("NEXTCLOUD_APP_PASSWORD", "testpass")
+    monkeypatch.setenv("NEXTCLOUD_BASE_URL", "https://cloud.example.com")
+
+    settings = Settings.from_env()
+
+    assert settings.transport == "stdio"
+    assert settings.public_base_url == ""
+
+
+def test_from_env_http_still_requires_public_base_url(monkeypatch: pytest.MonkeyPatch):
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("MCP_TRANSPORT", "http")
+    monkeypatch.delenv("PUBLIC_BASE_URL")
+    with pytest.raises(ConfigError, match="PUBLIC_BASE_URL"):
+        Settings.from_env()
+
+
+def test_stdio_does_not_require_oauth_password_or_public_base_url():
+    _settings(transport="stdio", public_base_url="", oauth_password=None, host="0.0.0.0")
+
+
+def test_stdio_still_rejects_cleartext_nextcloud_url():
+    with pytest.raises(ConfigError, match="NEXTCLOUD_BASE_URL must use https://"):
+        _settings(transport="stdio", public_base_url="", notes_base_url="http://cloud.example.com")
+
+
+def test_http_with_empty_public_base_url_is_rejected():
+    with pytest.raises(ConfigError, match="PUBLIC_BASE_URL"):
+        _settings(transport="http", public_base_url="")

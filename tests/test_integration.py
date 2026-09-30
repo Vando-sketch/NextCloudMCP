@@ -6,10 +6,13 @@ Skipped by default - see CONTRIBUTING.md for how to enable these locally.
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 import pytest
 from conftest import run_async
+from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
 
 from nextcloud_organizer_mcp import mapping
 from nextcloud_organizer_mcp.caldav_client import CalDavService
@@ -770,3 +773,27 @@ def test_get_nonexistent_note_raises_note_not_found() -> None:
             await service.aclose()
 
     run_async(scenario())
+
+
+def test_stdio_server_makes_a_read_only_call_against_real_nextcloud(
+    live_service, test_list_name
+) -> None:
+    """A client that starts the server over stdio reads real task lists (#78)."""
+
+    async def scenario() -> list[str]:
+        # NEXTCLOUD_BASE_URL is optional for the other tests here (they take the
+        # CalDAV URL), but the server needs it: derive it from the CalDAV URL.
+        caldav_url = os.environ["NEXTCLOUD_CALDAV_URL"]
+        base_url = os.environ.get("NEXTCLOUD_BASE_URL") or caldav_url.split("/remote.php/dav")[0]
+        env = {**os.environ, "MCP_TRANSPORT": "stdio", "NEXTCLOUD_BASE_URL": base_url}
+        transport = StdioTransport(
+            command=sys.executable,
+            args=["-m", "nextcloud_organizer_mcp.server"],
+            env=env,
+            keep_alive=False,
+        )
+        async with Client(transport) as client:
+            result = await client.call_tool("list_task_lists")
+        return [entry["name"] for entry in result.structured_content["result"]]
+
+    assert test_list_name in run_async(scenario())

@@ -495,7 +495,8 @@ If the client runs on the same machine as the server, you can skip the public UR
 and the consent password entirely. This works for clients that connect from your own
 machine (Claude Code, Claude Desktop through the `mcp-remote` bridge, MCP Inspector). It
 does **not** work for the Claude.ai web or mobile connector, see
-[below](#why-a-cloud-hosted-connector-cannot-use-it).
+[below](#why-a-cloud-hosted-connector-cannot-use-it). Even simpler for such clients: the
+[native stdio transport](#native-stdio-transport) needs no URL, port or OAuth at all.
 
 ### Configure
 
@@ -597,32 +598,99 @@ page (redirect `http://localhost:12570/oauth/callback`), a `list_task_lists` cal
 the Nextcloud task lists, and after a server restart the client reconnected without
 authorizing again (tokens persist in `MCP_OAUTH_STATE_DIR`).
 
-## Native stdio transport (evaluated, not implemented)
+## Native stdio transport
 
-The MCP stdio transport would let a client start the server as a child process, with no
-port, URL or OAuth. **Decision: worth implementing; tracked in
-[#78](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/78), not part of this guide.**
+With `MCP_TRANSPORT=stdio` the client starts the server as a child process and talks to
+it over stdin/stdout. There is no port, no `PUBLIC_BASE_URL`, no OAuth, no
+`MCP_OAUTH_STATE_DIR`, no browser step, and no `mcp-remote` or Node.js. Use it when the
+client runs on the same machine as the server (Claude Desktop, Claude Code, MCP
+Inspector). It does **not** help Claude.ai web or mobile, which still need the HTTP
+server behind a public URL (steps 1-5 above).
 
-A throwaway probe showed the existing `build_server(...).run(transport="stdio")` already
-answers `initialize` and `tools/list` unchanged. Nothing writes to stdout except protocol
-messages, and logging goes to stderr. Authentication is ignored on stdio, and no OAuth
-state directory is created.
+`MCP_TRANSPORT` is `http` when unset, so existing deployments do not change. On stdio the
+server needs only the three Nextcloud variables and does not use `PUBLIC_BASE_URL`,
+`MCP_OAUTH_*`, `MCP_HOST` or `MCP_PORT`. Every other setting (for example
+`NEXTCLOUD_HTTP_TIMEOUT_SECONDS` and `MCP_DEFAULT_TIMEZONE`) still applies, and
+`NEXTCLOUD_BASE_URL` must still be `https://`.
 
-What it would simplify: no `mcp-remote`/Node.js, no `PUBLIC_BASE_URL`, no
-`MCP_OAUTH_STATE_DIR`, no browser step, no port to protect.
+The client passes the settings in its config (`env`), because a client-launched process
+does not read your shell profile or a `.env` file.
 
-What it costs and what an implementation must handle:
+### Claude Desktop
 
-- **Secrets.** The Nextcloud app password moves into each client's config (`env` block),
-  in plaintext, instead of one `600` env file.
-- **Processes.** Every client session starts its own server process. The process must exit
-  when stdin closes, and several clients multiply the connections to Nextcloud.
-- **Transport selection.** `main()` needs a switch (flag or `MCP_TRANSPORT`), and stdio must
-  not require `PUBLIC_BASE_URL` or construct `PersonalAuthProvider`.
-- **stdout hygiene.** Stdout must stay clean; keep logging on stderr and add a test.
-- **GUI clients** need absolute paths to `uv` in their config.
-- **Scope.** stdio does not help Claude.ai web or mobile, which still need the HTTP
-  server behind a public URL.
+Add to `claude_desktop_config.json` (`~/Library/Application Support/Claude/` on macOS).
+GUI apps do not inherit your shell `PATH`, so `command` must be an **absolute path** to
+`uv` (find it with `which uv`). This example runs a checkout:
+
+```json
+{
+  "mcpServers": {
+    "nextcloud-organizer-mcp": {
+      "command": "/Users/you/.local/bin/uv",
+      "args": [
+        "run", "--no-dev",
+        "--project", "/Users/you/nextcloud-organizer-mcp",
+        "nextcloud-organizer-mcp"
+      ],
+      "env": {
+        "MCP_TRANSPORT": "stdio",
+        "NEXTCLOUD_BASE_URL": "https://cloud.example.com",
+        "NEXTCLOUD_USERNAME": "your-username",
+        "NEXTCLOUD_APP_PASSWORD": "your-app-password"
+      }
+    }
+  }
+}
+```
+
+Once a release that includes stdio is on PyPI (anything after 0.2.1), you can drop the
+checkout and use `"command": "/Users/you/.local/bin/uvx"` with
+`"args": ["nextcloud-organizer-mcp"]`.
+
+### Claude Code
+
+```bash
+claude mcp add nextcloud-organizer-mcp \
+  -e MCP_TRANSPORT=stdio \
+  -e NEXTCLOUD_BASE_URL=https://cloud.example.com \
+  -e NEXTCLOUD_USERNAME=your-username \
+  -e NEXTCLOUD_APP_PASSWORD=your-app-password \
+  -- uv run --no-dev --project /path/to/nextcloud-organizer-mcp nextcloud-organizer-mcp
+```
+
+A terminal client finds `uv` on your `PATH`, so no absolute path is needed.
+
+### MCP Inspector
+
+```bash
+npx @modelcontextprotocol/inspector \
+  -e MCP_TRANSPORT=stdio \
+  -e NEXTCLOUD_BASE_URL=https://cloud.example.com \
+  -e NEXTCLOUD_USERNAME=your-username \
+  -e NEXTCLOUD_APP_PASSWORD=your-app-password \
+  uv run --no-dev --project /path/to/nextcloud-organizer-mcp nextcloud-organizer-mcp
+```
+
+### What it costs
+
+- **Secrets.** The Nextcloud app password sits in plaintext in each client's config
+  (`env`) instead of in one `600` env file. Use a dedicated app password per client, so
+  you can revoke one without touching the others.
+- **Processes.** Every client session starts its own server process, so several clients
+  multiply the connections to Nextcloud. The process exits when the client closes stdin,
+  including when the client is killed, so it is not left running.
+- **Logs.** stdout carries only protocol messages. Logging goes to stderr, which clients
+  collect in their own log (for Claude Desktop, `~/Library/Logs/Claude/mcp-server-*.log`
+  on macOS).
+- **Scope.** stdio does not help Claude.ai web or mobile. It is also not what the Docker
+  image documents: see [Running in Docker](docker.md) for the HTTP setup.
+
+> **Verification status.** The transport is covered by automated tests, including a real
+> server process over pipes (`tests/test_stdio.py`) and a read-only call against a real
+> Nextcloud (`tests/test_integration.py`, opt-in, see [CONTRIBUTING](../CONTRIBUTING.md)). The Claude
+> Desktop, Claude Code and MCP Inspector configs above have not been run by the
+> maintainers. Reports are welcome, see the
+> [client compatibility report](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/new/choose).
 
 ## Managing issued OAuth tokens
 

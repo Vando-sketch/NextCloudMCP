@@ -9,6 +9,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Native stdio transport for clients on the same machine (Claude Desktop, Claude
+  Code, MCP Inspector): set `MCP_TRANSPORT=stdio` and the client starts the server as
+  a child process. It needs no `PUBLIC_BASE_URL`, OAuth setup, port or `mcp-remote`,
+  and exits when the client closes stdin. The default stays `http`, so existing
+  deployments are unchanged. See the
+  [deployment guide](docs/deployment.md#native-stdio-transport).
 - Caddy deployment recipe for a dedicated MCP hostname alongside an existing
   Nextcloud proxy, with forwarded-header trust, streaming, logging guidance,
   and a shared deployment verification checklist. The Caddy recipe filters
@@ -25,7 +31,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - Deployment guide: local-only use without a public URL (loopback
   `PUBLIC_BASE_URL`, no consent password, `mcp-remote` and Claude Code setup,
-  redirect-domain notes), and the decision on a native stdio transport.
+  redirect-domain notes).
 - Deployment guide: Cloudflare Tunnel recipe as an alternative to Tailscale
   Funnel, with the tested and untested parts listed explicitly. A named tunnel
   with a stable hostname is still unverified and feedback is welcome.

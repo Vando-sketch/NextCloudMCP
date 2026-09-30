@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+_TRANSPORTS = ("http", "stdio")
 
 # The exact placeholder shipped (commented out) in .env.example. If this literal
 # string ever ends up as the configured MCP_OAUTH_PASSWORD, someone copy-pasted
@@ -46,6 +49,7 @@ class Settings:
     # is derived when unset. Reuses caldav_username/caldav_password for Basic Auth -
     # same Nextcloud account, same app password.
     notes_base_url: str
+    # Empty on the stdio transport, which has no public URL. Required on http.
     public_base_url: str
     oauth_password: str | None
     oauth_state_dir: str
@@ -60,8 +64,15 @@ class Settings:
     # expires_at=None (never expire); see personal_auth.py LOCAL PATCH 4.
     oauth_refresh_token_expiry_seconds: int = 180 * 24 * 60 * 60
     default_timezone: str = "Europe/Berlin"
+    # "http" serves the OAuth-protected HTTP endpoint; "stdio" talks to a local
+    # client that started this process, with no auth, port, or OAuth state.
+    transport: Literal["http", "stdio"] = "http"
 
     def __post_init__(self) -> None:
+        if self.transport not in _TRANSPORTS:
+            raise ConfigError(
+                f"MCP_TRANSPORT must be one of {', '.join(_TRANSPORTS)}, got: {self.transport!r}"
+            )
         # Validated here rather than where a datetime is first parsed: an
         # unusable zone name must stop the server at startup, not surface as a
         # failing tool call hours later.
@@ -81,30 +92,10 @@ class Settings:
                 "See docs/deployment.md."
             )
 
-        # PersonalAuthProvider's /authorize has no login/consent step of its own -
-        # the redirect-domain allow-list alone does not stop a scripted client from
-        # registering itself and self-issuing a valid access token (it never needs
-        # to actually control the redirect domain, only claim one that's on the
-        # list). Once this server is reachable from anywhere but localhost - either
-        # because PUBLIC_BASE_URL says so, or because it's actually bound to a
-        # non-local address (MCP_HOST=0.0.0.0 with a stale localhost
-        # PUBLIC_BASE_URL is a common Docker mistake, D3) - the password is the
-        # only real gate, so it must be set. Enforced here (not just in from_env)
-        # so it holds regardless of how Settings is constructed.
-        public_base_is_local = is_local_hostname(urlparse(self.public_base_url).hostname)
-        # An empty bind host isn't a value we expect in practice, but there's no
-        # reason to treat it as a non-local bind - unlike PUBLIC_BASE_URL above,
-        # failing safe here would just demand a password nobody asked for. The
-        # dangerous cases (0.0.0.0, an explicit external interface) are still
-        # non-local and still caught.
-        bind_is_local = not self.host or self.host in _LOCAL_HOSTS
-        if not (public_base_is_local and bind_is_local) and not self.oauth_password:
-            raise ConfigError(
-                "MCP_OAUTH_PASSWORD is required when PUBLIC_BASE_URL is not localhost "
-                "or MCP_HOST is not a local bind address - without it, anyone who can "
-                "reach this server can self-issue a valid OAuth access token. See "
-                "docs/deployment.md."
-            )
+        # The OAuth gate below protects the HTTP endpoint. stdio has no endpoint:
+        # the client that started this process is the only caller.
+        if self.transport == "http":
+            self._require_oauth_gate()
 
         # A http:// URL sends the Nextcloud app password in cleartext Basic Auth
         # on every request. Require https:// unless the URL genuinely points at a
@@ -146,6 +137,36 @@ class Settings:
                 "testing."
             )
 
+    def _require_oauth_gate(self) -> None:
+        """Check the HTTP transport's public URL and OAuth password settings."""
+        if not self.public_base_url:
+            raise ConfigError("Missing required environment variable: PUBLIC_BASE_URL")
+
+        # PersonalAuthProvider's /authorize has no login/consent step of its own -
+        # the redirect-domain allow-list alone does not stop a scripted client from
+        # registering itself and self-issuing a valid access token (it never needs
+        # to actually control the redirect domain, only claim one that's on the
+        # list). Once this server is reachable from anywhere but localhost - either
+        # because PUBLIC_BASE_URL says so, or because it's actually bound to a
+        # non-local address (MCP_HOST=0.0.0.0 with a stale localhost
+        # PUBLIC_BASE_URL is a common Docker mistake, D3) - the password is the
+        # only real gate, so it must be set. Enforced here (not just in from_env)
+        # so it holds regardless of how Settings is constructed.
+        public_base_is_local = is_local_hostname(urlparse(self.public_base_url).hostname)
+        # An empty bind host isn't a value we expect in practice, but there's no
+        # reason to treat it as a non-local bind - unlike PUBLIC_BASE_URL above,
+        # failing safe here would just demand a password nobody asked for. The
+        # dangerous cases (0.0.0.0, an explicit external interface) are still
+        # non-local and still caught.
+        bind_is_local = not self.host or self.host in _LOCAL_HOSTS
+        if not (public_base_is_local and bind_is_local) and not self.oauth_password:
+            raise ConfigError(
+                "MCP_OAUTH_PASSWORD is required when PUBLIC_BASE_URL is not localhost "
+                "or MCP_HOST is not a local bind address - without it, anyone who can "
+                "reach this server can self-issue a valid OAuth access token. See "
+                "docs/deployment.md."
+            )
+
     @classmethod
     def from_env(cls) -> Settings:
         """Build settings from environment variables, raising ConfigError if invalid."""
@@ -155,6 +176,8 @@ class Settings:
             if not value:
                 raise ConfigError(f"Missing required environment variable: {name}")
             return value
+
+        transport = os.environ.get("MCP_TRANSPORT", "").strip().lower() or "http"
 
         port_raw = os.environ.get("MCP_PORT", "8000")
         try:
@@ -226,7 +249,7 @@ class Settings:
             caldav_username=require("NEXTCLOUD_USERNAME"),
             caldav_password=require("NEXTCLOUD_APP_PASSWORD"),
             notes_base_url=notes_base_url,
-            public_base_url=require("PUBLIC_BASE_URL"),
+            public_base_url=require("PUBLIC_BASE_URL") if transport == "http" else "",
             oauth_password=os.environ.get("MCP_OAUTH_PASSWORD", "").strip() or None,
             oauth_state_dir=os.environ.get("MCP_OAUTH_STATE_DIR", ".oauth-state"),
             oauth_allowed_redirect_domains=oauth_allowed_redirect_domains,
@@ -237,6 +260,7 @@ class Settings:
             allow_insecure_http=allow_insecure_http,
             caldav_timeout_seconds=caldav_timeout_seconds,
             default_timezone=default_timezone,
+            transport=transport,  # type: ignore[arg-type]  # validated in __post_init__
         )
 
 
