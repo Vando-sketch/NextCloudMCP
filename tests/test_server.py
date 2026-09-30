@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import threading
 from dataclasses import replace
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
@@ -18,7 +19,9 @@ from nextcloud_organizer_mcp import event_mapping, mapping
 from nextcloud_organizer_mcp.caldav_client import CalDavService
 from nextcloud_organizer_mcp.config import Settings
 from nextcloud_organizer_mcp.errors import (
+    CalendarAlreadyExistsError,
     CalendarNotFoundError,
+    InvalidEventDataError,
     NoteNotFoundError,
     TaskListAlreadyExistsError,
     TaskListNotFoundError,
@@ -33,19 +36,47 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-@pytest.fixture
+# Building the server (schema generation for ~50 tools) costs ~50 ms, which
+# dominated this module when done per test. So the server and the two fake
+# services are built once per module, and `_reset_fakes` (autouse) wipes every
+# recorded call, return_value and side_effect on them before each test. The tool
+# closures only hold the fakes, so nothing else carries state between tests.
+
+
+@pytest.fixture(scope="module")
 def fake_service() -> MagicMock:
     return MagicMock(spec=CalDavService)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def fake_notes_service() -> MagicMock:
     return MagicMock(spec=NotesService)
 
 
-@pytest.fixture
-def tools(settings, fake_service, fake_notes_service):
-    mcp = build_server(settings, service=fake_service, notes_service=fake_notes_service)
+@pytest.fixture(autouse=True)
+def _reset_fakes(fake_service, fake_notes_service):
+    for fake in (fake_service, fake_notes_service):
+        fake.reset_mock(return_value=True, side_effect=True)
+
+
+@pytest.fixture(scope="module")
+def tools(tmp_path_factory, fake_service, fake_notes_service):
+    # Same values as the function-scoped `settings` fixture in conftest.py,
+    # which a module-scoped fixture cannot use.
+    module_settings = Settings(
+        caldav_url="https://cloud.example.com/remote.php/dav/",
+        caldav_username="testuser",
+        caldav_password="testpass",
+        notes_base_url="https://cloud.example.com",
+        public_base_url="https://test.example.com",
+        oauth_password="test-oauth-password",
+        oauth_state_dir=str(tmp_path_factory.mktemp("oauth-state")),
+        oauth_allowed_redirect_domains=None,
+        oauth_access_token_expiry_seconds=30 * 24 * 60 * 60,
+        host="127.0.0.1",
+        port=8000,
+    )
+    mcp = build_server(module_settings, service=fake_service, notes_service=fake_notes_service)
     return {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
 
 
@@ -112,30 +143,27 @@ def test_all_tools_use_ascii_parameter_names(tools):
             assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
 
 
-def test_create_task_list_uses_ascii_parameter_names(tools):
-    schema = tools["create_task_list"].parameters
-    assert set(schema["properties"]) == {"display_name"}
-    assert schema["required"] == ["display_name"]
+@pytest.mark.parametrize(
+    ("tool_name", "properties", "required"),
+    [
+        ("create_task_list", {"display_name"}, {"display_name"}),
+        ("delete_task_list", {"list_name"}, {"list_name"}),
+        ("rename_task_list", {"list_name", "new_display_name"}, {"list_name", "new_display_name"}),
+        ("create_note", None, {"title"}),
+        ("get_note", None, {"note_id"}),
+        ("delete_note", None, {"note_id"}),
+    ],
+)
+def test_tool_schema_properties_and_required(tools, tool_name, properties, required):
+    schema = tools[tool_name].parameters
+    if properties is not None:
+        assert set(schema["properties"]) == properties
+    assert set(schema["required"]) == required
 
 
-def test_delete_task_list_uses_ascii_parameter_names(tools):
-    schema = tools["delete_task_list"].parameters
-    assert set(schema["properties"]) == {"list_name"}
-    assert schema["required"] == ["list_name"]
-
-
-def test_rename_task_list_uses_ascii_parameter_names(tools):
-    schema = tools["rename_task_list"].parameters
-    assert set(schema["properties"]) == {"list_name", "new_display_name"}
-    assert set(schema["required"]) == {"list_name", "new_display_name"}
-
-
-def test_create_task_uses_umlaut_parameter_names(tools):
+def test_create_task_schema_exposes_optional_fields(tools):
     schema = tools["create_task"].parameters
-    assert "due_date" in schema["properties"]
-    assert "priority" in schema["properties"]
-    assert "parent_task" in schema["properties"]
-    assert "status" in schema["properties"]
+    assert {"due_date", "priority", "parent_task", "status"} <= set(schema["properties"])
     assert schema["required"] == ["list_name", "title"]
 
 
@@ -223,38 +251,6 @@ def test_delete_note_delegates_to_notes_service(tools, fake_notes_service):
     result = _run(tools["delete_note"].fn(2))
     assert result == {"id": 2}
     fake_notes_service.delete_note.assert_called_once_with(2)
-
-
-def test_note_tools_use_ascii_parameter_names(tools):
-    for tool_name in (
-        "list_notes",
-        "get_note",
-        "create_note",
-        "update_note",
-        "replace_in_note",
-        "update_note_section",
-        "append_to_note",
-        "search_notes",
-        "delete_note",
-    ):
-        schema = tools[tool_name].parameters
-        for prop_name in schema.get("properties", {}):
-            assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
-
-
-def test_create_note_requires_only_title(tools):
-    schema = tools["create_note"].parameters
-    assert schema["required"] == ["title"]
-
-
-def test_get_note_requires_note_id(tools):
-    schema = tools["get_note"].parameters
-    assert schema["required"] == ["note_id"]
-
-
-def test_delete_note_requires_note_id(tools):
-    schema = tools["delete_note"].parameters
-    assert schema["required"] == ["note_id"]
 
 
 def test_delete_note_not_found_becomes_clean_tool_error(tools, fake_notes_service):
@@ -506,7 +502,7 @@ def test_no_tool_param_with_a_default_is_required_in_the_schema(tools):
     assert offenders == []
 
 
-def test_create_task_maps_german_params_to_service_call(tools, fake_service):
+def test_create_task_maps_params_to_service_call(tools, fake_service):
     fake_service.create_task.return_value = "new-uid"
     result = _run(
         tools["create_task"].fn(
@@ -773,12 +769,6 @@ def test_move_tasks_delegates(tools, fake_service):
     fake_service.move_tasks.assert_called_once_with("MCP-World", ["t1", "t2"], "Archiv")
 
 
-def test_task_batch_tools_use_ascii_parameter_names(tools):
-    for tool_name in ("update_tasks", "delete_tasks", "move_tasks"):
-        for prop_name in tools[tool_name].parameters.get("properties", {}):
-            assert prop_name.isascii(), f"{tool_name}.{prop_name} is not ASCII"
-
-
 def test_move_event_delegates(tools, fake_service):
     fake_service.move_event.return_value = {
         "uid": "event-uid",
@@ -968,6 +958,49 @@ def test_create_event_builds_event_fields(tools, fake_service):
     fake_service.get_event.assert_called_once_with("Events", "new-uid")
 
 
+def test_list_calendars_delegates(tools, fake_service):
+    fake_service.list_calendars.return_value = [
+        {"name": "Events", "url": "events", "color": "#FF0000", "components": ["VEVENT"]}
+    ]
+    result = _run(tools["list_calendars"].fn())
+    assert result == [
+        {"name": "Events", "url": "events", "color": "#FF0000", "components": ["VEVENT"]}
+    ]
+    fake_service.list_calendars.assert_called_once_with()
+
+
+def test_create_calendar_delegates(tools, fake_service):
+    fake_service.create_calendar.return_value = {"name": "Work", "url": "work", "color": "#00FF00"}
+    result = _run(tools["create_calendar"].fn(display_name="Work", color="#00FF00"))
+    assert result == {"name": "Work", "url": "work", "color": "#00FF00"}
+    fake_service.create_calendar.assert_called_once_with("Work", "#00FF00")
+
+
+def test_update_calendar_delegates(tools, fake_service):
+    fake_service.update_calendar.return_value = {"name": "Job", "url": "work", "color": None}
+    result = _run(tools["update_calendar"].fn(calendar_name="Work", new_display_name="Job"))
+    assert result == {"name": "Job", "url": "work", "color": None}
+    fake_service.update_calendar.assert_called_once_with("Work", "Job", None)
+
+
+def test_delete_calendar_delegates(tools, fake_service):
+    result = _run(tools["delete_calendar"].fn(calendar_name="Work"))
+    assert result == {"calendar_name": "Work"}
+    fake_service.delete_calendar.assert_called_once_with("Work")
+
+
+def test_calendar_conflict_becomes_clean_tool_error(tools, fake_service):
+    fake_service.create_calendar.side_effect = CalendarAlreadyExistsError("Calendar 'Work' exists.")
+    with pytest.raises(ToolError, match="Work"):
+        _run(tools["create_calendar"].fn(display_name="Work"))
+
+
+def test_delete_event_delegates(tools, fake_service):
+    result = _run(tools["delete_event"].fn(calendar_name="Events", event_uid="event-1"))
+    assert result == {"uid": "event-1"}
+    fake_service.delete_event.assert_called_once_with("Events", "event-1")
+
+
 # --- Birthdays (create_birthday) ---
 
 
@@ -1016,36 +1049,41 @@ def test_create_birthday_writes_to_the_given_calendar(tools, fake_service):
 
 def test_create_birthday_uses_the_legacy_calendar_when_it_is_the_only_one(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    fake_service.list_calendars.return_value = [{"name": "Birthdays"}, {"name": "Work"}]
+    legacy = event_mapping.LEGACY_BIRTHDAY_CALENDAR
+    fake_service.list_calendars.return_value = [{"name": legacy}, {"name": "Work"}]
 
     _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
 
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Birthdays"
+    assert cal_name == legacy
     # The tag follows the calendar, so one tag still covers all of its entries.
-    assert fields.tags == ["Birthday"]
-    fake_service.get_event.assert_called_once_with("Birthdays", "new-uid")
+    assert fields.tags == [event_mapping.birthday_tag_for(legacy)]
+    fake_service.get_event.assert_called_once_with(legacy, "new-uid")
 
 
 def test_create_birthday_prefers_the_english_calendar_when_both_exist(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
-    fake_service.list_calendars.return_value = [{"name": "Birthdays"}, {"name": "Birthdays"}]
+    fake_service.list_calendars.return_value = [
+        {"name": event_mapping.LEGACY_BIRTHDAY_CALENDAR},
+        {"name": event_mapping.BIRTHDAY_CALENDAR},
+    ]
 
     _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
 
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Birthdays"
-    assert fields.tags == ["Birthday"]
+    assert cal_name == event_mapping.BIRTHDAY_CALENDAR
+    assert fields.tags == [event_mapping.BIRTHDAY_TAG]
 
 
 def test_create_birthday_named_legacy_calendar_still_gets_the_legacy_tag(tools, fake_service):
     fake_service.create_event.return_value = "new-uid"
 
-    _run(tools["create_birthday"].fn(name="Dad", date="07-04", calendar="Birthdays"))
+    legacy = event_mapping.LEGACY_BIRTHDAY_CALENDAR
+    _run(tools["create_birthday"].fn(name="Dad", date="07-04", calendar=legacy))
 
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Birthdays"
-    assert fields.tags == ["Birthday"]
+    assert cal_name == legacy
+    assert fields.tags == [event_mapping.birthday_tag_for(legacy)]
 
 
 def test_create_birthday_creates_the_english_calendar_on_a_fresh_account(tools, fake_service):
@@ -1055,8 +1093,8 @@ def test_create_birthday_creates_the_english_calendar_on_a_fresh_account(tools, 
     _run(tools["create_birthday"].fn(name="Dad", date="07-04", year=1975))
 
     (cal_name, fields), _ = fake_service.create_event.call_args
-    assert cal_name == "Birthdays"
-    assert fields.tags == ["Birthday"]
+    assert cal_name == event_mapping.BIRTHDAY_CALENDAR
+    assert fields.tags == [event_mapping.BIRTHDAY_TAG]
 
 
 def test_create_birthday_invalid_date_becomes_clean_tool_error(tools, fake_service):
@@ -1221,15 +1259,25 @@ def test_list_events_fields_combines_with_compact(tools, fake_service):
     assert event == {"uid": "e1", "title": "Meeting"}
 
 
-def test_list_events_without_calendars_and_window_defaults_to_90_days(tools, fake_service):
-    from datetime import date, datetime, timedelta
+def _today() -> date:
+    return datetime.now(mapping.get_default_timezone()).date()
 
+
+def _assert_default_window(kwargs: dict, today_before_call: date) -> None:
+    """start/end are today +/- 90 days; tolerates midnight passing during the call."""
+    window = (date.fromisoformat(kwargs["start"]), date.fromisoformat(kwargs["end"]))
+    allowed = {
+        (d - timedelta(days=90), d + timedelta(days=90)) for d in (today_before_call, _today())
+    }
+    assert window in allowed
+
+
+def test_list_events_without_calendars_and_window_defaults_to_90_days(tools, fake_service):
     fake_service.list_events.return_value = []
+    before = _today()
     _run(tools["list_events"].fn())
     _, kwargs = fake_service.list_events.call_args
-    today = datetime.now(mapping.get_default_timezone()).date()
-    assert date.fromisoformat(kwargs["start"]) == today - timedelta(days=90)
-    assert date.fromisoformat(kwargs["end"]) == today + timedelta(days=90)
+    _assert_default_window(kwargs, before)
 
 
 def test_list_events_default_window_not_applied_when_scoped(tools, fake_service):
@@ -1258,14 +1306,11 @@ def test_list_events_cleanup_filters_do_not_disable_the_default_window(tools, fa
     Pinned because "find every hand-made event" reads like it should scan
     everything, and it does not.
     """
-    from datetime import date, datetime, timedelta
-
     fake_service.list_events.return_value = []
+    before = _today()
     _run(tools["list_events"].fn(without_reminder=True, uid_regex="^[A-F0-9-]+$"))
     _, kwargs = fake_service.list_events.call_args
-    today = datetime.now(mapping.get_default_timezone()).date()
-    assert date.fromisoformat(kwargs["start"]) == today - timedelta(days=90)
-    assert date.fromisoformat(kwargs["end"]) == today + timedelta(days=90)
+    _assert_default_window(kwargs, before)
     assert kwargs["without_reminder"] is True and kwargs["uid_regex"] == "^[A-F0-9-]+$"
 
 
@@ -1464,7 +1509,7 @@ def test_update_exdates_delegates(tools, fake_service):
     assert args == ("Events", ["u1", "u2"], ["2026-07-27"], None, True)
 
 
-def test_update_exdates_renames_failed_entries(tools, fake_service):
+def test_update_exdates_passes_failed_entries_through(tools, fake_service):
     fake_service.change_exdates.return_value = {
         "calendar_name": "Events",
         "succeeded": 0,
@@ -1522,8 +1567,6 @@ def test_respond_to_event_comment_defaults_to_none(tools, fake_service):
 
 
 def test_respond_to_event_not_an_attendee_becomes_clean_tool_error(tools, fake_service):
-    from nextcloud_organizer_mcp.errors import InvalidEventDataError
-
     fake_service.respond_to_event.side_effect = InvalidEventDataError(
         "You are not listed as an attendee of this event, so there is nothing to respond to."
     )
@@ -1779,6 +1822,7 @@ def test_unexpected_error_does_not_leak_internals(tools, fake_service):
     with pytest.raises(ToolError) as exc_info:
         _run(tools["list_tasks"].fn("Personal"))
     assert "some internal detail" not in str(exc_info.value)
+    assert "unexpected internal error" in str(exc_info.value)
 
 
 # --- Non-blocking tools (A1): a blocked call must not stall a concurrent one ---
@@ -1835,7 +1879,10 @@ def test_concurrent_tool_calls_do_not_block_each_other(tools, fake_service):
         release.set()
         await asyncio.wait_for(blocked_task, timeout=5)
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()  # never leave the worker thread parked if an assert failed
 
 
 # --- Redirect-domain allow-list defaults (D9) ---

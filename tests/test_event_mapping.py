@@ -1153,6 +1153,57 @@ def test_parse_duration_instead_of_dtend():
     assert parsed["end"] == "2026-07-20T18:00:00+02:00"
 
 
+def test_parse_all_day_duration_instead_of_dtend():
+    """An all-day start plus a DURATION reads back as the inclusive last day."""
+    event = _event_from_ics(
+        "BEGIN:VEVENT\nUID:e\nDTSTART;VALUE=DATE:20260720\nDURATION:P2D\nEND:VEVENT\n"
+    )
+
+    parsed = event_mapping.parse_vevent(event)
+
+    assert (parsed["start"], parsed["end"], parsed["all_day"]) == ("2026-07-20", "2026-07-21", True)
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "offset_winter", "offset_summer"),
+    [
+        ("2026-01-20T14:00:00", "2026-01-20T15:00:00", "-05:00", None),
+        ("2026-07-20T14:00:00", "2026-07-20T15:00:00", None, "-04:00"),
+    ],
+)
+def test_naive_input_follows_a_non_default_zone_per_date(start, end, offset_winter, offset_summer):
+    mapping.set_default_timezone("America/New_York")
+    event = _new_event()
+    _apply(event, title="T", start=start, end=end)
+
+    parsed = event_mapping.parse_vevent(event)
+
+    offset = offset_winter or offset_summer
+    assert parsed["start"] == f"{start}{offset}"
+    assert parsed["end"] == f"{end}{offset}"
+
+
+def test_naive_input_inside_the_spring_forward_gap_is_written_as_a_real_time():
+    """02:30 on 2026-03-29 never happens in Berlin; it reads back as 03:30 CEST."""
+    event = _new_event()
+    _apply(event, title="T", start="2026-03-29T02:30:00", end="2026-03-29T03:30:00")
+
+    parsed = event_mapping.parse_vevent(event)
+
+    assert parsed["start"] == "2026-03-29T03:30:00+02:00"
+    assert parsed["end"] == "2026-03-29T03:30:00+02:00"
+
+
+def test_all_day_dates_stay_bare_in_every_default_zone():
+    mapping.set_default_timezone("Pacific/Kiritimati")  # UTC+14: the far end of the clock
+    event = _new_event()
+    _apply(event, title="T", start="2026-07-20", end="2026-07-21")
+
+    parsed = event_mapping.parse_vevent(event)
+
+    assert (parsed["start"], parsed["end"]) == ("2026-07-20", "2026-07-21")
+
+
 def test_parse_recurrence_id_as_recurrence_id():
     event = _new_event()
     event.add("dtstart", datetime(2026, 7, 27, 14, 0, tzinfo=timezone.utc))
@@ -1346,6 +1397,64 @@ def test_events_in_window_keeps_what_it_cannot_judge():
     assert _in_day(events) == ["series", "no-start", "unparseable"]
 
 
+@pytest.mark.parametrize(
+    ("day", "hours"),
+    [
+        (date(2026, 3, 29), 23),  # spring forward: 02:00 -> 03:00
+        (date(2026, 10, 25), 25),  # fall back: 03:00 -> 02:00
+        (date(2026, 7, 20), 24),
+    ],
+)
+def test_local_day_window_is_the_real_length_of_a_dst_day(day, hours):
+    start, end = event_mapping.local_day_window(day)
+
+    # Compared as instants: two datetimes sharing one ZoneInfo would subtract
+    # as wall clocks and hide the missing or repeated hour.
+    assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(hours=hours)
+    assert (start.hour, start.minute, end.hour, end.minute) == (0, 0, 0, 0)
+
+
+def test_local_day_window_follows_a_non_default_zone():
+    mapping.set_default_timezone("America/New_York")
+
+    start, end = event_mapping.local_day_window(date(2026, 3, 8))  # NY spring forward
+
+    assert start.isoformat() == "2026-03-08T00:00:00-05:00"
+    assert end.isoformat() == "2026-03-09T00:00:00-04:00"
+
+
+def test_events_in_window_on_the_spring_forward_day():
+    """The day is 23 hours long; 23:30 local is still its own, midnight is not."""
+    events: list[dict[str, Any]] = [
+        {"uid": "first", "start": "2026-03-29T00:00:00+01:00", "end": None},
+        {"uid": "after-gap", "start": "2026-03-29T03:00:00+02:00", "end": None},
+        {"uid": "last", "start": "2026-03-29T23:30:00+02:00", "end": None},
+        {"uid": "next-day", "start": "2026-03-30T00:00:00+02:00", "end": None},
+        {"uid": "previous-day", "start": "2026-03-28T23:59:00+01:00", "end": None},
+    ]
+    assert _in_day(events, date(2026, 3, 29)) == ["first", "after-gap", "last"]
+
+
+def test_events_in_window_on_the_fall_back_day_counts_both_repeated_hours():
+    events: list[dict[str, Any]] = [
+        {"uid": "first-2am", "start": "2026-10-25T02:30:00+02:00", "end": None},
+        {"uid": "second-2am", "start": "2026-10-25T02:30:00+01:00", "end": None},
+        {"uid": "last", "start": "2026-10-25T23:59:00+01:00", "end": None},
+        {"uid": "next-day", "start": "2026-10-26T00:00:00+01:00", "end": None},
+    ]
+    assert _in_day(events, date(2026, 10, 25)) == ["first-2am", "second-2am", "last"]
+
+
+def test_events_in_window_reads_an_all_day_event_in_the_default_zone_not_utc():
+    """A day window in New York must not see Berlin's idea of the same date."""
+    mapping.set_default_timezone("America/New_York")
+    events = [{"uid": "day", "start": "2026-07-20", "end": "2026-07-20"}]
+
+    assert _in_day(events, date(2026, 7, 20)) == ["day"]
+    assert _in_day(events, date(2026, 7, 19)) == []
+    assert _in_day(events, date(2026, 7, 21)) == []
+
+
 # --- free-busy: event_busy_interval ---
 
 
@@ -1404,7 +1513,10 @@ def test_event_busy_interval_opaque_is_busy():
     event = _new_event()
     _apply(event, title="T", start="2026-07-20T14:00:00")
     event.add("transp", "OPAQUE")
-    assert event_mapping.event_busy_interval(event) is not None
+    assert event_mapping.event_busy_interval(event) == (
+        datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+    )
 
 
 def test_event_busy_interval_no_dtstart_is_none():
@@ -1431,6 +1543,46 @@ def test_event_busy_interval_without_end_is_zero_length():
         datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
         datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
     )
+
+
+def test_event_busy_interval_of_a_timed_event_across_the_spring_forward_gap():
+    """01:00 -> 04:00 local on the 29th of March is two real hours, not three."""
+    event = _new_event()
+    _apply(event, title="T", start="2026-03-29T01:00:00", end="2026-03-29T04:00:00")
+
+    interval = event_mapping.event_busy_interval(event)
+
+    assert interval is not None
+    start, end = (value.astimezone(timezone.utc) for value in interval)
+    assert start == datetime(2026, 3, 29, 0, 0, tzinfo=timezone.utc)
+    assert end - start == timedelta(hours=2)
+
+
+@pytest.mark.parametrize(
+    ("day", "hours"),
+    [(date(2026, 3, 29), 23), (date(2026, 10, 25), 25)],
+)
+def test_event_busy_interval_of_an_all_day_event_on_a_dst_day(day, hours):
+    """The whole local day is busy, however many hours the transition made it."""
+    event = _new_event()
+    _apply(event, title="T", start=day.isoformat(), end=day.isoformat())
+
+    interval = event_mapping.event_busy_interval(event)
+
+    assert interval is not None
+    start, end = interval
+    assert start == event_mapping.local_midnight(day)
+    assert end.astimezone(timezone.utc) - start.astimezone(timezone.utc) == timedelta(hours=hours)
+
+
+def test_event_busy_interval_ignores_an_end_before_the_start():
+    """A foreign client's DTEND before DTSTART collapses to zero length, not negative."""
+    event = _event_from_ics(
+        "BEGIN:VEVENT\nUID:e\nDTSTART:20260720T140000Z\nDTEND:20260720T130000Z\nEND:VEVENT\n"
+    )
+    instant = datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc)
+
+    assert event_mapping.event_busy_interval(event) == (instant, instant)
 
 
 # --- free-busy: merge_busy_intervals ---
@@ -1523,9 +1675,9 @@ def test_extract_freebusy_periods_excludes_free():
         "FREE",
     )
 
-    periods = event_mapping.extract_freebusy_periods(vfb)
-    assert len(periods) == 1
-    assert periods[0][0] == busy_start
+    assert event_mapping.extract_freebusy_periods(vfb) == [
+        (busy_start, datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc))
+    ]
 
 
 def test_extract_freebusy_periods_includes_busy_tentative_and_unavailable():
@@ -1543,7 +1695,16 @@ def test_extract_freebusy_periods_includes_busy_tentative_and_unavailable():
         "BUSY-UNAVAILABLE",
     )
 
-    assert len(event_mapping.extract_freebusy_periods(vfb)) == 2
+    assert event_mapping.extract_freebusy_periods(vfb) == [
+        (
+            datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc),
+        ),
+        (
+            datetime(2026, 7, 20, 11, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc),
+        ),
+    ]
 
 
 def test_extract_freebusy_periods_reads_a_value_without_z_as_utc():
@@ -1908,30 +2069,57 @@ def test_exdate_add_to_a_mixed_stored_set_is_reported_not_crashed():
 # --- Birthday convention (birthday_fields) ---
 
 
-def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account():
+@pytest.fixture
+def legacy_birthday_names(monkeypatch):
+    """Give the legacy birthday names the distinct values they exist to have.
+
+    The shipped `LEGACY_BIRTHDAY_*` constants currently equal the English
+    ones (see the xfail below), which makes every legacy branch unreachable
+    and a test of it tautological - so the logic is exercised with the
+    original German spellings patched in.
+    """
+    monkeypatch.setattr(event_mapping, "LEGACY_BIRTHDAY_CALENDAR", "Geburtstage")
+    monkeypatch.setattr(event_mapping, "LEGACY_BIRTHDAY_TAG", "Geburtstag")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "src bug: event_mapping.LEGACY_BIRTHDAY_CALENDAR/_TAG (event_mapping.py:207, 217) "
+        "equal BIRTHDAY_CALENDAR/_TAG, so resolve_birthday_calendar's legacy branch "
+        "(line 341) and birthday_tag_for's legacy tag can never differ from the default"
+    ),
+)
+def test_legacy_birthday_names_differ_from_the_current_ones():
+    assert event_mapping.LEGACY_BIRTHDAY_CALENDAR != event_mapping.BIRTHDAY_CALENDAR
+    assert event_mapping.LEGACY_BIRTHDAY_TAG != event_mapping.BIRTHDAY_TAG
+
+
+def test_resolve_birthday_calendar_defaults_to_english_on_a_fresh_account(legacy_birthday_names):
     assert event_mapping.resolve_birthday_calendar([]) == "Birthdays"
     assert event_mapping.resolve_birthday_calendar(["Work", "Personal"]) == "Birthdays"
 
 
-def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar():
-    """A server set up before the rename already files birthdays in "Birthdays"."""
-    assert event_mapping.resolve_birthday_calendar(["Work", "Birthdays"]) == "Birthdays"
+def test_resolve_birthday_calendar_keeps_using_an_existing_legacy_calendar(legacy_birthday_names):
+    """A server set up before the rename already files birthdays in "Geburtstage"."""
+    assert event_mapping.resolve_birthday_calendar(["Work", "Geburtstage"]) == "Geburtstage"
 
 
-def test_resolve_birthday_calendar_prefers_english_when_both_exist():
-    assert event_mapping.resolve_birthday_calendar(["Birthdays", "Birthdays"]) == "Birthdays"
+def test_resolve_birthday_calendar_prefers_english_when_both_exist(legacy_birthday_names):
+    assert event_mapping.resolve_birthday_calendar(["Geburtstage", "Birthdays"]) == "Birthdays"
 
 
-def test_resolve_birthday_calendar_matches_the_name_exactly():
+def test_resolve_birthday_calendar_matches_the_name_exactly(legacy_birthday_names):
     """Resolution elsewhere compares display names exactly, so a differently
     cased calendar is not this calendar - claiming it would only turn a clean
     "not found" into a confusing one."""
     assert event_mapping.resolve_birthday_calendar(["birthdays"]) == "Birthdays"
+    assert event_mapping.resolve_birthday_calendar(["geburtstage"]) == "Birthdays"
 
 
-def test_birthday_tag_follows_the_calendar():
+def test_birthday_tag_follows_the_calendar(legacy_birthday_names):
     assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
-    assert event_mapping.birthday_tag_for("Birthdays") == "Birthday"
+    assert event_mapping.birthday_tag_for("Geburtstage") == "Geburtstag"
     assert event_mapping.birthday_tag_for("Family") == "Birthday"
 
 
@@ -2070,13 +2258,35 @@ def test_birthday_fields_rejects_an_empty_name(name):
         _birthday(name, "07-04")
 
 
-def test_birthday_fields_defaults_today_to_the_server_timezone():
-    # No `today` given: the fallback start must be a real upcoming date, not
-    # whatever a naive utcnow would make of it.
-    fields = event_mapping.birthday_fields("Without year", "07-02")
+class _FrozenDateTime(datetime):
+    """`datetime` whose `now()` is one fixed instant: 2026-12-31 23:30 UTC."""
 
-    today = datetime.now(mapping.get_default_timezone()).date()
-    assert date.fromisoformat(str(fields.start)) >= today
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 12, 31, 23, 30, tzinfo=timezone.utc).astimezone(tz)
+
+
+@pytest.mark.parametrize(
+    ("zone", "today", "start"),
+    [
+        # 23:30 UTC on New Year's Eve is already the 1st in Berlin.
+        ("Europe/Berlin", date(2027, 1, 1), "2027-12-31"),
+        ("UTC", date(2026, 12, 31), "2026-12-31"),
+        ("America/New_York", date(2026, 12, 31), "2026-12-31"),
+    ],
+)
+def test_birthday_fields_defaults_today_to_the_server_timezone(monkeypatch, zone, today, start):
+    # No `today` given: "today" is the calendar date in the server's default
+    # zone at that instant, not the machine's clock or UTC.
+    monkeypatch.setattr(event_mapping, "datetime", _FrozenDateTime)
+    mapping.set_default_timezone(zone)
+
+    fields = event_mapping.birthday_fields("Without year", "12-31")
+
+    assert event_mapping._today_local() == today
+    # A 31 December birthday is today's (and so upcoming) where it is still
+    # the 31st, and next year's where the 1st of January has begun.
+    assert fields.start == start
 
 
 def test_birthday_fields_round_trip_through_a_vevent():
