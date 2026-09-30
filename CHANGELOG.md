@@ -14,6 +14,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   `vX.Y.Z`, `X.Y`, `latest`), plus a `compose.yaml`. Runs as a non-root user and
   keeps the OAuth state in a `/data` volume. See [Running in Docker](docs/docker.md).
 
+### Documentation
+
+- Deployment guide: local-only use without a public URL (loopback
+  `PUBLIC_BASE_URL`, no consent password, `mcp-remote` and Claude Code setup,
+  redirect-domain notes), and the decision on a native stdio transport.
+
 ## [0.2.1] - 2026-09-29
 
 ### Added

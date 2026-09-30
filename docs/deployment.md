@@ -208,6 +208,141 @@ claude mcp add nextcloud-organizer-mcp --transport http "https://<hostname>.<tai
 Add the connector on claude.ai web (above) - it syncs to mobile automatically. Connectors
 can't be added directly from the mobile app.
 
+## Local-only use (no public URL)
+
+If the client runs on the same machine as the server, you can skip the public URL, TLS
+and the consent password entirely. This works for clients that connect from your own
+machine (Claude Code, Claude Desktop through the `mcp-remote` bridge, MCP Inspector). It
+does **not** work for the Claude.ai web or mobile connector, see
+[below](#why-a-cloud-hosted-connector-cannot-use-it).
+
+### Configure
+
+```bash
+NEXTCLOUD_BASE_URL=https://cloud.example.com
+NEXTCLOUD_USERNAME=<nextcloud user>
+NEXTCLOUD_APP_PASSWORD=<app password>
+
+PUBLIC_BASE_URL=http://127.0.0.1:8000
+MCP_HOST=127.0.0.1
+MCP_PORT=8000
+# MCP_OAUTH_PASSWORD is not needed here
+MCP_OAUTH_STATE_DIR=$HOME/.local/state/nextcloud-organizer-mcp/oauth-state
+```
+
+The server does not read a `.env` file by itself; export the variables first:
+
+```bash
+set -a; . ./.env; set +a
+uv run --no-dev nextcloud-organizer-mcp     # MCP endpoint: http://127.0.0.1:8000/mcp
+```
+
+`MCP_OAUTH_PASSWORD` may be left out **only** when `PUBLIC_BASE_URL` points at
+`localhost`, `127.0.0.1` or `::1` **and** `MCP_HOST` is one of those as well. This does
+not switch OAuth off: clients still discover the server, register themselves
+(Dynamic Client Registration), and exchange PKCE codes for tokens, and `/mcp` still
+returns `401` without a valid token. Only the interactive consent page is skipped, so the
+authorization completes without a prompt. Any process on the machine that can reach the
+port can therefore obtain a token, so use this only on a machine you trust.
+
+The check is enforced at startup. With no password, all of these refuse to start with
+`MCP_OAUTH_PASSWORD is required when PUBLIC_BASE_URL is not localhost or MCP_HOST is not
+a local bind address`: `MCP_HOST=0.0.0.0`, `MCP_HOST=<a LAN address>`, a public
+`PUBLIC_BASE_URL`, and a LAN-address `PUBLIC_BASE_URL`. Set a password to lift the
+restriction for that case.
+
+### Connect a local client
+
+**Claude Desktop** (through [`mcp-remote`](https://github.com/geelen/mcp-remote), needs
+Node.js). Use the absolute path to `npx`, because GUI apps do not inherit your shell
+`PATH` (`which npx`):
+
+```json
+{
+  "mcpServers": {
+    "nextcloud-organizer-mcp": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8000/mcp"]
+    }
+  }
+}
+```
+
+The first start opens your browser for the authorization step, which completes
+immediately. `mcp-remote` stores its tokens under `~/.mcp-auth/`.
+
+**Claude Code:**
+
+```bash
+claude mcp add nextcloud-organizer-mcp --transport http http://127.0.0.1:8000/mcp
+```
+
+Then run `/mcp` inside Claude Code and authenticate the server once.
+
+### Redirect domains
+
+The OAuth redirect goes to the client's own loopback callback, and the server checks
+its host against `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`. When you leave that unset and
+`PUBLIC_BASE_URL` is local, the default list is `claude.ai`, `claude.com` and
+`localhost`. That covers clients that use `http://localhost:<port>/...` callbacks,
+including `mcp-remote` (`http://localhost:<port>/oauth/callback`). A client that
+registers `http://127.0.0.1:<port>/...` instead is rejected with
+`Redirect URI domain not allowed`; add `127.0.0.1` to
+`MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` for such a client.
+
+### Why a cloud-hosted connector cannot use it
+
+Claude.ai (web and mobile) does not connect from your browser or phone. Anthropic's
+servers perform the OAuth flow and every tool call. For those servers, `127.0.0.1` is
+their own loopback interface, not your machine, so a `PUBLIC_BASE_URL` of
+`http://127.0.0.1:8000` can never be reached. A cloud connector needs a public HTTPS URL
+and `MCP_OAUTH_PASSWORD`; use the [Tailscale Funnel setup](#4-expose-via-tailscale-funnel)
+above.
+
+### Verified setup
+
+Tested on 2026-09-30 against a real Nextcloud (CalDAV over HTTPS, app password), with
+the server started as above from this repository:
+
+| Component | Version |
+|---|---|
+| Server | 0.2.1, FastMCP 4.0.10, Python 3.12.13 |
+| `mcp-remote` | 0.14.3 (`npx -y mcp-remote@0.14.3 http://127.0.0.1:8000/mcp`, no `--allow-http` needed for `127.0.0.1`) |
+| Node.js | 26.4.0 |
+| Claude Code | 2.1.285 (server added and reported `Needs authentication`; interactive `/mcp` login not run) |
+
+With `mcp-remote`: discovery, registration and authorization completed without a consent
+page (redirect `http://localhost:12570/oauth/callback`), a `list_task_lists` call returned
+the Nextcloud task lists, and after a server restart the client reconnected without
+authorizing again (tokens persist in `MCP_OAUTH_STATE_DIR`).
+
+## Native stdio transport (evaluated, not implemented)
+
+The MCP stdio transport would let a client start the server as a child process, with no
+port, URL or OAuth. **Decision: worth implementing; tracked in
+[#78](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/78), not part of this guide.**
+
+A throwaway probe showed the existing `build_server(...).run(transport="stdio")` already
+answers `initialize` and `tools/list` unchanged. Nothing writes to stdout except protocol
+messages, and logging goes to stderr. Authentication is ignored on stdio, and no OAuth
+state directory is created.
+
+What it would simplify: no `mcp-remote`/Node.js, no `PUBLIC_BASE_URL`, no
+`MCP_OAUTH_STATE_DIR`, no browser step, no port to protect.
+
+What it costs and what an implementation must handle:
+
+- **Secrets.** The Nextcloud app password moves into each client's config (`env` block),
+  in plaintext, instead of one `600` env file.
+- **Processes.** Every client session starts its own server process. The process must exit
+  when stdin closes, and several clients multiply the connections to Nextcloud.
+- **Transport selection.** `main()` needs a switch (flag or `MCP_TRANSPORT`), and stdio must
+  not require `PUBLIC_BASE_URL` or construct `PersonalAuthProvider`.
+- **stdout hygiene.** Stdout must stay clean; keep logging on stderr and add a test.
+- **GUI clients** need absolute paths to `uv` in their config.
+- **Scope.** stdio does not help Claude.ai web or mobile, which still need the HTTP
+  server behind a public URL.
+
 ## Managing issued OAuth tokens
 
 `oauth_tokens.json` (in `MCP_OAUTH_STATE_DIR`) accumulates one access/refresh token pair
@@ -288,6 +423,9 @@ old one).
 | OAuth state lost after a restart | `MCP_OAUTH_STATE_DIR` isn't pointing at a persistent, writable path - confirm the systemd `StateDirectory` is set and matches |
 | "Nextcloud rejected the CalDAV credentials" | Wrong username or expired/revoked app password |
 | "Could not reach the Nextcloud server" | Nextcloud down, or the container can't resolve/route to it |
+| Local setup: `Redirect URI domain not allowed` during authorization | The client registered a `http://127.0.0.1:<port>/...` callback; add `127.0.0.1` to `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (see [Local-only use](#local-only-use-no-public-url)) |
+| Local setup: service refuses to start with `MCP_OAUTH_PASSWORD is required...` | `MCP_HOST` is not a loopback address (e.g. `0.0.0.0`) or `PUBLIC_BASE_URL` is not loopback; set a password, or bind to `127.0.0.1` |
+| Local setup: `Missing required environment variable` although a `.env` exists | The server does not read `.env` itself; `set -a; . ./.env; set +a` before starting |
 | `tailscale funnel` refuses to start | Funnel not enabled for this node in the tailnet admin console (Settings → Funnel) |
 
 Server logs: `journalctl -u nextcloud-organizer-mcp -f`. Unexpected internal errors are logged

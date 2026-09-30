@@ -107,11 +107,15 @@ Prefer containers? A multi-arch image is on GHCR and needs no Python or uv; see
 [Running in Docker](docs/docker.md) for a compose file and a `docker run` one-liner.
 
 From a checkout instead: `uv sync && cp .env.example .env`, edit `.env`, then
-`uv run nextcloud-organizer-mcp`. Every setting is documented in
+`set -a; . ./.env; set +a; uv run nextcloud-organizer-mcp` (the server does not read
+`.env` itself, so the variables must be exported first). Every setting is documented in
 [`.env.example`](.env.example). `NEXTCLOUD_BASE_URL` must be `https://` unless it
 points at a local address.
 
-Then expose the server (the [deployment guide](docs/deployment.md) uses Tailscale
+Client on the same machine? No public URL or password needed, see
+[Local-only use](docs/deployment.md#local-only-use-no-public-url).
+
+Otherwise expose the server (the [deployment guide](docs/deployment.md) uses Tailscale
 Funnel for TLS) and add it in Claude under **Settings → Connectors → Add custom
 connector** with the URL `<PUBLIC_BASE_URL>/mcp`. Leave Client ID and Secret blank
 and enter your `MCP_OAUTH_PASSWORD` on the consent page that opens. Details:
