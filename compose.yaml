@@ -1,0 +1,44 @@
+# Run the server in a container. See docs/docker.md.
+#
+#   cp .env.example .env    # then edit it (or export the variables instead)
+#   docker compose up -d
+#
+# The server speaks plain HTTP and does not handle TLS. Put a reverse proxy or
+# tunnel in front of it and set PUBLIC_BASE_URL to the public HTTPS URL.
+#
+# Needs Docker Compose 2.24 or newer (optional env_file).
+services:
+  nextcloud-organizer-mcp:
+    image: ghcr.io/vando-sketch/nextcloud-organizer-mcp:latest
+    restart: unless-stopped
+    # Every setting documented in .env.example works from a .env file next to
+    # this file; the file is optional when the variables are exported instead.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Required. Compose stops with the message below instead of letting the
+      # container crash-loop.
+      NEXTCLOUD_BASE_URL: ${NEXTCLOUD_BASE_URL:?set NEXTCLOUD_BASE_URL, e.g. https://cloud.example.com}
+      NEXTCLOUD_USERNAME: ${NEXTCLOUD_USERNAME:?set NEXTCLOUD_USERNAME}
+      NEXTCLOUD_APP_PASSWORD: ${NEXTCLOUD_APP_PASSWORD:?set NEXTCLOUD_APP_PASSWORD (Nextcloud Settings > Security)}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL to the public HTTPS URL clients use}
+      # The container binds 0.0.0.0, which requires a password even for local use.
+      MCP_OAUTH_PASSWORD: ${MCP_OAUTH_PASSWORD:?set MCP_OAUTH_PASSWORD to a long random secret}
+      # Container-internal values, pinned so a .env copied from .env.example
+      # (MCP_HOST=127.0.0.1) cannot make the server unreachable. Use HOST_PORT
+      # below to change the published port.
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      MCP_OAUTH_STATE_DIR: /data
+    ports:
+      # Loopback only: the reverse proxy or tunnel on this host is the public
+      # entry point. Change the left-hand side to expose it differently.
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
+    volumes:
+      # OAuth client registrations and tokens. Without it, connected clients
+      # must re-authorize after every container re-creation.
+      - oauth-state:/data
+
+volumes:
+  oauth-state:

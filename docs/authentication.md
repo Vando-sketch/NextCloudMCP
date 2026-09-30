@@ -36,6 +36,9 @@ registration endpoints once the server is public:
   rate-limited (max 5 wrong attempts per pending key, max 10 failures per client IP per
   15 minutes) since it is a publicly reachable password prompt. The placeholder value
   shipped (commented out) in `.env.example` is rejected outright if left in place.
+- For same-machine clients, `MCP_OAUTH_PASSWORD` may be omitted when both
+  `PUBLIC_BASE_URL` and `MCP_HOST` are loopback; OAuth itself stays on and only the
+  consent page is skipped. See [Local-only use](deployment.md#local-only-use-no-public-url).
 - **Access tokens are opaque random strings** (not JWTs with inspectable claims) and are
   persisted to `MCP_OAUTH_STATE_DIR` (default `.oauth-state/oauth_tokens.json`, gitignored)
   so they survive server restarts.

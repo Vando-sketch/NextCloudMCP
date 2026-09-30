@@ -5,8 +5,10 @@
 - `main` is the released state and the default branch. Do not commit to it directly.
 - `dev` is where work happens. Branch from `dev`, open PRs against `dev`.
 - Releases are cut by merging `dev` into `main` and tagging `main`.
-- A release bumps the version in `pyproject.toml` and in both places in
-  `server.json`. After the GitHub release has published to PyPI, publish the
+- A release bumps the version in `pyproject.toml` and in all places in
+  `server.json` (`version`, the PyPI package's `version`, and the tag of the
+  Docker image identifier). After the GitHub release has published to PyPI and
+  the Docker job has pushed the image to GHCR, publish the
   same version to the MCP Registry with `mcp-publisher login github` and
   `mcp-publisher publish`.
 

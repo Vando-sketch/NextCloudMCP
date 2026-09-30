@@ -102,3 +102,87 @@ jobs:
 
       - name: Run integration tests
         run: uv run pytest tests/test_integration.py -q
+
+  # The published Docker image, run against the same kind of disposable
+  # Nextcloud, driven through the real OAuth flow like an MCP client would.
+  docker:
+    runs-on: ubuntu-latest
+    continue-on-error: false
+
+    services:
+      nextcloud:
+        image: nextcloud:latest
+        ports:
+          - 8080:80
+        env:
+          SQLITE_DATABASE: nextcloud
+          NEXTCLOUD_ADMIN_USER: admin
+          NEXTCLOUD_ADMIN_PASSWORD: ${{ secrets.INTEGRATION_NEXTCLOUD_ADMIN_PASSWORD || 'nextcloud-ci-admin-pw' }}
+
+    env:
+      NEXTCLOUD_APP_PASSWORD: ${{ secrets.INTEGRATION_NEXTCLOUD_ADMIN_PASSWORD || 'nextcloud-ci-admin-pw' }}
+      MCP_OAUTH_PASSWORD: docker-e2e-consent-password
+      INTEGRATION_TEST_LIST: "Test"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies (for the client script)
+        run: uv sync --locked --no-dev
+
+      - name: Build image
+        run: docker build -t nextcloud-organizer-mcp:e2e .
+
+      - name: Wait for Nextcloud to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/status.php | grep -q '"installed":true'; then
+              echo "Nextcloud is up and installed."
+              exit 0
+            fi
+            echo "Waiting for Nextcloud... ($i/60)"
+            sleep 5
+          done
+          echo "Nextcloud did not become ready in time." >&2
+          exit 1
+
+      - name: Provision the test task list
+        run: |
+          container_id="$(docker ps -q --filter ancestor=nextcloud:latest)"
+          docker exec "$container_id" php occ app:enable calendar
+          docker exec "$container_id" php occ dav:create-calendar admin "$INTEGRATION_TEST_LIST"
+
+      - name: Start the server container
+        # Host networking so the container reaches the Nextcloud service at
+        # localhost:8080. The plain-http base URL is accepted because it points
+        # at a local address.
+        run: |
+          docker run -d --name organizer-mcp --network host \
+            -e NEXTCLOUD_BASE_URL=http://localhost:8080 \
+            -e NEXTCLOUD_USERNAME=admin \
+            -e NEXTCLOUD_APP_PASSWORD \
+            -e PUBLIC_BASE_URL=http://127.0.0.1:8000 \
+            -e MCP_OAUTH_PASSWORD \
+            nextcloud-organizer-mcp:e2e
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8000/.well-known/oauth-authorization-server >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs organizer-mcp
+          exit 1
+
+      - name: OAuth flow and tool calls against the container
+        run: uv run python scripts/docker-e2e.py http://127.0.0.1:8000 "$INTEGRATION_TEST_LIST"
+
+      - name: Show server logs on failure
+        if: failure()
+        run: docker logs organizer-mcp

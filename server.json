@@ -46,6 +46,43 @@
           "isSecret": true
         }
       ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/vando-sketch/nextcloud-organizer-mcp:v0.2.1",
+      "transport": {
+        "type": "streamable-http",
+        "url": "http://127.0.0.1:8000/mcp"
+      },
+      "environmentVariables": [
+        {
+          "name": "NEXTCLOUD_BASE_URL",
+          "description": "Base URL of your Nextcloud instance, e.g. https://cloud.example.com (must be https:// unless local).",
+          "isRequired": true
+        },
+        {
+          "name": "NEXTCLOUD_USERNAME",
+          "description": "Nextcloud username.",
+          "isRequired": true
+        },
+        {
+          "name": "NEXTCLOUD_APP_PASSWORD",
+          "description": "Nextcloud app password (Settings > Security > Devices & sessions), never the account password.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "PUBLIC_BASE_URL",
+          "description": "The exact public URL clients use to reach this server; required for the OAuth 2.1 flow.",
+          "isRequired": true
+        },
+        {
+          "name": "MCP_OAUTH_PASSWORD",
+          "description": "Password for the OAuth consent page. Required in the container, which binds 0.0.0.0.",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
     }
   ]
 }

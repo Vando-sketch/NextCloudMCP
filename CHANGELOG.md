@@ -13,7 +13,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   Nextcloud proxy, with forwarded-header trust, streaming, logging guidance,
   and a shared deployment verification checklist. The Caddy recipe filters
   request URIs and Referer headers from runtime error logs to protect OAuth
-  query parameters even when an upstream request fails.
+  query parameters even when an upstream request fails. Tested only locally
+  (Caddy 2.11.4, mocked Nextcloud); a public end-to-end run is still pending and
+  feedback is welcome (#70).
+- Docker image for `linux/amd64` and `linux/arm64`, published to
+  `ghcr.io/vando-sketch/nextcloud-organizer-mcp` with each release (tags
+  `vX.Y.Z`, `X.Y`, `latest`), plus a `compose.yaml`. Runs as a non-root user and
+  keeps the OAuth state in a `/data` volume. See [Running in Docker](docs/docker.md).
+
+### Documentation
+
+- Deployment guide: local-only use without a public URL (loopback
+  `PUBLIC_BASE_URL`, no consent password, `mcp-remote` and Claude Code setup,
+  redirect-domain notes), and the decision on a native stdio transport.
+- Deployment guide: Cloudflare Tunnel recipe as an alternative to Tailscale
+  Funnel, with the tested and untested parts listed explicitly. A named tunnel
+  with a stable hostname is still unverified and feedback is welcome.
 
 ## [0.2.1] - 2026-09-29
 

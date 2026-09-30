@@ -2,8 +2,10 @@
 
 Run the server on a Linux host with systemd, then choose a public HTTPS entry
 point: [Caddy or your existing Nextcloud proxy](#4a-expose-via-caddy-or-an-existing-proxy),
-or [Tailscale Funnel](#4b-expose-via-tailscale-funnel). Both terminate TLS and
-forward requests to the server's local HTTP port.
+[Tailscale Funnel](#4b-expose-via-tailscale-funnel), or
+[Cloudflare Tunnel](#4c-alternative-cloudflare-tunnel). Each provides TLS and
+forwards requests to the server's local HTTP port. For a client on the same
+machine, see [Local-only use](#local-only-use-no-public-url).
 
 ```text
 Clients ── HTTPS ──► existing reverse proxy
@@ -16,6 +18,10 @@ Clients ── HTTPS ──► existing reverse proxy
 A cloud-hosted MCP client needs an endpoint reachable from the public internet.
 The server's [OAuth authentication](authentication.md) protects that endpoint.
 Plain `tailscale serve` only reaches your tailnet; Funnel makes it public.
+
+> Prefer containers? See [Running in Docker](docker.md) for the published image and a
+> compose file; the rest of this guide (proxy setup, connecting Claude, token management)
+> applies to it as well.
 
 The Caddy recipe and its verification checklist are documented below. See the
 [verification record](deployment-verification.md) for the distinction between
@@ -46,7 +52,7 @@ NEXTCLOUD_APP_PASSWORD=<app password from Settings -> Security>
 # (both URLs must point at the same Nextcloud instance).
 # NEXTCLOUD_CALDAV_URL=https://cloud.example.com/remote.php/dav/
 
-# Must match the public HTTPS origin exactly (scheme + host), set up in step 4.
+# Must match the public HTTPS origin exactly (scheme + host), set up in step 4a, 4b or 4c.
 # For Funnel use https://<hostname>.<tailnet>.ts.net instead.
 PUBLIC_BASE_URL=https://organizer.example.com
 
@@ -144,6 +150,18 @@ sudo systemctl status nextcloud-organizer-mcp
 ```
 
 ## 4a. Expose via Caddy or an existing proxy
+
+> **Verification status: partially tested - feedback wanted.** This recipe should
+> work, but it has **not** been tested end to end: no publicly reachable Caddy
+> deployment, external Claude client or distinct public client IPs were available.
+> What *was* tested (a local Caddy 2.11.4 with a disposable certificate and a mocked
+> Nextcloud) is listed in the [verification record](deployment-verification.md).
+> If you run it, please report back - what worked, what did not, your proxy and
+> client versions - in a
+> [client compatibility report](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/new/choose)
+> or on issue [#70](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/70).
+> The [public deployment checklist](deployment-verification.md#public-deployment-checklist)
+> lists what to check.
 
 ### Caddy on the same host
 
@@ -292,6 +310,142 @@ service so it picks up the value:
 sudo systemctl restart nextcloud-organizer-mcp
 ```
 
+## 4c. Alternative: Cloudflare Tunnel
+
+> **Verification status: partially tested - feedback wanted.** A *named* tunnel with a
+> stable hostname has **not** been tested end to end by the maintainers: no domain on
+> Cloudflare was available. What *was* tested is listed under
+> [What has and has not been tested](#what-has-and-has-not-been-tested). If you run
+> this recipe, please report back (what worked, what did not, `cloudflared` version,
+> Cloudflare plan and security settings) in a
+> [client compatibility report](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/new/choose)
+> or on issue [#71](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/71).
+
+Use this instead of step 4a or 4b when you cannot open inbound ports (for example behind CGNAT)
+or do not want to use Tailscale. [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+opens an **outbound** connection to Cloudflare, and Cloudflare serves a public HTTPS
+hostname that it forwards through that connection to the server.
+
+```
+Claude (custom connector, cloud-side)
+        │  HTTPS (Cloudflare certificate)
+        ▼
+Cloudflare edge  ◄── outbound tunnel ──  cloudflared  ──►  nextcloud-organizer-mcp
+                                                          (127.0.0.1:8000, plain HTTP)
+```
+
+Steps 1-3 (install, configure, systemd service) stay the same. Only the public URL
+differs.
+
+**Requirements:** a domain whose DNS is on Cloudflare (a free plan is enough). A named
+tunnel needs a hostname under your own zone. Cloudflare's random `trycloudflare.com`
+quick tunnels are for experiments only (see below).
+
+### Set up a named tunnel
+
+1. In the [Cloudflare Zero Trust dashboard](https://one.dash.cloudflare.com) open
+   **Networks → Tunnels → Create a tunnel**, choose **Cloudflared**, and name it.
+2. On your server, install `cloudflared` from
+   [Cloudflare's package repository](https://pkg.cloudflare.com/) and run the install
+   command the dashboard shows for your OS. It registers a `cloudflared` systemd service
+   that starts on boot with your tunnel token.
+3. Add a **Published application route**:
+   - Subdomain and domain: pick the domain **from the dropdown**, for example
+     `organizer.example.com`.
+   - Service type `HTTP`, URL `127.0.0.1:8000`. Use `127.0.0.1` rather than `localhost`,
+     because the server only binds IPv4 loopback.
+4. In `/etc/nextcloud-organizer-mcp.env` set the public URL to exactly that hostname
+   (scheme and host, no path, no trailing slash) and restart the server:
+
+   ```bash
+   PUBLIC_BASE_URL=https://organizer.example.com
+   MCP_OAUTH_PASSWORD=<long random value>
+   MCP_OAUTH_STATE_DIR=/var/lib/nextcloud-organizer-mcp/oauth-state
+   MCP_HOST=127.0.0.1
+   MCP_PORT=8000
+   ```
+
+   ```bash
+   sudo systemctl restart nextcloud-organizer-mcp
+   ```
+
+5. Add the connector in Claude with the URL `https://organizer.example.com/mcp`
+   (see [Connect Claude](#5-connect-claude)).
+
+The tunnel token is a credential: anyone holding it can run a connector for your tunnel.
+If it leaks, delete the tunnel in the dashboard and create a new one.
+
+### What becomes public
+
+The whole server becomes reachable from the internet at your hostname, exactly as with
+Funnel. Cloudflare does not add authentication on its own here. The server's OAuth 2.1
+flow and the `MCP_OAUTH_PASSWORD` consent page are the protection, which is why the server
+refuses to start without the password on a non-localhost `PUBLIC_BASE_URL`. Do not put
+**Cloudflare Access** in front of the hostname: Claude's connector cannot complete an
+Access login, so the connection is expected to fail (untested). Keep the server bound to
+`127.0.0.1` so the tunnel is the only way in.
+
+### Client addresses and the consent rate limit
+
+The consent page limits failed password attempts per client IP. Uvicorn takes that
+address from `X-Forwarded-For`, but only when the connection comes from a trusted
+address, and by default that is `127.0.0.1` only (`FORWARDED_ALLOW_IPS`).
+
+- **`cloudflared` on the same host as the server (this recipe):** works as is. The
+  server sees the real client address.
+- **`cloudflared` on another host or in a container:** every request arrives from the
+  tunnel host's address, so all visitors share one rate-limit bucket. Ten wrong attempts
+  from anyone would then lock the owner out of the consent page too. Set
+  `FORWARDED_ALLOW_IPS` to the address `cloudflared` connects from, for example
+  `FORWARDED_ALLOW_IPS=172.18.0.2`. Do not set it to `*` while the server is reachable
+  by other means than the tunnel, because any client could then forge its address. This
+  setting was checked in the Uvicorn source only, not run against a remote
+  `cloudflared`.
+
+### Quick tunnels are not a production setup
+
+`cloudflared tunnel --url http://127.0.0.1:8000` needs no account and prints a random
+`https://<words>.trycloudflare.com` URL, but the URL changes every time the process
+restarts. `PUBLIC_BASE_URL` and the Claude connector would have to change with it.
+Cloudflare also states that quick tunnels do not support Server-Sent Events. Use one only
+to try the flow for a few minutes, never as a lasting setup.
+
+### What has and has not been tested
+
+Tested on 2026-09-30 with `nextcloud-organizer-mcp` 0.2.1, `cloudflared` 2026.9.3 on
+Debian 12 (Linux amd64) and a Cloudflare **free** plan with Bot Fight Mode off. The tests
+used a **quick tunnel** and a scripted OAuth client (Python `httpx`), not a real Claude
+client, against a real Nextcloud instance:
+
+| Check | Result |
+|---|---|
+| OAuth discovery (`/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`) advertises the public `https://` URLs | Passed |
+| `POST /mcp` without a token returns `401` with `WWW-Authenticate: Bearer resource_metadata=...` | Passed |
+| Dynamic Client Registration, `/authorize`, consent page, `/token` with PKCE | Passed |
+| Read-only tool call (`list_task_lists`) over `POST /mcp` against real Nextcloud | Passed |
+| Issued token still valid after two server restarts (persistent `MCP_OAUTH_STATE_DIR`) | Passed |
+| Cloudflare challenge or HTML page in front of any OAuth or MCP endpoint | None seen (free plan, Bot Fight Mode off, default settings, scripted client) |
+| Forged `X-Forwarded-For` and `X-Real-IP` do not bypass the consent rate limit; the server logged the real client address | Passed |
+| A client-sent `CF-Connecting-IP` header | Rejected by Cloudflare itself with `403 error code: 1000` before it reaches the server |
+| Standalone `GET /mcp` event stream | **Not delivered** through the quick tunnel: no headers for 15 s, no `: ping` events in 200 s. The server sends a keep-alive comment every 15 s when reached directly. Request/response calls were not affected. |
+
+Not tested: a **named tunnel** with a stable hostname (only its connection and
+dashboard-delivered route config were observed), the real Claude.ai or Claude Desktop
+connector, Cloudflare Access, **Bot Fight Mode or Super Bot Fight Mode enabled**, WAF
+rules, caching rules, tool calls that run longer than 100 seconds, and `cloudflared` on a
+separate host. Cloudflare closes idle proxied connections after about 100 seconds, which
+the server's 15-second keep-alive should stay under, but this was not confirmed through a
+named tunnel.
+
+### Cloudflare settings to check if something fails
+
+- **Bot Fight Mode / Super Bot Fight Mode** can serve a JavaScript challenge that a
+  non-browser client such as Claude's connector cannot solve. Turn it off for the zone, or
+  on a paid plan exclude the OAuth and MCP paths with a WAF skip rule. This is untested.
+- **Cloudflare Access** in front of the hostname breaks the connector (see above).
+- **Caching:** do not add cache rules for this hostname. Discovery and token responses
+  must never be cached. The default showed `cf-cache-status: DYNAMIC`.
+
 ## 5. Connect Claude
 
 ### Claude.ai (web) — syncs to mobile automatically
@@ -334,6 +488,141 @@ For Funnel, use `https://<hostname>.<tailnet>.ts.net/mcp` instead.
 
 Add the connector on claude.ai web (above) - it syncs to mobile automatically. Connectors
 can't be added directly from the mobile app.
+
+## Local-only use (no public URL)
+
+If the client runs on the same machine as the server, you can skip the public URL, TLS
+and the consent password entirely. This works for clients that connect from your own
+machine (Claude Code, Claude Desktop through the `mcp-remote` bridge, MCP Inspector). It
+does **not** work for the Claude.ai web or mobile connector, see
+[below](#why-a-cloud-hosted-connector-cannot-use-it).
+
+### Configure
+
+```bash
+NEXTCLOUD_BASE_URL=https://cloud.example.com
+NEXTCLOUD_USERNAME=<nextcloud user>
+NEXTCLOUD_APP_PASSWORD=<app password>
+
+PUBLIC_BASE_URL=http://127.0.0.1:8000
+MCP_HOST=127.0.0.1
+MCP_PORT=8000
+# MCP_OAUTH_PASSWORD is not needed here
+MCP_OAUTH_STATE_DIR=$HOME/.local/state/nextcloud-organizer-mcp/oauth-state
+```
+
+The server does not read a `.env` file by itself; export the variables first:
+
+```bash
+set -a; . ./.env; set +a
+uv run --no-dev nextcloud-organizer-mcp     # MCP endpoint: http://127.0.0.1:8000/mcp
+```
+
+`MCP_OAUTH_PASSWORD` may be left out **only** when `PUBLIC_BASE_URL` points at
+`localhost`, `127.0.0.1` or `::1` **and** `MCP_HOST` is one of those as well. This does
+not switch OAuth off: clients still discover the server, register themselves
+(Dynamic Client Registration), and exchange PKCE codes for tokens, and `/mcp` still
+returns `401` without a valid token. Only the interactive consent page is skipped, so the
+authorization completes without a prompt. Any process on the machine that can reach the
+port can therefore obtain a token, so use this only on a machine you trust.
+
+The check is enforced at startup. With no password, all of these refuse to start with
+`MCP_OAUTH_PASSWORD is required when PUBLIC_BASE_URL is not localhost or MCP_HOST is not
+a local bind address`: `MCP_HOST=0.0.0.0`, `MCP_HOST=<a LAN address>`, a public
+`PUBLIC_BASE_URL`, and a LAN-address `PUBLIC_BASE_URL`. Set a password to lift the
+restriction for that case.
+
+### Connect a local client
+
+**Claude Desktop** (through [`mcp-remote`](https://github.com/geelen/mcp-remote), needs
+Node.js). Use the absolute path to `npx`, because GUI apps do not inherit your shell
+`PATH` (`which npx`):
+
+```json
+{
+  "mcpServers": {
+    "nextcloud-organizer-mcp": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8000/mcp"]
+    }
+  }
+}
+```
+
+The first start opens your browser for the authorization step, which completes
+immediately. `mcp-remote` stores its tokens under `~/.mcp-auth/`.
+
+**Claude Code:**
+
+```bash
+claude mcp add nextcloud-organizer-mcp --transport http http://127.0.0.1:8000/mcp
+```
+
+Then run `/mcp` inside Claude Code and authenticate the server once.
+
+### Redirect domains
+
+The OAuth redirect goes to the client's own loopback callback, and the server checks
+its host against `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS`. When you leave that unset and
+`PUBLIC_BASE_URL` is local, the default list is `claude.ai`, `claude.com` and
+`localhost`. That covers clients that use `http://localhost:<port>/...` callbacks,
+including `mcp-remote` (`http://localhost:<port>/oauth/callback`). A client that
+registers `http://127.0.0.1:<port>/...` instead is rejected with
+`Redirect URI domain not allowed`; add `127.0.0.1` to
+`MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` for such a client.
+
+### Why a cloud-hosted connector cannot use it
+
+Claude.ai (web and mobile) does not connect from your browser or phone. Anthropic's
+servers perform the OAuth flow and every tool call. For those servers, `127.0.0.1` is
+their own loopback interface, not your machine, so a `PUBLIC_BASE_URL` of
+`http://127.0.0.1:8000` can never be reached. A cloud connector needs a public HTTPS URL
+and `MCP_OAUTH_PASSWORD`; use the [Tailscale Funnel setup](#4b-expose-via-tailscale-funnel)
+above.
+
+### Verified setup
+
+Tested on 2026-09-30 against a real Nextcloud (CalDAV over HTTPS, app password), with
+the server started as above from this repository:
+
+| Component | Version |
+|---|---|
+| Server | 0.2.1, FastMCP 4.0.10, Python 3.12.13 |
+| `mcp-remote` | 0.14.3 (`npx -y mcp-remote@0.14.3 http://127.0.0.1:8000/mcp`, no `--allow-http` needed for `127.0.0.1`) |
+| Node.js | 26.4.0 |
+| Claude Code | 2.1.285 (server added and reported `Needs authentication`; interactive `/mcp` login not run) |
+
+With `mcp-remote`: discovery, registration and authorization completed without a consent
+page (redirect `http://localhost:12570/oauth/callback`), a `list_task_lists` call returned
+the Nextcloud task lists, and after a server restart the client reconnected without
+authorizing again (tokens persist in `MCP_OAUTH_STATE_DIR`).
+
+## Native stdio transport (evaluated, not implemented)
+
+The MCP stdio transport would let a client start the server as a child process, with no
+port, URL or OAuth. **Decision: worth implementing; tracked in
+[#78](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/78), not part of this guide.**
+
+A throwaway probe showed the existing `build_server(...).run(transport="stdio")` already
+answers `initialize` and `tools/list` unchanged. Nothing writes to stdout except protocol
+messages, and logging goes to stderr. Authentication is ignored on stdio, and no OAuth
+state directory is created.
+
+What it would simplify: no `mcp-remote`/Node.js, no `PUBLIC_BASE_URL`, no
+`MCP_OAUTH_STATE_DIR`, no browser step, no port to protect.
+
+What it costs and what an implementation must handle:
+
+- **Secrets.** The Nextcloud app password moves into each client's config (`env` block),
+  in plaintext, instead of one `600` env file.
+- **Processes.** Every client session starts its own server process. The process must exit
+  when stdin closes, and several clients multiply the connections to Nextcloud.
+- **Transport selection.** `main()` needs a switch (flag or `MCP_TRANSPORT`), and stdio must
+  not require `PUBLIC_BASE_URL` or construct `PersonalAuthProvider`.
+- **stdout hygiene.** Stdout must stay clean; keep logging on stderr and add a test.
+- **GUI clients** need absolute paths to `uv` in their config.
+- **Scope.** stdio does not help Claude.ai web or mobile, which still need the HTTP
+  server behind a public URL.
 
 ## Managing issued OAuth tokens
 
@@ -419,7 +708,16 @@ old one).
 | OAuth state lost after a restart | `MCP_OAUTH_STATE_DIR` isn't pointing at a persistent, writable path - confirm the systemd `StateDirectory` is set and matches |
 | "Nextcloud rejected the CalDAV credentials" | Wrong username or expired/revoked app password |
 | "Could not reach the Nextcloud server" | Nextcloud down, or the container can't resolve/route to it |
+| Local setup: `Redirect URI domain not allowed` during authorization | The client registered a `http://127.0.0.1:<port>/...` callback; add `127.0.0.1` to `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (see [Local-only use](#local-only-use-no-public-url)) |
+| Local setup: service refuses to start with `MCP_OAUTH_PASSWORD is required...` | `MCP_HOST` is not a loopback address (e.g. `0.0.0.0`) or `PUBLIC_BASE_URL` is not loopback; set a password, or bind to `127.0.0.1` |
+| Local setup: `Missing required environment variable` although a `.env` exists | The server does not read `.env` itself; `set -a; . ./.env; set +a` before starting |
 | `tailscale funnel` refuses to start | Funnel not enabled for this node in the tailnet admin console (Settings → Funnel) |
+| Cloudflare Tunnel: hostname returns Cloudflare error `1033` or `502` | `cloudflared` is not running or not connected (`systemctl status cloudflared`, `journalctl -u cloudflared`), or the route's service URL does not match where the server listens (`127.0.0.1:8000`) |
+| Cloudflare Tunnel: the hostname does not resolve | The published route was saved with a typed or placeholder domain instead of one picked from the dropdown; check that the route shows a real hostname under your zone |
+| Cloudflare Tunnel: discovery returns HTML, `403` or `503` instead of JSON | A Cloudflare challenge, bot protection or Access policy sits in front of the hostname; check **Security → Events** in the dashboard and the settings above |
+| Cloudflare Tunnel: discovery URLs show `http://` or another host | `PUBLIC_BASE_URL` does not exactly match the public `https://` hostname; fix it and restart the server |
+| Cloudflare Tunnel: long-running calls or the event stream drop | Cloudflare closes idle connections after about 100 s, and quick tunnels do not stream events; use a named tunnel and check that the client reconnects |
+| Cloudflare Tunnel: consent page answers `429` for everyone | `cloudflared` runs on another host, so all clients share one address; set `FORWARDED_ALLOW_IPS` (see above) |
 
 Server logs: `journalctl -u nextcloud-organizer-mcp -f`. Unexpected internal errors are logged
 there with full tracebacks, while the MCP client only ever sees a short generic message.
