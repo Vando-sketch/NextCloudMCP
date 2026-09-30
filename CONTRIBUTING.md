@@ -43,6 +43,25 @@ uv run pytest -q --cov=src/nextcloud_organizer_mcp --cov-report=term-missing --c
 
 ## Integration tests
 
+### Reverse-proxy regression tests
+
+The default suite checks Uvicorn's forwarded-header trust and consent rate limiting.
+To also run through a real Caddy HTTPS proxy, install Caddy and run:
+
+```bash
+RUN_PROXY_TESTS=1 uv run pytest tests/test_proxy_deployment.py -q
+# If Caddy is not on PATH:
+CADDY_BIN=/absolute/path/to/caddy RUN_PROXY_TESTS=1 uv run pytest tests/test_proxy_deployment.py -q
+```
+
+These tests use temporary certificates and loopback ports, without modifying system
+certificate trust. Nextcloud is mocked. CI runs them in a separate job with a pinned
+Caddy binary; an explicitly enabled run fails if Caddy is missing. Public DNS/TLS,
+external MCP clients and real Nextcloud still need the
+[deployment verification checklist](docs/deployment-verification.md).
+
+### Real Nextcloud integration tests
+
 Unit tests mock the `caldav` library and the Notes REST API (via
 `httpx.MockTransport`) entirely - no network access, no real Nextcloud instance
 required. Integration tests exercise the full flow against a real Nextcloud

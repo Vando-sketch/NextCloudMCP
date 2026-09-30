@@ -1,32 +1,33 @@
 # Deployment guide
 
-This guide covers the intended production setup: the server running on an Ubuntu LXC
-container, reachable from the **public internet** over a [Tailscale](https://tailscale.com)
-Funnel, with `tailscale funnel` terminating TLS in front of it.
+Run the server on a Linux host with systemd, then choose a public HTTPS entry
+point: [Caddy or your existing Nextcloud proxy](#4a-expose-via-caddy-or-an-existing-proxy),
+[Tailscale Funnel](#4b-expose-via-tailscale-funnel), or
+[Cloudflare Tunnel](#4c-alternative-cloudflare-tunnel). Each provides TLS and
+forwards requests to the server's local HTTP port. For a client on the same
+machine, see [Local-only use](#local-only-use-no-public-url).
 
+```text
+Clients ── HTTPS ──► existing reverse proxy
+                         ├─ cloud.example.com     ──► Nextcloud
+                         └─ organizer.example.com ──► MCP (127.0.0.1:8000)
+                                                        │
+                                  Nextcloud ◄── HTTPS + app password
 ```
-Claude (custom connector, cloud-side)
-        │  HTTPS (Tailscale Funnel cert)
-        ▼
-tailscale funnel  ──►  nextcloud-organizer-mcp (127.0.0.1:8000, plain HTTP)
-                              │  HTTPS + app password
-                              ▼
-                      Nextcloud (CalDAV)
-```
+
+A cloud-hosted MCP client needs an endpoint reachable from the public internet.
+The server's [OAuth authentication](authentication.md) protects that endpoint.
+Plain `tailscale serve` only reaches your tailnet; Funnel makes it public.
 
 > Prefer containers? See [Running in Docker](docker.md) for the published image and a
-> compose file; the rest of this guide (Funnel, connecting Claude, token management)
+> compose file; the rest of this guide (proxy setup, connecting Claude, token management)
 > applies to it as well.
 
-The server itself never handles TLS. Unlike a plain `tailscale serve` setup, **Funnel
-exposes the server to the entire internet**, not just your tailnet - this is required
-because Claude's connector performs the OAuth flow (and later, tool calls) from
-Anthropic's servers, which cannot reach into a private tailnet. The server's own
-authentication (OAuth 2.1 via `PersonalAuthProvider`, see the
-[Authentication](authentication.md)) is what protects it now that network-level
-isolation from Tailscale is gone for this service.
+The Caddy recipe and its verification checklist are documented below. See the
+[verification record](deployment-verification.md) for the distinction between
+local automated proxy checks and a real public client/Nextcloud deployment.
 
-## 1. Install on the container
+## 1. Install on the host
 
 ```bash
 # as a dedicated user, e.g. "mcp"
@@ -51,8 +52,9 @@ NEXTCLOUD_APP_PASSWORD=<app password from Settings -> Security>
 # (both URLs must point at the same Nextcloud instance).
 # NEXTCLOUD_CALDAV_URL=https://cloud.example.com/remote.php/dav/
 
-# Must match the public Funnel URL exactly (scheme + host), set up in step 4.
-PUBLIC_BASE_URL=https://<hostname>.<tailnet>.ts.net
+# Must match the public HTTPS origin exactly (scheme + host), set up in step 4a, 4b or 4c.
+# For Funnel use https://<hostname>.<tailnet>.ts.net instead.
+PUBLIC_BASE_URL=https://organizer.example.com
 
 # Required for any non-localhost PUBLIC_BASE_URL, or if MCP_HOST below is
 # bound to a non-local address - the server refuses to start without it in
@@ -68,6 +70,10 @@ MCP_OAUTH_STATE_DIR=/var/lib/nextcloud-organizer-mcp/oauth-state
 
 MCP_HOST=127.0.0.1
 MCP_PORT=8000
+
+# Uvicorn trusts forwarded headers only from this local proxy peer.
+# This matches the Caddy upstream 127.0.0.1:8000 below.
+FORWARDED_ALLOW_IPS=127.0.0.1
 ```
 
 Generate the OAuth password with:
@@ -143,7 +149,143 @@ sudo systemctl enable --now nextcloud-organizer-mcp
 sudo systemctl status nextcloud-organizer-mcp
 ```
 
-## 4. Expose via Tailscale Funnel
+## 4a. Expose via Caddy or an existing proxy
+
+> **Verification status: partially tested - feedback wanted.** This recipe should
+> work, but it has **not** been tested end to end: no publicly reachable Caddy
+> deployment, external Claude client or distinct public client IPs were available.
+> What *was* tested (a local Caddy 2.11.4 with a disposable certificate and a mocked
+> Nextcloud) is listed in the [verification record](deployment-verification.md).
+> If you run it, please report back - what worked, what did not, your proxy and
+> client versions - in a
+> [client compatibility report](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/new/choose)
+> or on issue [#70](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/70).
+> The [public deployment checklist](deployment-verification.md#public-deployment-checklist)
+> lists what to check.
+
+### Caddy on the same host
+
+Use a dedicated hostname such as `organizer.example.com`, alongside the existing
+`cloud.example.com` Nextcloud site. Caddy and MCP must share the host network
+for `127.0.0.1:8000` to reach MCP. Container networking is a separate deployment
+choice; see [#64](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/64).
+
+Point the new hostname's DNS A/AAAA records at the proxy. For this default
+recipe, allow inbound TCP ports 80 and 443 to Caddy and keep its certificate
+storage writable and persistent. Caddy provisions and renews public
+certificates and redirects HTTP to HTTPS.
+[Caddy automatic HTTPS documentation](https://caddyserver.com/docs/automatic-https)
+
+Add the site block and runtime log filter to `/etc/caddy/Caddyfile` (also
+available as [examples/Caddyfile](../examples/Caddyfile)). If the file already
+has a global options block, merge these `log default` settings into it; Caddy
+accepts only one global block. Preserve existing default logging settings
+when adding the filter.
+
+```caddyfile
+{
+    log default {
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers>Referer delete
+            }
+        }
+    }
+}
+
+organizer.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+Keep your existing Nextcloud site block and its backend configuration. If
+another proxy already owns ports 80/443, add the MCP hostname there using the
+adaptation guidance below, or plan a migration before starting Caddy.
+
+Validate the complete configuration and reload the existing Caddy service:
+
+```bash
+sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+sudo systemctl reload caddy
+sudo systemctl restart nextcloud-organizer-mcp
+```
+
+Set `PUBLIC_BASE_URL=https://organizer.example.com`, without `/mcp`, in step 2.
+The connector URL is **`https://organizer.example.com/mcp`**.
+
+### Routes, client IPs and streaming
+
+Route the **whole hostname**, preserving paths, query strings, methods and bodies.
+The server serves `/mcp`, `/.well-known/oauth-authorization-server`, OAuth
+protected-resource discovery at `/.well-known/oauth-protected-resource/mcp`
+(use the URL in `/mcp`'s `WWW-Authenticate` challenge), `/register`,
+`/authorize`, `/consent` (GET and POST), and `/token`.
+Proxying only `/mcp` leaves discovery and consent unreachable. Use a subdomain;
+subpath deployment is tracked separately in
+[#73](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/73).
+
+Caddy preserves `Host`, sets `X-Forwarded-For`, `X-Forwarded-Proto`, and
+`X-Forwarded-Host`, and ignores client-supplied values for those forwarded
+headers by default. It immediately flushes `text/event-stream` responses;
+`stream_timeout` has no default limit. The recipe needs no custom header or
+buffering directives.
+[Caddy reverse proxy documentation](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+
+`FORWARDED_ALLOW_IPS=127.0.0.1` is Uvicorn's environment setting for the trusted
+proxy peer. It allows the local Caddy connection to supply the original client
+IP and HTTPS scheme. Consent's per-IP rate limit uses that client address.
+Keep MCP bound to loopback and trust only the actual proxy peer; never set
+`FORWARDED_ALLOW_IPS=*` for an exposed backend.
+[Uvicorn settings](https://uvicorn.dev/settings/#http)
+
+For a CDN or another proxy in front of Caddy, configure trust at every hop for
+the actual upstream proxy addresses and repeat the client-IP checks below.
+Do not broadly trust private networks as a substitute for identifying the proxy.
+
+### Reuse another existing Nextcloud proxy
+
+Add a virtual host for `organizer.example.com` with your proxy's normal public
+TLS configuration and an HTTP upstream of `127.0.0.1:8000`. Preserve the entire
+hostname's routes and original host, forward the HTTPS scheme, and replace
+untrusted client-supplied forwarding headers with the actual client address.
+Set `FORWARDED_ALLOW_IPS` to the peer address MCP really sees if it differs from
+the same-host loopback example, and restrict network access to that backend.
+
+Check response buffering and any request/response or idle deadlines inherited
+from your existing configuration. MCP uses Streamable HTTP, including SSE;
+responses must reach the client incrementally and long-lived streams must not
+be cut off by a short proxy deadline. Test through every proxy hop using the
+[shared checklist](deployment-verification.md). nginx/Traefik configurations
+remain unverified here; verify them with the shared checklist before publishing
+copyable recipes.
+
+### Protect OAuth request parameters in proxy logs
+
+The example does not enable site HTTP access logging. Caddy still emits runtime
+errors: a failed upstream request can produce a `502` error log containing the
+request URI and `Referer` header. Either may contain `/consent?pending=...` or
+other OAuth parameters. The global default log filter removes these fields
+while retaining the error itself. This filter applies to default runtime logs
+across all sites, so review its effect on your existing Nextcloud logging.
+[Caddy global logging options](https://caddyserver.com/docs/caddyfile/options#log)
+
+Audit imported snippets, separately configured access log outputs, upstream
+proxies and CDNs. Apply equivalent filtering to every output that records
+request details; a default runtime log filter alone does not configure separate
+access log encoders. Caddy's default sensitive-header redaction does not remove
+sensitive URL query parameters.
+[Caddy log documentation](https://caddyserver.com/docs/caddyfile/directives/log)
+
+OAuth authorization URLs contain `state` and redirect parameters; consent URLs
+contain a single-use authorization key. Authorization codes, bearer tokens,
+passwords and form bodies also belong outside logs. Keep debug/trace logging
+disabled during OAuth flows. Verify logging with disposable marker values for
+both successful requests and upstream failures, including a `Referer` carrying
+a consent URL.
+
+## 4b. Expose via Tailscale Funnel
 
 ```bash
 sudo tailscale funnel --bg 8000
@@ -168,7 +310,7 @@ service so it picks up the value:
 sudo systemctl restart nextcloud-organizer-mcp
 ```
 
-## 4b. Alternative: Cloudflare Tunnel
+## 4c. Alternative: Cloudflare Tunnel
 
 > **Verification status: partially tested - feedback wanted.** A *named* tunnel with a
 > stable hostname has **not** been tested end to end by the maintainers: no domain on
@@ -179,7 +321,7 @@ sudo systemctl restart nextcloud-organizer-mcp
 > [client compatibility report](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/new/choose)
 > or on issue [#71](https://github.com/Vando-sketch/Nextcloud-Organizer-MCP/issues/71).
 
-Use this instead of step 4 when you cannot open inbound ports (for example behind CGNAT)
+Use this instead of step 4a or 4b when you cannot open inbound ports (for example behind CGNAT)
 or do not want to use Tailscale. [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
 opens an **outbound** connection to Cloudflare, and Cloudflare serves a public HTTPS
 hostname that it forwards through that connection to the server.
@@ -309,7 +451,8 @@ named tunnel.
 ### Claude.ai (web) — syncs to mobile automatically
 
 **Settings → Connectors → Add custom connector**, URL:
-`https://<hostname>.<tailnet>.ts.net/mcp`. Leave any Client ID/Secret fields blank -
+`https://organizer.example.com/mcp` for Caddy, or
+`https://<hostname>.<tailnet>.ts.net/mcp` for Funnel. Leave any Client ID/Secret fields blank -
 Dynamic Client Registration handles that. Approve the OAuth prompt that opens in your
 browser. See the [Authentication](authentication.md#registering-the-connector-in-claude) for details.
 
@@ -325,19 +468,21 @@ locally (opens a browser for one-time auth). Add to `claude_desktop_config.json`
   "mcpServers": {
     "nextcloud-organizer-mcp": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://<hostname>.<tailnet>.ts.net/mcp"]
+      "args": ["-y", "mcp-remote", "https://organizer.example.com/mcp"]
     }
   }
 }
 ```
 
-Requires Node.js.
+Requires Node.js. For Funnel, replace the hostname with your public Funnel hostname.
 
 ### Claude Code
 
 ```bash
-claude mcp add nextcloud-organizer-mcp --transport http "https://<hostname>.<tailnet>.ts.net/mcp"
+claude mcp add nextcloud-organizer-mcp --transport http "https://organizer.example.com/mcp"
 ```
+
+For Funnel, use `https://<hostname>.<tailnet>.ts.net/mcp` instead.
 
 ### Claude mobile (iOS/Android)
 
@@ -432,7 +577,7 @@ Claude.ai (web and mobile) does not connect from your browser or phone. Anthropi
 servers perform the OAuth flow and every tool call. For those servers, `127.0.0.1` is
 their own loopback interface, not your machine, so a `PUBLIC_BASE_URL` of
 `http://127.0.0.1:8000` can never be reached. A cloud connector needs a public HTTPS URL
-and `MCP_OAUTH_PASSWORD`; use the [Tailscale Funnel setup](#4-expose-via-tailscale-funnel)
+and `MCP_OAUTH_PASSWORD`; use the [Tailscale Funnel setup](#4b-expose-via-tailscale-funnel)
 above.
 
 ### Verified setup
@@ -552,7 +697,11 @@ old one).
 
 | Symptom | Likely cause |
 |---|---|
-| Claude.ai says "error connecting" while adding the connector | `PUBLIC_BASE_URL` doesn't exactly match the Funnel URL (scheme/host mismatch breaks OAuth discovery); or the server isn't reachable from the internet yet (check `tailscale funnel status`) |
+| Claude.ai says "error connecting" while adding the connector | `PUBLIC_BASE_URL` doesn't exactly match the public HTTPS origin; or the endpoint isn't publicly reachable. Check DNS/TLS and proxy routing, or `tailscale funnel status` for Funnel. |
+| TLS certificate error or connection timeout | Check the hostname's A and AAAA records, inbound ports 80/443, certificate issuance logs and client trust. A stale AAAA record can send clients to the wrong host. |
+| Discovery or consent returns `404`, or Nextcloud HTML | The proxy routes only `/mcp`, strips a path prefix, or selects the Nextcloud virtual host. Route all paths for the dedicated MCP hostname. |
+| Streams stall or disconnect through the proxy | Check inherited buffering and response/idle deadlines at every proxy hop; run the streaming checklist. |
+| All users share a consent `429`, or changing `X-Forwarded-For` bypasses it | Review forwarded-header trust: MCP must trust the actual proxy peer and the proxy must replace untrusted incoming headers. Repeat the two-client and spoofing checks. |
 | OAuth prompt appears but authorization fails | The consent page rejected the submitted `MCP_OAUTH_PASSWORD`; retry the form with the configured password. If authorization fails before the consent page appears, check that the redirect domain is in `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (only relevant if you changed the default). See [Authentication](authentication.md) for the consent flow. |
 | Service fails to start: `MCP_OAUTH_PASSWORD is required...` | `PUBLIC_BASE_URL` isn't localhost and `MCP_OAUTH_PASSWORD` is unset - this is enforced deliberately, set the password (step 2) |
 | `401` calling `/mcp` after Claude was previously connected | Access token expired or was revoked; disconnect and reconnect the connector in Claude to re-run the OAuth flow |

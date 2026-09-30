@@ -1,0 +1,25 @@
+# Merge this logging configuration into your existing global options block.
+# It filters the default runtime logger, including upstream failure logs.
+# Apply equivalent filters to separately configured access-log outputs.
+{
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+				request>headers>Referer delete
+			}
+		}
+	}
+}
+
+# Add this site to your existing Caddyfile; retain the Nextcloud site block.
+# DNS must point this hostname at Caddy; see docs/deployment.md for TLS setup.
+# MCP runs on the same host network with:
+# PUBLIC_BASE_URL=https://organizer.example.com
+# MCP_HOST=127.0.0.1 MCP_PORT=8000 FORWARDED_ALLOW_IPS=127.0.0.1
+# Set MCP_OAUTH_PASSWORD and a persistent MCP_OAUTH_STATE_DIR as documented.
+# Audit existing/imported logging: OAuth query parameters must not be recorded.
+organizer.example.com {
+	reverse_proxy 127.0.0.1:8000
+}

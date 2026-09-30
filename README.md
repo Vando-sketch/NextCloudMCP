@@ -115,10 +115,12 @@ points at a local address.
 Client on the same machine? No public URL or password needed, see
 [Local-only use](docs/deployment.md#local-only-use-no-public-url).
 
-Otherwise expose the server (the [deployment guide](docs/deployment.md) uses Tailscale
-Funnel for TLS; a [Cloudflare Tunnel](docs/deployment.md#4b-alternative-cloudflare-tunnel)
-alternative is documented but only partly tested) and add it in Claude under **Settings → Connectors → Add custom
-connector** with the URL `<PUBLIC_BASE_URL>/mcp`. Leave Client ID and Secret blank
+Otherwise expose the server (the [deployment guide](docs/deployment.md) covers Caddy
+and an existing Nextcloud reverse proxy, Tailscale Funnel for TLS, and a
+[Cloudflare Tunnel](docs/deployment.md#4c-alternative-cloudflare-tunnel) alternative;
+the Caddy and Cloudflare recipes are only partly tested) and add it in Claude under
+**Settings → Connectors → Add custom connector** with the URL `<PUBLIC_BASE_URL>/mcp`.
+Leave Client ID and Secret blank
 and enter your `MCP_OAUTH_PASSWORD` on the consent page that opens. Details:
 [Authentication](docs/authentication.md#registering-the-connector-in-claude).
 
@@ -135,7 +137,7 @@ Claude ── HTTPS + OAuth 2.1 ──► your server (this project) ── CalD
 
 ## Documentation
 
-- [Deployment guide](docs/deployment.md) &mdash; Ubuntu LXC + Tailscale + systemd + Claude connector setup
+- [Deployment guide](docs/deployment.md) &mdash; systemd, Caddy/existing Nextcloud proxy, Tailscale Funnel or Cloudflare Tunnel, local-only use, and Claude connector setup
 - [Running in Docker](docs/docker.md) &mdash; container image, compose file, persistence, TLS
 - [Authentication](docs/authentication.md) &mdash; OAuth model, consent page, local security patches
 - [Tool reference](docs/tools.md) &mdash; all tools with parameters, examples and error messages
