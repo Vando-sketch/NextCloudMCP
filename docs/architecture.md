@@ -18,7 +18,9 @@ scripts/docker-*      Image smoke test (CI) and OAuth end-to-end check (integrat
 
 ## Request flow
 
-1. An MCP request arrives over Streamable HTTP (`/mcp`).
+1. An MCP request arrives over Streamable HTTP (`/mcp`). With `MCP_TRANSPORT=stdio`
+   it arrives on stdin instead, `build_server` passes no `auth`, and step 2 does
+   not apply: the client that started the process is the only caller.
 2. FastMCP's own auth middleware (wired up via `auth=PersonalAuthProvider(...)` in
    `build_server`) requires a valid OAuth `Authorization: Bearer <access-token>` header,
    issued through the provider's `/register` → `/authorize` → `/token` flow. On a

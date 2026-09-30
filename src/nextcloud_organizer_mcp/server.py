@@ -8,6 +8,7 @@
 import functools
 import inspect
 import logging
+import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -230,17 +231,10 @@ async def _call_notes(coro: Any) -> Any:
         raise ToolError("An unexpected internal error occurred.") from exc
 
 
-def build_server(
-    settings: Settings,
-    service: CalDavService | None = None,
-    notes_service: NotesService | None = None,
-) -> FastMCP:
-    """Construct the FastMCP server with OAuth 2.1 auth and all task tools registered.
-
-    `service`/`notes_service` can be injected for testing; default to a real
-    CalDavService/NotesService built from `settings`.
-    """
-    mapping.set_default_timezone(settings.default_timezone)
+def _build_auth(settings: Settings) -> PersonalAuthProvider | None:
+    """OAuth provider for the HTTP transport; `None` on stdio, which has no endpoint to protect."""
+    if settings.transport == "stdio":
+        return None
     allowed_redirect_domains = settings.oauth_allowed_redirect_domains
     if allowed_redirect_domains is None and not is_local_hostname(
         urlparse(settings.public_base_url).hostname
@@ -255,7 +249,7 @@ def build_server(
         # MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS themselves. (D9)
         allowed_redirect_domains = ["claude.ai", "claude.com"]
 
-    auth = PersonalAuthProvider(
+    return PersonalAuthProvider(
         base_url=settings.public_base_url,
         password=settings.oauth_password,
         allowed_redirect_domains=allowed_redirect_domains,
@@ -263,7 +257,22 @@ def build_server(
         refresh_token_expiry_seconds=settings.oauth_refresh_token_expiry_seconds,
         state_dir=settings.oauth_state_dir,
     )
-    mcp = FastMCP(name="nextcloud-organizer-mcp", auth=auth)
+
+
+def build_server(
+    settings: Settings,
+    service: CalDavService | None = None,
+    notes_service: NotesService | None = None,
+) -> FastMCP:
+    """Construct the FastMCP server with all tools registered.
+
+    The HTTP transport gets OAuth 2.1 auth; stdio gets none.
+
+    `service`/`notes_service` can be injected for testing; default to a real
+    CalDavService/NotesService built from `settings`.
+    """
+    mapping.set_default_timezone(settings.default_timezone)
+    mcp = FastMCP(name="nextcloud-organizer-mcp", auth=_build_auth(settings))
 
     def tool(*, annotations: ToolAnnotations) -> Callable[[Callable[..., Any]], Any]:
         """`mcp.tool` with the full docstring as the tool description.
@@ -2198,10 +2207,17 @@ def build_server(
 
 
 def main() -> None:
-    """Entry point: read config from the environment and run the HTTP server."""
-    logging.basicConfig(level=logging.INFO)
+    """Entry point: read config from the environment and run the configured transport."""
+    # stdout carries the JSON-RPC stream on stdio, so logs must never go there.
+    # basicConfig already defaults to stderr; naming it keeps that from
+    # regressing silently.
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     settings = Settings.from_env()
     mcp = build_server(settings)
+    if settings.transport == "stdio":
+        # The client owns this process: it returns when the client closes stdin.
+        mcp.run(transport="stdio", show_banner=False)
+        return
     # MCP_OAUTH_PASSWORD now only ever travels in the POST body of the
     # /consent form (personal_auth.py, LOCAL PATCH 5), which Uvicorn never
     # logs - but its default access log still records full request paths
