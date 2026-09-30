@@ -23,9 +23,10 @@ Plain `tailscale serve` only reaches your tailnet; Funnel makes it public.
 > compose file; the rest of this guide (proxy setup, connecting Claude, token management)
 > applies to it as well.
 
-The Caddy recipe and its verification checklist are documented below. See the
-[verification record](deployment-verification.md) for the distinction between
-local automated proxy checks and a real public client/Nextcloud deployment.
+Every recipe is verified with the same [checklist](deployment-verification.md), which
+separates local automated proxy checks from a real public client/Nextcloud
+deployment and lists what has not been tested. Its evidence matrix shows the
+status per recipe.
 
 ## 1. Install on the host
 
@@ -765,29 +766,63 @@ old one).
 
 ## Troubleshooting
 
+Find the class of failure first, then the row. Every class can be checked with
+the matching step of the [shared verification checklist](deployment-verification.md#shared-checklist).
+The quickest test is `curl -i https://<host>/.well-known/oauth-authorization-server`
+from outside the server's network: valid JSON with your public `https://` URLs means
+URL, TLS and routing for discovery are right.
+
+### Public URL mismatch
+
 | Symptom | Likely cause |
 |---|---|
 | Claude.ai says "error connecting" while adding the connector | `PUBLIC_BASE_URL` doesn't exactly match the public HTTPS origin; or the endpoint isn't publicly reachable. Check DNS/TLS and proxy routing, or `tailscale funnel status` for Funnel. |
-| TLS certificate error or connection timeout | Check the hostname's A and AAAA records, inbound ports 80/443, certificate issuance logs and client trust. A stale AAAA record can send clients to the wrong host. |
-| Discovery or consent returns `404`, or Nextcloud HTML | The proxy routes only `/mcp`, strips a path prefix, or selects the Nextcloud virtual host. Route all paths for the dedicated MCP hostname. |
-| Streams stall or disconnect through the proxy | Check inherited buffering and response/idle deadlines at every proxy hop; run the streaming checklist. |
-| All users share a consent `429`, or changing `X-Forwarded-For` bypasses it | Review forwarded-header trust: MCP must trust the actual proxy peer and the proxy must replace untrusted incoming headers. Repeat the two-client and spoofing checks. |
-| OAuth prompt appears but authorization fails | The consent page rejected the submitted `MCP_OAUTH_PASSWORD`; retry the form with the configured password. If authorization fails before the consent page appears, check that the redirect domain is in `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (only relevant if you changed the default). See [Authentication](authentication.md) for the consent flow. |
+| Discovery URLs show `http://`, a backend IP or another host (Cloudflare Tunnel and proxies alike) | `PUBLIC_BASE_URL` does not exactly match the public `https://` hostname (no path, no `/mcp`); fix it and restart the server. |
 | Service fails to start: `MCP_OAUTH_PASSWORD is required...` | `PUBLIC_BASE_URL` isn't localhost and `MCP_OAUTH_PASSWORD` is unset - this is enforced deliberately, set the password (step 2) |
-| `401` calling `/mcp` after Claude was previously connected | Access token expired or was revoked; disconnect and reconnect the connector in Claude to re-run the OAuth flow |
-| OAuth state lost after a restart | `MCP_OAUTH_STATE_DIR` isn't pointing at a persistent, writable path - confirm the systemd `StateDirectory` is set and matches |
-| "Nextcloud rejected the CalDAV credentials" | Wrong username or expired/revoked app password |
-| "Could not reach the Nextcloud server" | Nextcloud down, or the container can't resolve/route to it |
-| Local setup: `Redirect URI domain not allowed` during authorization | The client registered a `http://127.0.0.1:<port>/...` callback; add `127.0.0.1` to `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (see [Local-only use](#local-only-use-no-public-url)) |
 | Local setup: service refuses to start with `MCP_OAUTH_PASSWORD is required...` | `MCP_HOST` is not a loopback address (e.g. `0.0.0.0`) or `PUBLIC_BASE_URL` is not loopback; set a password, or bind to `127.0.0.1` |
 | Local setup: `Missing required environment variable` although a `.env` exists | The server does not read `.env` itself; `set -a; . ./.env; set +a` before starting |
-| `tailscale funnel` refuses to start | Funnel not enabled for this node in the tailnet admin console (Settings → Funnel) |
+
+### TLS termination
+
+| Symptom | Likely cause |
+|---|---|
+| TLS certificate error or connection timeout | Check the hostname's A and AAAA records, inbound ports 80/443, certificate issuance logs and client trust. A stale AAAA record can send clients to the wrong host. |
 | Cloudflare Tunnel: hostname returns Cloudflare error `1033` or `502` | `cloudflared` is not running or not connected (`systemctl status cloudflared`, `journalctl -u cloudflared`), or the route's service URL does not match where the server listens (`127.0.0.1:8000`) |
 | Cloudflare Tunnel: the hostname does not resolve | The published route was saved with a typed or placeholder domain instead of one picked from the dropdown; check that the route shows a real hostname under your zone |
 | Cloudflare Tunnel: discovery returns HTML, `403` or `503` instead of JSON | A Cloudflare challenge, bot protection or Access policy sits in front of the hostname; check **Security → Events** in the dashboard and the settings above |
-| Cloudflare Tunnel: discovery URLs show `http://` or another host | `PUBLIC_BASE_URL` does not exactly match the public `https://` hostname; fix it and restart the server |
-| Cloudflare Tunnel: long-running calls or the event stream drop | Cloudflare closes idle connections after about 100 s, and quick tunnels do not stream events; use a named tunnel and check that the client reconnects |
+| `tailscale funnel` refuses to start | Funnel not enabled for this node in the tailnet admin console (Settings → Funnel) |
+
+### Redirect allow-list
+
+| Symptom | Likely cause |
+|---|---|
+| OAuth prompt appears but authorization fails | The consent page rejected the submitted `MCP_OAUTH_PASSWORD`; retry the form with the configured password. If authorization fails before the consent page appears, check that the redirect domain is in `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (only relevant if you changed the default). See [Authentication](authentication.md) for the consent flow. |
+| Local setup: `Redirect URI domain not allowed` during authorization | The client registered a `http://127.0.0.1:<port>/...` callback; add `127.0.0.1` to `MCP_OAUTH_ALLOWED_REDIRECT_DOMAINS` (see [Local-only use](#local-only-use-no-public-url)) |
+
+### Routing
+
+| Symptom | Likely cause |
+|---|---|
+| Discovery or consent returns `404`, or Nextcloud HTML | The proxy routes only `/mcp`, strips a path prefix, or selects the Nextcloud virtual host. Route all paths for the dedicated MCP hostname. |
+| All users share a consent `429`, or changing `X-Forwarded-For` bypasses it | Review forwarded-header trust: MCP must trust the actual proxy peer and the proxy must replace untrusted incoming headers. Repeat the two-client and spoofing checks. |
 | Cloudflare Tunnel: consent page answers `429` for everyone | `cloudflared` runs on another host, so all clients share one address; set `FORWARDED_ALLOW_IPS` (see above) |
+
+### Streaming
+
+| Symptom | Likely cause |
+|---|---|
+| Streams stall or disconnect through the proxy | Check inherited buffering and response/idle deadlines at every proxy hop; run the streaming checklist. |
+| Cloudflare Tunnel: long-running calls or the event stream drop | Cloudflare closes idle connections after about 100 s, and quick tunnels do not stream events; use a named tunnel and check that the client reconnects |
+
+### Tokens, state and Nextcloud
+
+| Symptom | Likely cause |
+|---|---|
+| `401` calling `/mcp` after Claude was previously connected | Access token expired or was revoked; disconnect and reconnect the connector in Claude to re-run the OAuth flow |
+| `404` on `/mcp` right after a restart, then it works after reconnecting | The in-memory MCP session ended with the restart; the client must initialize a new session. The issued OAuth token stays valid if `MCP_OAUTH_STATE_DIR` persists. |
+| OAuth state lost after a restart | `MCP_OAUTH_STATE_DIR` isn't pointing at a persistent, writable path - confirm the systemd `StateDirectory` is set and matches |
+| "Nextcloud rejected the CalDAV credentials" | Wrong username or expired/revoked app password |
+| "Could not reach the Nextcloud server" | Nextcloud down, or the container can't resolve/route to it |
 
 Server logs: `journalctl -u nextcloud-organizer-mcp -f`. Unexpected internal errors are logged
 there with full tracebacks, while the MCP client only ever sees a short generic message.
