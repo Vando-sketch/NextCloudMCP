@@ -22,6 +22,13 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   query parameters even when an upstream request fails. Tested only locally
   (Caddy 2.11.4, mocked Nextcloud); a public end-to-end run is still pending and
   feedback is welcome (#70).
+- Shared deployment verification coverage (#75): the Caddy proxy tests now also check
+  incremental SSE delivery through the proxy, the standalone event stream, redirect
+  allow-list denial, and backend restart behavior. The verification checklist gained
+  variants and a record template for Caddy or another proxy, Cloudflare Tunnel,
+  Tailscale Funnel, local HTTP and stdio, plus an evidence matrix that separates
+  automated fixtures from real-deployment results. Troubleshooting in the deployment
+  guide is grouped by failure class.
 - Docker image for `linux/amd64` and `linux/arm64`, published to
   `ghcr.io/vando-sketch/nextcloud-organizer-mcp` with each release (tags
   `vX.Y.Z`, `X.Y`, `latest`), plus a `compose.yaml`. Runs as a non-root user and

@@ -64,7 +64,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/caddy/caddy.tar.gz" -C "$RUNNER_TEMP/caddy" caddy
           echo "$RUNNER_TEMP/caddy" >> "$GITHUB_PATH"
 
-      - name: Verify HTTPS proxy, OAuth, MCP, and client IP handling
+      - name: Verify HTTPS proxy, OAuth, MCP streaming, restart, and client IP handling
         env:
           RUN_PROXY_TESTS: "1"
         run: |

@@ -1,5 +1,9 @@
 """Real socket tests for Uvicorn trust and optional Caddy TLS termination.
 
+Covered through the proxy: discovery, OAuth routing and consent, redirect
+allow-list, MCP requests, incremental SSE delivery, backend restart and client
+IP handling. See docs/deployment-verification.md for what these do not prove.
+
 The Caddy tests run only with RUN_PROXY_TESTS=1 and CADDY_BIN pointing to a
 locally installed binary (or ``caddy`` on PATH). They use an isolated static
 certificate trusted by this test's HTTP client only and mock all Nextcloud I/O.
@@ -34,6 +38,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from fastmcp import Context, FastMCP
 from test_oauth_e2e import (
     REDIRECT_URI,
     _authorize,
@@ -68,16 +73,24 @@ class ProxyDeployment:
     tls_context: ssl.SSLContext
     service: MagicMock
     stop_backend: Callable[[], None]
+    restart_backend: Callable[[], None]
+    release: threading.Event
+    tool_finished: threading.Event
     log_path: Path
 
 
-@contextmanager
-def _backend(
-    settings: Settings, service: MagicMock, public_base_url: str | None = None
-) -> Iterator[RunningBackend]:
+def _start_backend(
+    settings: Settings,
+    service: MagicMock,
+    public_base_url: str | None = None,
+    port: int = 0,
+    configure: Callable[[FastMCP], None] | None = None,
+) -> RunningBackend:
     """Run real Uvicorn; leave its documented FORWARDED_ALLOW_IPS default intact."""
     sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
+    # A restart rebinds the port while connections from the previous run linger.
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
     base_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
     local = replace(
         settings,
@@ -85,8 +98,10 @@ def _backend(
         host="127.0.0.1",
         oauth_allowed_redirect_domains=["claude.ai"],
     )
-    app = build_server(local, service=service).http_app()
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", access_log=False))
+    mcp = build_server(local, service=service)
+    if configure is not None:
+        configure(mcp)
+    server = uvicorn.Server(uvicorn.Config(mcp.http_app(), log_level="warning", access_log=False))
     thread = threading.Thread(target=lambda: asyncio.run(server.serve([sock])), daemon=True)
     thread.start()
 
@@ -101,9 +116,24 @@ def _backend(
         while not server.started:
             assert thread.is_alive() and time.monotonic() < deadline, "backend did not start"
             time.sleep(0.02)
-        yield RunningBackend(base_url, stop)
-    finally:
+    except BaseException:
         stop()
+        raise
+    return RunningBackend(base_url, stop)
+
+
+@contextmanager
+def _backend(
+    settings: Settings,
+    service: MagicMock,
+    public_base_url: str | None = None,
+    configure: Callable[[FastMCP], None] | None = None,
+) -> Iterator[RunningBackend]:
+    backend = _start_backend(settings, service, public_base_url, configure=configure)
+    try:
+        yield backend
+    finally:
+        backend.stop()
 
 
 def _certificate(tmp_path: Path) -> tuple[Path, Path]:
@@ -157,7 +187,35 @@ def proxy_deployment(settings: Settings, tmp_path: Path, monkeypatch) -> Iterato
     context = ssl.create_default_context(cafile=str(certificate))
     service = MagicMock(spec=CalDavService)
     service.list_task_lists.return_value = TASK_LISTS
-    with _backend(settings, service, base_url) as backend:
+    release = threading.Event()
+    tool_finished = threading.Event()
+
+    def add_hold_open_tool(mcp: FastMCP) -> None:
+        # Test-only tool: emits one progress event, then stays open until the
+        # test releases it, so the test controls when the response completes.
+        @mcp.tool
+        async def hold_open(ctx: Context) -> str:
+            await ctx.report_progress(progress=1, total=2, message="started")
+            await asyncio.to_thread(release.wait, 20)
+            tool_finished.set()
+            return "released"
+
+    current: list[RunningBackend] = []
+
+    def restart_backend() -> None:
+        # Same port and OAuth state directory, as after `systemctl restart`.
+        current.append(
+            _start_backend(
+                settings,
+                service,
+                base_url,
+                port=urlparse(current[0].base_url).port or 0,
+                configure=add_hold_open_tool,
+            )
+        )
+
+    with _backend(settings, service, base_url, configure=add_hold_open_tool) as backend:
+        current.append(backend)
         example = Path(__file__).resolve().parents[1] / "examples" / "Caddyfile"
         config = example.read_text().replace("organizer.example.com", f"localhost:{port}")
         config = config.replace("127.0.0.1:8000", urlparse(backend.base_url).netloc)
@@ -198,8 +256,19 @@ def proxy_deployment(settings: Settings, tmp_path: Path, monkeypatch) -> Iterato
                         except httpx.TransportError:
                             pass
                         time.sleep(0.02)
-                yield ProxyDeployment(base_url, context, service, backend.stop, log_path)
+                yield ProxyDeployment(
+                    base_url,
+                    context,
+                    service,
+                    backend.stop,
+                    restart_backend,
+                    release,
+                    tool_finished,
+                    log_path,
+                )
             finally:
+                for restarted in current[1:]:
+                    restarted.stop()
                 if process.poll() is None:
                     process.terminate()
                     try:
@@ -413,3 +482,177 @@ def test_caddy_upstream_failure_logs_redact_oauth_urls(proxy_deployment):
     for error in errors:
         assert "uri" not in error["request"]
         assert "Referer" not in error["request"]["headers"]
+
+
+def _issue_token(http: httpx.Client) -> tuple[str, dict[str, Any]]:
+    client_id = _register(http)
+    verifier, challenge = _pkce()
+    pending = _authorize(http, client_id, challenge)
+    consent = _consent(http, pending, TEST_OAUTH_PASSWORD)
+    assert consent.status_code == 302
+    code = parse_qs(urlparse(consent.headers["location"]).query)["code"][0]
+    token = _exchange_code(http, client_id, code, verifier)
+    assert token.status_code == 200
+    return client_id, token.json()
+
+
+def _open_mcp_session(http: httpx.Client, access_token: str) -> None:
+    http.headers.update(
+        {"Authorization": f"Bearer {access_token}", "Accept": "application/json, text/event-stream"}
+    )
+    http.headers.pop("Mcp-Session-Id", None)
+    initialized = _rpc(
+        http,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "proxy-test", "version": "1"},
+            },
+        },
+    )
+    http.headers["Mcp-Protocol-Version"] = initialized["protocolVersion"]
+    notification = http.post("/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    assert notification.status_code == 202
+
+
+def _events(response: httpx.Response) -> Iterator[dict[str, Any]]:
+    for line in response.iter_lines():
+        if line.startswith("data: "):
+            yield json.loads(line[6:])
+
+
+@requires_caddy
+def test_caddy_delivers_sse_events_before_the_response_completes(proxy_deployment):
+    deployment: ProxyDeployment = proxy_deployment
+    with httpx.Client(
+        base_url=deployment.base_url,
+        verify=deployment.tls_context,
+        trust_env=False,
+        timeout=10,
+    ) as http:
+        _, token = _issue_token(http)
+        _open_mcp_session(http, token["access_token"])
+        call = {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "hold_open",
+                "arguments": {},
+                "_meta": {"progressToken": "proxy-progress"},
+            },
+        }
+        with http.stream("POST", "/mcp", json=call) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+            events = _events(response)
+            # The tool is still blocked, so this event can only arrive if the
+            # proxy forwards SSE incrementally instead of buffering the response.
+            assert next(events)["method"] == "notifications/progress"
+            assert not deployment.tool_finished.is_set()
+            # An idle stream must survive a pause without being closed or flushed.
+            time.sleep(2)
+            assert not deployment.tool_finished.is_set()
+            deployment.release.set()
+            final = next(event for event in events if event.get("id") == 7)
+        assert deployment.tool_finished.is_set()
+        assert "error" not in final, final
+
+
+@requires_caddy
+def test_caddy_opens_the_standalone_event_stream(proxy_deployment):
+    deployment: ProxyDeployment = proxy_deployment
+    with httpx.Client(
+        base_url=deployment.base_url,
+        verify=deployment.tls_context,
+        trust_env=False,
+        timeout=5,
+    ) as http:
+        _, token = _issue_token(http)
+        _open_mcp_session(http, token["access_token"])
+        with http.stream("GET", "/mcp", headers={"Accept": "text/event-stream"}) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"].startswith("text/event-stream")
+
+
+@requires_caddy
+def test_caddy_rejects_redirects_outside_the_allow_list(proxy_deployment):
+    deployment: ProxyDeployment = proxy_deployment
+    with httpx.Client(
+        base_url=deployment.base_url,
+        verify=deployment.tls_context,
+        trust_env=False,
+        timeout=10,
+    ) as http:
+        evil = "https://attacker.example.net/callback"
+        registration = http.post(
+            "/register",
+            json={
+                "client_name": "attacker",
+                "redirect_uris": [evil],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+            },
+        )
+        assert registration.status_code == 201, registration.text
+        _, challenge = _pkce()
+        params = {
+            "redirect_uri": evil,
+            "response_type": "code",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+        # Registration accepts any URI; the allow-list gates /authorize, so no
+        # consent page and no code may be issued for a disallowed domain.
+        denied = http.get(
+            "/authorize", params={**params, "client_id": registration.json()["client_id"]}
+        )
+        assert denied.status_code == 302, denied.text
+        location = urlparse(denied.headers["location"])
+        assert location.path != "/consent"
+        assert parse_qs(location.query)["error"] == ["access_denied"]
+        assert "code" not in parse_qs(location.query)
+        # A registered client cannot switch to a redirect it never registered.
+        unregistered = http.get("/authorize", params={**params, "client_id": _register(http)})
+        assert unregistered.status_code == 400, unregistered.text
+        assert "location" not in unregistered.headers
+
+
+@requires_caddy
+def test_caddy_reaches_a_restarted_backend_and_keeps_issued_tokens(proxy_deployment):
+    deployment: ProxyDeployment = proxy_deployment
+    with httpx.Client(
+        base_url=deployment.base_url,
+        verify=deployment.tls_context,
+        trust_env=False,
+        timeout=10,
+    ) as http:
+        _, token = _issue_token(http)
+        _open_mcp_session(http, token["access_token"])
+        stale_session = http.headers["Mcp-Session-Id"]
+        deployment.stop_backend()
+        assert http.get("/.well-known/oauth-authorization-server").status_code == 502
+        deployment.restart_backend()
+        # Persisted token, but the in-memory MCP session is gone.
+        stale = http.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
+        assert stale.status_code == 404
+        _open_mcp_session(http, token["access_token"])
+        assert http.headers["Mcp-Session-Id"] != stale_session
+        result = _rpc(
+            http,
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "list_task_lists", "arguments": {}},
+            },
+        )
+        assert not result.get("isError", False)
+        deployment.service.list_task_lists.assert_called_once_with()
