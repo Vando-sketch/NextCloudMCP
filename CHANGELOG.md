@@ -19,6 +19,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Deployment guide: local-only use without a public URL (loopback
   `PUBLIC_BASE_URL`, no consent password, `mcp-remote` and Claude Code setup,
   redirect-domain notes), and the decision on a native stdio transport.
+- Deployment guide: Cloudflare Tunnel recipe as an alternative to Tailscale
+  Funnel, with the tested and untested parts listed explicitly. A named tunnel
+  with a stable hostname is still unverified and feedback is welcome.
 
 ## [0.2.1] - 2026-09-29
 

@@ -116,7 +116,8 @@ Client on the same machine? No public URL or password needed, see
 [Local-only use](docs/deployment.md#local-only-use-no-public-url).
 
 Otherwise expose the server (the [deployment guide](docs/deployment.md) uses Tailscale
-Funnel for TLS) and add it in Claude under **Settings → Connectors → Add custom
+Funnel for TLS; a [Cloudflare Tunnel](docs/deployment.md#4b-alternative-cloudflare-tunnel)
+alternative is documented but only partly tested) and add it in Claude under **Settings → Connectors → Add custom
 connector** with the URL `<PUBLIC_BASE_URL>/mcp`. Leave Client ID and Secret blank
 and enter your `MCP_OAUTH_PASSWORD` on the consent page that opens. Details:
 [Authentication](docs/authentication.md#registering-the-connector-in-claude).
